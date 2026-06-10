@@ -226,8 +226,8 @@ class TopkRouting(nn.Module):
         valid_mask = pos[None, None, :] < keep_len
 
         # apply mask
-        topk_score = topk_score * valid_mask
-        topk_index = topk_index * valid_mask
+        topk_score = topk_score * valid_mask.to(topk_score.dtype)
+        topk_index = topk_index.masked_fill(~valid_mask, 0)
         
         #能量补偿
         topk_score = topk_score * max_len* self.energy
@@ -241,7 +241,7 @@ class TopkRouting(nn.Module):
         # if self.flag==0:
         #     print("第4",r_weight[0][0])
 
-        return topk_score, topk_index
+        return topk_score, topk_index, valid_mask
 
 class KVGather(nn.Module):
     def __init__(self, mul_weight='none'):
@@ -448,7 +448,7 @@ class ToppAttention(nn.Module):
         ############ gather q dependent k/v #################
 
         # 路由机制
-        r_weight, r_idx = self.router(q_win, k_win,GA)  # both are (n, p^2, topk) tensors
+        r_weight, r_idx, r_mask = self.router(q_win, k_win,GA)  # all are (n, p^2, topk) tensors
 
         kv_pix_sel = self.kv_gather(r_idx=r_idx, r_weight=r_weight, kv=kv_pix)  # (n, p^2, topk, h_kv*w_kv, c_qk+c_v)
         k_pix_sel, v_pix_sel = kv_pix_sel.split([self.qk_dim, self.dim], dim=-1)
@@ -465,6 +465,10 @@ class ToppAttention(nn.Module):
 
         # param-free multihead attention    —— 注意力计算
         attn_weight = (q_pix * self.scale) @ k_pix_sel  # (n*p^2, m, w^2, c) @ (n*p^2, m, c, topk*h_kv*w_kv) -> (n*p^2, m, w^2, topk*h_kv*w_kv)
+        route_mask = r_mask[..., None].expand(-1, -1, -1, kv_pix_sel.size(-2))
+        route_mask = rearrange(route_mask, 'n p2 k w2 -> (n p2) 1 1 (k w2)')
+        attn_weight = attn_weight.masked_fill(
+            ~route_mask, torch.finfo(attn_weight.dtype).min)
         attn_weight = self.attn_act(attn_weight)
         out = attn_weight @ v_pix_sel  # (n*p^2, m, w^2, topk*h_kv*w_kv) @ (n*p^2, m, topk*h_kv*w_kv, c) -> (n*p^2, m, w^2, c)
         out = rearrange(out, '(n j i) m (h w) c -> n (j h) (i w) (m c)', j=self.n_win, i=self.n_win,
