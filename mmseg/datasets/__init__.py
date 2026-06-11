@@ -44,7 +44,6 @@ from .transforms import (CLAHE, AdjustGamma, Albu, BioMedical3DPad,
 from .voc import PascalVOCDataset
 from .yz_seg import YZSegDataset
 from .camvid import camvid
-from .yz_seg_copy import YZSegDataset_copy
 
 # yapf: enable
 __all__ = [
@@ -66,5 +65,6 @@ __all__ = [
     'MapillaryDataset_v2', 'Albu', 'LEVIRCDDataset',
     'LoadMultipleRSImageFromFile', 'LoadSingleRSImageFromFile',
     'ConcatCDInput', 'BaseCDDataset', 'DSDLSegDataset', 'BDD100KDataset',
-    'NYUDataset', 'HSIDrive20Dataset', 'YZSegDataset', 'GBADataset','MasDataset', 'YZSegDataset_copy'
+    'NYUDataset', 'HSIDrive20Dataset', 'YZSegDataset', 'GBADataset',
+    'MasDataset'
 ]
