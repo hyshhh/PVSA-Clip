@@ -169,12 +169,19 @@ class SimpleTokenizer:
         return text
 
 
-_tokenizer = SimpleTokenizer()
+_tokenizer = None
+
+
+def _get_tokenizer():
+    global _tokenizer
+    if _tokenizer is None:
+        _tokenizer = SimpleTokenizer()
+    return _tokenizer
 
 
 def decode(output_ids: torch.Tensor):
     output_ids = output_ids.cpu().numpy()
-    return _tokenizer.decode(output_ids)
+    return _get_tokenizer().decode(output_ids)
 
 
 def tokenize(texts: Union[str, List[str]],
@@ -196,9 +203,10 @@ def tokenize(texts: Union[str, List[str]],
     if isinstance(texts, str):
         texts = [texts]
 
-    sot_token = _tokenizer.encoder['<start_of_text>']
-    eot_token = _tokenizer.encoder['<end_of_text>']
-    all_tokens = [[sot_token] + _tokenizer.encode(text) + [eot_token]
+    tokenizer = _get_tokenizer()
+    sot_token = tokenizer.encoder['<start_of_text>']
+    eot_token = tokenizer.encoder['<end_of_text>']
+    all_tokens = [[sot_token] + tokenizer.encode(text) + [eot_token]
                   for text in texts]
     result = torch.zeros(len(all_tokens), context_length, dtype=torch.long)
 
