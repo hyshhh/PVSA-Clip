@@ -1,5 +1,7 @@
 # PVSA-Net: Top-P Voting Sparse Attention Network
 
+> 分支备注：`pvsa-v3.0` 是当前主线和仓库默认分支；`main`、`pvsa-v2.0`、`backup/before-topp-mask-20260611` 仅作为历史备份保留。后续开发、训练修复和结果复现请优先基于 `pvsa-v3.0`。
+
 基于 MMSegmentation 的语义分割框架，核心创新是 **Top-P 投票稀疏注意力机制**（ToppAttention）。
 
 ## 核心特性
