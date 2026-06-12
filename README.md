@@ -47,8 +47,7 @@ PVSA-Net/
 │   │   └── decode_heads/            # 解码头（SegformerHead 等）
 │   └── ops/
 │       └── topp_flash/              # CUDA 内核源码
-├── configs-h/                       # 高分辨率配置
-├── configs_l/                       # 低分辨率配置
+├── configs-h/                       # 当前主线配置
 └── tools/                           # 训练/推理工具
 ```
 
@@ -76,15 +75,71 @@ python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py
 bash tools/dist_train.sh configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py ${GPU_NUM}
 ```
 
-显式指定低显存 Top-P Flash 参数：
+服务器上建议显式指定显卡，例如使用第 0 张卡：
 
 ```bash
-python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py
+```
+
+`selfattention` 三种模式对应的训练命令如下。
+
+1. `kv_gather` 模式：原始注意力路径，速度较快，但最占显存。
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+  --cfg-options \
+  model.backbone.use_topp_flash=False \
+  model.backbone.topp_flash_backend=None \
+  model.backbone.topp_flash_block_windows=64 \
+  train_dataloader.batch_size=4
+```
+
+2. `torch_block` 模式：当前默认推荐，显存和速度更均衡。
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
   --cfg-options \
   model.backbone.use_topp_flash=True \
   model.backbone.topp_flash_backend=torch_block \
   model.backbone.topp_flash_block_windows=16 \
   train_dataloader.batch_size=4
+```
+
+3. `cuda` 模式：自定义 CUDA 后端，显存最低，但依赖服务器具备可用的 CUDA 编译环境。
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+  --cfg-options \
+  model.backbone.use_topp_flash=True \
+  model.backbone.topp_flash_backend=cuda \
+  model.backbone.topp_flash_block_windows=16 \
+  train_dataloader.batch_size=4
+```
+
+如果需要同时指定训练轮数、工作目录或继续训练，可以直接追加参数：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+  --work-dir ./work_dirs/VTFormer-s \
+  --resume \
+  --cfg-options \
+  model.backbone.use_topp_flash=True \
+  model.backbone.topp_flash_backend=torch_block \
+  model.backbone.topp_flash_block_windows=16 \
+  train_dataloader.batch_size=4 \
+  train_cfg.max_epochs=200
+```
+
+如果显存仍然吃紧，可以继续减小批大小，或配合混合精度：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+  --amp \
+  --cfg-options \
+  model.backbone.use_topp_flash=True \
+  model.backbone.topp_flash_backend=torch_block \
+  model.backbone.topp_flash_block_windows=8 \
+  train_dataloader.batch_size=2
 ```
 
 ### 训练配置
@@ -96,6 +151,13 @@ python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
 | 学习率 | 6e-4 | AdamW 优化器 |
 | 验证间隔 | 10 epochs | 每 10 个 epoch 验证一次 |
 | 检查点保存间隔 | 10 epochs | 每 10 个 epoch 保存一次 |
+
+其中训练轮数也可以通过命令行覆盖，例如：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+  --cfg-options train_cfg.max_epochs=300
+```
 
 ### 推荐硬件
 
