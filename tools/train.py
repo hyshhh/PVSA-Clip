@@ -3,6 +3,11 @@ import argparse
 import logging
 import os
 import os.path as osp
+import sys
+
+PROJECT_ROOT = osp.abspath(osp.join(osp.dirname(__file__), '..'))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from mmengine.config import Config, DictAction
 from mmengine.logging import print_log

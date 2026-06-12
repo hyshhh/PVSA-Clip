@@ -64,9 +64,6 @@ cd PVSA-v1
 # 安装依赖
 pip install -r requirements/mminstall.txt
 pip install -r requirements/runtime.txt
-
-# 当前 v3 分支已移除 setup.py，训练前请把项目根目录加入 Python 搜索路径
-export PYTHONPATH=$PWD:$PYTHONPATH
 ```
 
 ### 训练
