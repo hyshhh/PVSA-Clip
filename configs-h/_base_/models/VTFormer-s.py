@@ -44,7 +44,8 @@ model = dict(
         #    on the server if you want failures instead of fallback.
         use_topp_flash=True,
         topp_flash_backend='torch_block',
-        topp_flash_block_windows=16
+        topp_flash_block_windows=16,
+        use_pruned_kv_gather=False
     ),
     # decode_head=dict(
     #     type='UPerHead',

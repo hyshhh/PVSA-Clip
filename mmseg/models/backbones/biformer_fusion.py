@@ -21,22 +21,26 @@ class BiFormer_fusion(VTFormer):
                  use_topp_flash=False,
                  topp_flash_backend=None,
                  topp_flash_block_windows=64,
+                 use_pruned_kv_gather=False,
                  **kwargs):
         try:
             super().__init__(
                 use_topp_flash=use_topp_flash,
                 topp_flash_backend=topp_flash_backend,
                 topp_flash_block_windows=topp_flash_block_windows,
+                use_pruned_kv_gather=use_pruned_kv_gather,
                 **kwargs)
         except TypeError as exc:
             flash_args = (
                 'use_topp_flash',
                 'topp_flash_backend',
                 'topp_flash_block_windows',
+                'use_pruned_kv_gather',
             )
             if not any(arg in str(exc) for arg in flash_args):
                 raise
-            if use_topp_flash or topp_flash_backend is not None:
+            if (use_topp_flash or topp_flash_backend is not None
+                    or use_pruned_kv_gather):
                 warnings.warn(
                     '当前 VTFormer 不支持 Top-P Flash 参数，已降级为普通注意力路径。')
             super().__init__(**kwargs)

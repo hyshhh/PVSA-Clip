@@ -308,7 +308,8 @@ class ToppAttention(nn.Module):
                  topk=4, param_attention="qkvo", param_routing=False, diff_routing=False, soft_routing=True,
                  side_dwconv=3,
                  auto_pad=False,W=False, use_topp_flash=False,
-                 topp_flash_block_windows=64, topp_flash_backend=None):
+                 topp_flash_block_windows=64, topp_flash_backend=None,
+                 use_pruned_kv_gather=False):
         super().__init__()
         # local attention setting
         self.dim = dim
@@ -321,6 +322,7 @@ class ToppAttention(nn.Module):
         self.use_topp_flash = use_topp_flash
         self.topp_flash_block_windows = topp_flash_block_windows
         self.topp_flash_backend = topp_flash_backend
+        self.use_pruned_kv_gather = use_pruned_kv_gather
         self._topp_flash_warned = False
 
         ################side_dwconv (i.e. LCE in ShuntedTransformer)###########
@@ -481,6 +483,21 @@ class ToppAttention(nn.Module):
                 'fallback to the torch implementation.')
             self._topp_flash_warned = True
 
+        if self.use_pruned_kv_gather and not ret_attn_mask:
+            out = self._attention_with_pruned_kv_gather(
+                q_pix=q_pix,
+                kv_pix=kv_pix,
+                r_weight=r_weight,
+                r_idx=r_idx,
+                r_mask=r_mask,
+                H=H,
+                W=W)
+            out = out + lepe
+            out = self.wo(out)
+            if self.auto_pad and (pad_r > 0 or pad_b > 0):
+                out = out[:, :H_in, :W_in, :].contiguous()
+            return out
+
         kv_pix_sel = self.kv_gather(r_idx=r_idx, r_weight=r_weight, kv=kv_pix)  # (n, p^2, topk, h_kv*w_kv, c_qk+c_v)
         k_pix_sel, v_pix_sel = kv_pix_sel.split([self.qk_dim, self.dim], dim=-1)
         # kv_pix_sel: (n, p^2, topk, h_kv*w_kv, c_qk)
@@ -518,3 +535,63 @@ class ToppAttention(nn.Module):
             return out, r_weight, r_idx, attn_weight
         else:
             return out
+
+    def _attention_with_pruned_kv_gather(self, q_pix: Tensor, kv_pix: Tensor,
+                                         r_weight: Tensor, r_idx: Tensor,
+                                         r_mask: Tensor, H: int,
+                                         W: int) -> Tensor:
+        n, p2, q_len, _ = q_pix.shape
+        _, _, kv_len, c_kv = kv_pix.shape
+        flat_size = n * p2
+        topk = r_idx.size(-1)
+        head_q = self.qk_dim // self.num_heads
+        head_v = self.dim // self.num_heads
+
+        keep_len = r_mask.sum(dim=-1).reshape(flat_size).long().clamp(min=1)
+        q_flat = rearrange(q_pix, 'n p2 w2 (m c) -> (n p2) m w2 c',
+                           m=self.num_heads)
+        idx_flat = r_idx.reshape(flat_size, topk).long()
+        weight_flat = r_weight.reshape(flat_size, topk).to(kv_pix.dtype)
+        out_flat = q_flat.new_empty(flat_size, self.num_heads, q_len, head_v)
+
+        for keep in torch.unique(keep_len, sorted=True):
+            keep_int = int(keep.item())
+            flat_ids = torch.nonzero(keep_len == keep, as_tuple=False).flatten()
+            if flat_ids.numel() == 0:
+                continue
+
+            batch = flat_ids.numel()
+            n_ids = torch.div(flat_ids, p2, rounding_mode='floor')
+            q = q_flat.index_select(0, flat_ids)
+            kv_batch = kv_pix.index_select(0, n_ids)
+            idx = idx_flat.index_select(0, flat_ids)[:, :keep_int]
+            weight = weight_flat.index_select(0, flat_ids)[:, :keep_int]
+
+            kv_sel = torch.gather(
+                kv_batch,
+                dim=1,
+                index=idx.view(batch, keep_int, 1, 1).expand(
+                    -1, -1, kv_len, c_kv))
+            kv_sel = weight.view(batch, keep_int, 1, 1) * kv_sel
+            k_sel, v_sel = kv_sel.split([self.qk_dim, self.dim], dim=-1)
+
+            k_sel = k_sel.view(batch, keep_int, kv_len, self.num_heads,
+                               head_q).permute(0, 3, 4, 1, 2).reshape(
+                                   batch, self.num_heads, head_q,
+                                   keep_int * kv_len)
+            v_sel = v_sel.view(batch, keep_int, kv_len, self.num_heads,
+                               head_v).permute(0, 3, 1, 2, 4).reshape(
+                                   batch, self.num_heads,
+                                   keep_int * kv_len, head_v)
+            attn_weight = self.attn_act((q * self.scale) @ k_sel)
+            group_out = attn_weight @ v_sel
+            out_flat.index_copy_(0, flat_ids, group_out)
+
+        return rearrange(
+            out_flat,
+            '(n j i) m (h w) c -> n (j h) (i w) (m c)',
+            n=n,
+            j=self.n_win,
+            i=self.n_win,
+            h=H // self.n_win,
+            w=W // self.n_win)

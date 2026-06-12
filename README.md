@@ -89,8 +89,16 @@ CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_
 CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
   --cfg-options \
   model.backbone.use_topp_flash=False \
-  model.backbone.topp_flash_backend=None \
-  model.backbone.topp_flash_block_windows=64 \
+  train_dataloader.batch_size=4
+```
+
+如果要在 `kv_gather` 路径里按 `keep_len` 裁剪无效路由窗口，可以打开实验开关：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+  --cfg-options \
+  model.backbone.use_topp_flash=False \
+  model.backbone.use_pruned_kv_gather=True \
   train_dataloader.batch_size=4
 ```
 
@@ -194,7 +202,8 @@ backbone=dict(
     n_win=7,                         # 窗口数量
     use_topp_flash=True,             # 是否启用分块后端
     topp_flash_backend='torch_block', # 'torch_block' 或 'cuda'
-    topp_flash_block_windows=16      # 分块大小
+    topp_flash_block_windows=16,      # 分块大小
+    use_pruned_kv_gather=False        # 是否在普通 kv_gather 路径裁剪无效路由
 )
 ```
 
