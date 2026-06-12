@@ -58,28 +58,33 @@ PVSA-Net/
 
 ```bash
 # 克隆仓库
-git clone https://github.com/your-username/PVSA-Net.git
-cd PVSA-Net
+git clone -b pvsa-v3.0 https://github.com/hyshhh/PVSA-v1.git
+cd PVSA-v1
 
 # 安装依赖
-pip install -r requirements.txt
-pip install -e .
+pip install -r requirements/mminstall.txt
+pip install -r requirements/runtime.txt
+
+# 当前 v3 分支已移除 setup.py，训练前请把项目根目录加入 Python 搜索路径
+export PYTHONPATH=$PWD:$PYTHONPATH
 ```
 
 ### 训练
 
 ```bash
 # 单卡训练
-python tools/train.py configs-h/_base_/models/VTFormer-s.py
+python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py
 
 # 多卡训练
-bash tools/dist_train.sh configs-h/_base_/models/VTFormer-s.py ${GPU_NUM}
+bash tools/dist_train.sh configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py ${GPU_NUM}
 ```
+
+注意：`configs-h/_base_/models/VTFormer-s.py` 只是模型片段配置，缺少数据集、训练循环、优化器、运行时作用域等内容，不能直接用于训练。直接使用它会导致运行器配置不完整，或触发 `EncoderDecoder` 注册表查找错误。
 
 ### 推理
 
 ```bash
-python tools/test.py configs-h/_base_/models/VTFormer-s.py ${CHECKPOINT_FILE}
+python tools/test.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py ${CHECKPOINT_FILE}
 ```
 
 ## 配置说明
@@ -142,4 +147,4 @@ backbone=dict(
 
 ## 许可证
 
-本项目采用 [Apache 2.0 许可证](LICENSE)。
+当前精简分支未保留独立许可证文件；如需正式发布或复用，请从备份分支恢复许可证文件或补充新的许可证说明。

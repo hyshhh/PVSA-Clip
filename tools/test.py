@@ -6,6 +6,8 @@ import os.path as osp
 from mmengine.config import Config, DictAction
 from mmengine.runner import Runner
 
+from mmseg.utils import register_all_modules
+
 
 # TODO: support fuse_conv_bn, visualization, and format_only
 def parse_args():
@@ -85,6 +87,9 @@ def main():
 
     # load config
     cfg = Config.fromfile(args.config)
+    if cfg.get('default_scope', None) is None:
+        cfg.default_scope = 'mmseg'
+    register_all_modules(init_default_scope=True)
     cfg.launcher = args.launcher
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)

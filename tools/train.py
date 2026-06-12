@@ -57,6 +57,8 @@ def main():
 
     # load config
     cfg = Config.fromfile(args.config)
+    if cfg.get('default_scope', None) is None:
+        cfg.default_scope = 'mmseg'
     register_all_modules(init_default_scope=True)
     cfg.launcher = args.launcher
     if args.cfg_options is not None:
