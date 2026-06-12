@@ -18,8 +18,8 @@
 
 | 后端 | 配置 | 显存 | 速度 | 适用场景 |
 |------|------|------|------|----------|
-| **kv_gather** | `use_topp_flash=False` | 高 | 快（小 topk） | 默认模式，显存充足 |
-| **torch_block** | `use_topp_flash=True, backend='torch_block'` | 中 | 中 | 显存受限 |
+| **kv_gather** | `use_topp_flash=False` | 高 | 快（小 topk） | 显存充足时使用 |
+| **torch_block** | `use_topp_flash=True, backend='torch_block'` | 中 | 中 | 默认推荐，显存受限 |
 | **cuda** | `use_topp_flash=True, backend='cuda'` | 低 | 慢 | 极致显存优化 |
 
 ### Top-P 参数配置
@@ -76,14 +76,15 @@ python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py
 bash tools/dist_train.sh configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py ${GPU_NUM}
 ```
 
-显式指定 Top-P Flash 参数：
+显式指定低显存 Top-P Flash 参数：
 
 ```bash
 python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
   --cfg-options \
-  model.backbone.use_topp_flash=False \
-  model.backbone.topp_flash_backend=None \
-  model.backbone.topp_flash_block_windows=64
+  model.backbone.use_topp_flash=True \
+  model.backbone.topp_flash_backend=torch_block \
+  model.backbone.topp_flash_block_windows=16 \
+  train_dataloader.batch_size=4
 ```
 
 注意：`configs-h/_base_/models/VTFormer-s.py` 只是模型片段配置，缺少数据集、训练循环、优化器、运行时作用域等内容，不能直接用于训练。直接使用它会导致运行器配置不完整，或触发 `EncoderDecoder` 注册表查找错误。
@@ -105,9 +106,9 @@ backbone=dict(
     depth=[3, 4, 6, 3],
     topks=[1, 4, 16, -2],           # 每个 stage 的 topk 设置
     n_win=7,                         # 窗口数量
-    use_topp_flash=False,            # 是否启用分块后端
-    topp_flash_backend=None,         # 'torch_block' 或 'cuda'
-    topp_flash_block_windows=64      # 分块大小
+    use_topp_flash=True,             # 是否启用分块后端
+    topp_flash_backend='torch_block', # 'torch_block' 或 'cuda'
+    topp_flash_block_windows=16      # 分块大小
 )
 ```
 
