@@ -76,6 +76,16 @@ python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py
 bash tools/dist_train.sh configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py ${GPU_NUM}
 ```
 
+显式指定 Top-P Flash 参数：
+
+```bash
+python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+  --cfg-options \
+  model.backbone.use_topp_flash=False \
+  model.backbone.topp_flash_backend=None \
+  model.backbone.topp_flash_block_windows=64
+```
+
 注意：`configs-h/_base_/models/VTFormer-s.py` 只是模型片段配置，缺少数据集、训练循环、优化器、运行时作用域等内容，不能直接用于训练。直接使用它会导致运行器配置不完整，或触发 `EncoderDecoder` 注册表查找错误。
 
 ### 推理
