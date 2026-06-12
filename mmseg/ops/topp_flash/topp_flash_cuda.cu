@@ -24,87 +24,102 @@ namespace
                                             int64_t n_win,
                                             int64_t height,
                                             int64_t width,
-                                            int64_t total)
+                                            int64_t coarse_total)
   {
-    int64_t linear = blockIdx.x * blockDim.x + threadIdx.x; // 得到当前的线程（是block中的第几个线程，是第几个block，每个block中有多少线程）
-    if (linear >= total)
+    // One block owns one coarse routing query window: coarse = batch * p2 + p.
+    const int64_t coarse = blockIdx.x;
+    if (coarse >= coarse_total)
     {
       return;
     }
 
-    int64_t c_out = linear % dim;
-    int64_t q_pos = (linear / dim) % q_len;
-    int64_t p = (linear / (dim * q_len)) % p2;
-    int64_t batch = linear / (dim * q_len * p2);
+    const int64_t batch = coarse / p2;
+    const int64_t p = coarse % p2;
+    const int64_t head_v = dim / num_heads;
+    const int64_t head_q = qk_dim / num_heads;
+    const int64_t route_base = coarse * topk;
+    const int64_t outputs_per_window = q_len * dim;
 
-    int64_t head_v = dim / num_heads;
-    int64_t head_q = qk_dim / num_heads;
-    int64_t head = c_out / head_v;
-    int64_t head_c_out = c_out % head_v;
-
-    int64_t q_base = ((batch * p2 + p) * q_len + q_pos) * qk_dim;
-    int64_t route_base = (batch * p2 + p) * topk;
-    int64_t valid_topk = keep_len[batch * p2 + p];
-    if (valid_topk <= 0)
-    {
-      out[linear] = 0.0f;
-      return;
-    }
+    int64_t valid_topk = keep_len[coarse];
     if (valid_topk > topk)
     {
       valid_topk = topk;
     }
 
-    float max_score = -CUDART_INF_F;
-
-    for (int64_t tk = 0; tk < valid_topk; ++tk)
+    for (int64_t local = threadIdx.x; local < outputs_per_window;
+         local += blockDim.x)
     {
-      int64_t kv_window = r_idx[route_base + tk];
-      float route_weight = r_weight[route_base + tk];
-      for (int64_t kv_pos = 0; kv_pos < kv_len; ++kv_pos)
+      const int64_t c_out = local % dim;
+      const int64_t q_pos = local / dim;
+      const int64_t head = c_out / head_v;
+      const int64_t head_c_out = c_out % head_v;
+      const int64_t linear = coarse * outputs_per_window + local;
+
+      if (valid_topk <= 0)
       {
-        int64_t k_base = ((batch * p2 + kv_window) * kv_len + kv_pos) *
-                         (qk_dim + dim);
-        float score = 0.0f;
-        for (int64_t d = 0; d < head_q; ++d)
-        {
-          float q_val = q_pix[q_base + head * head_q + d];
-          float k_val = kv_pix[k_base + head * head_q + d] * route_weight;
-          score += q_val * k_val;
-        }
-        score *= scale;
-        max_score = fmaxf(max_score, score);
+        out[linear] = 0.0f;
+        continue;
       }
-    }
 
-    float denom = 0.0f;
-    float value = 0.0f;
-    for (int64_t tk = 0; tk < valid_topk; ++tk)
-    {
-      int64_t kv_window = r_idx[route_base + tk];
-      float route_weight = r_weight[route_base + tk];
-      for (int64_t kv_pos = 0; kv_pos < kv_len; ++kv_pos)
+      const int64_t q_base = (coarse * q_len + q_pos) * qk_dim;
+      float max_score = -CUDART_INF_F;
+
+      for (int64_t tk = 0; tk < valid_topk; ++tk)
       {
-        int64_t kv_base = ((batch * p2 + kv_window) * kv_len + kv_pos) *
-                          (qk_dim + dim);
-        float score = 0.0f;
-        for (int64_t d = 0; d < head_q; ++d)
+        const int64_t kv_window = r_idx[route_base + tk];
+        const float route_weight = r_weight[route_base + tk];
+
+        for (int64_t kv_pos = 0; kv_pos < kv_len; ++kv_pos)
         {
-          float q_val = q_pix[q_base + head * head_q + d];
-          float k_val = kv_pix[kv_base + head * head_q + d] * route_weight;
-          score += q_val * k_val;
+          const int64_t k_base =
+              ((batch * p2 + kv_window) * kv_len + kv_pos) * (qk_dim + dim);
+          float score = 0.0f;
+
+          for (int64_t d = 0; d < head_q; ++d)
+          {
+            const float q_val = q_pix[q_base + head * head_q + d];
+            const float k_val = kv_pix[k_base + head * head_q + d] * route_weight;
+            score += q_val * k_val;
+          }
+
+          score *= scale;
+          max_score = fmaxf(max_score, score);
         }
-        score *= scale;
-        float prob_num = expf(score - max_score);
-        denom += prob_num;
-
-        int64_t v_offset = qk_dim + head * head_v + head_c_out;
-        float v_val = kv_pix[kv_base + v_offset] * route_weight;
-        value += prob_num * v_val;
       }
-    }
 
-    out[linear] = value / fmaxf(denom, 1.0e-20f);
+      float denom = 0.0f;
+      float value = 0.0f;
+
+      for (int64_t tk = 0; tk < valid_topk; ++tk)
+      {
+        const int64_t kv_window = r_idx[route_base + tk];
+        const float route_weight = r_weight[route_base + tk];
+
+        for (int64_t kv_pos = 0; kv_pos < kv_len; ++kv_pos)
+        {
+          const int64_t kv_base =
+              ((batch * p2 + kv_window) * kv_len + kv_pos) * (qk_dim + dim);
+          float score = 0.0f;
+
+          for (int64_t d = 0; d < head_q; ++d)
+          {
+            const float q_val = q_pix[q_base + head * head_q + d];
+            const float k_val = kv_pix[kv_base + head * head_q + d] * route_weight;
+            score += q_val * k_val;
+          }
+
+          score *= scale;
+          const float prob_num = expf(score - max_score);
+          denom += prob_num;
+
+          const int64_t v_offset = qk_dim + head * head_v + head_c_out;
+          const float v_val = kv_pix[kv_base + v_offset] * route_weight;
+          value += prob_num * v_val;
+        }
+      }
+
+      out[linear] = value / fmaxf(denom, 1.0e-20f);
+    }
   }
 
   __global__ void unflatten_windows_kernel(const float *__restrict__ flat,
@@ -167,10 +182,9 @@ torch::Tensor topp_flash_forward_cuda(torch::Tensor q_pix,
   auto out = torch::empty({n, height, width, dim}, q_pix.options());
 
   const int threads = 256;
-  const int64_t flat_total = n * p2 * q_len * dim;
-  const int blocks = static_cast<int>((flat_total + threads - 1) / threads);
+  const int64_t coarse_total = n * p2;
 
-  topp_flash_forward_kernel<<<blocks, threads, 0,
+  topp_flash_forward_kernel<<<static_cast<int>(coarse_total), threads, 0,
                               at::cuda::getCurrentCUDAStream()>>>(
       q_pix.data_ptr<float>(),
       kv_pix.data_ptr<float>(),
@@ -190,7 +204,7 @@ torch::Tensor topp_flash_forward_cuda(torch::Tensor q_pix,
       n_win,
       height,
       width,
-      flat_total);
+      coarse_total);
 
   const int64_t out_total = n * height * width * dim;
   const int out_blocks = static_cast<int>((out_total + threads - 1) / threads);
