@@ -12,6 +12,13 @@ constexpr int WARP_SIZE = 32;
 constexpr int TILE_KV = 16;
 
 // ============================================================================
+// 类型转换辅助函数
+// ============================================================================
+__device__ __forceinline__ float to_float(float x) { return x; }
+__device__ __forceinline__ float to_float(__half x) { return __half2float(x); }
+__device__ __forceinline__ float to_float(__nv_bfloat16 x) { return __bfloat162float(x); }
+
+// ============================================================================
 // Warp reduce sum
 // ============================================================================
 __device__ __forceinline__ float warp_reduce_sum(float val) {
@@ -82,7 +89,7 @@ __global__ void topp_flash_kernel(
   // 协作加载 Q
   const int64_t q_base = ((batch * p2 + p) * q_len + q_pos) * qk_dim + head * head_q;
   for (int d = tid; d < head_q; d += BLOCK_SIZE) {
-    s_q[d] = static_cast<float>(q_pix[q_base + d]);
+    s_q[d] = to_float(q_pix[q_base + d]);
   }
   __syncthreads();
   
@@ -117,13 +124,13 @@ __global__ void topp_flash_kernel(
       const int64_t kv_pos = global_kv % kv_len;
       
       const int64_t kv_window = r_idx[route_base + tk];
-      const float route_weight = static_cast<float>(r_weight[route_base + tk]);
+      const float route_weight = to_float(r_weight[route_base + tk]);
       const int64_t kv_base = ((batch * p2 + kv_window) * kv_len + kv_pos) * (qk_dim + dim);
       
       // 协作计算 Q*K
       float partial_score = 0.0f;
       for (int64_t d = tid; d < head_q; d += BLOCK_SIZE) {
-        float k_val = static_cast<float>(kv_pix[kv_base + head * head_q + d]) * route_weight;
+        float k_val = to_float(kv_pix[kv_base + head * head_q + d]) * route_weight;
         partial_score += s_q[d] * k_val;
       }
       
@@ -140,7 +147,7 @@ __global__ void topp_flash_kernel(
         int64_t v_ch = tid + i * BLOCK_SIZE;
         float v_val = 0.0f;
         if (v_ch < head_v) {
-          v_val = static_cast<float>(kv_pix[kv_base + qk_dim + head * head_v + v_ch]) * route_weight;
+          v_val = to_float(kv_pix[kv_base + qk_dim + head * head_v + v_ch]) * route_weight;
         }
         o_acc[i] = o_acc[i] * exp_prev + exp_new * v_val;
       }
