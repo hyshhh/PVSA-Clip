@@ -369,7 +369,6 @@ class VTFormer(nn.Module):
                  topp_flash_block_windows=64,
                  topp_flash_backend=None,
                  use_pruned_kv_gather=False,
-                 topp_route_flags=None,
                  topp_route_configs=None,
                  attn_vis_config=None):
 
@@ -379,7 +378,6 @@ class VTFormer(nn.Module):
         self.topp_flash_block_windows = topp_flash_block_windows
         self.topp_flash_backend = topp_flash_backend
         self.use_pruned_kv_gather = use_pruned_kv_gather
-        self.topp_route_flags = topp_route_flags
         self.topp_route_configs = topp_route_configs
         self.attn_vis_config = attn_vis_config
         self.num_classes = num_classes
@@ -479,12 +477,7 @@ class VTFormer(nn.Module):
         nheads = [dim // head_dim for dim in qk_dims]
         dp_rates = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depth))]
         cur = 0
-        if self.topp_route_flags is None:
-            raise ValueError(
-                'topp_route_flags must be provided by config and contain '
-                '4 stage flags.')
-        topks = self.topp_route_flags
-        assert len(topks) == 4, 'topp_route_flags must contain 4 stage flags.'
+        assert len(topks) == 4, 'topks must contain 4 stage flags.'
         for i in range(4):
             stage = nn.Sequential(
                 *[Block(dim=embed_dim[i], drop_path=dp_rates[cur + j],

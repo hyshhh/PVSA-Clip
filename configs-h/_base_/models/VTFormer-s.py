@@ -20,13 +20,10 @@ model = dict(
         n_win=7,
         kv_downsample_mode='identity',
         kv_per_wins=[-1, -1, -1, -1],
-        # 这里的 topks 保留为结构开关；VTFormer 当前使用 topp_route_flags
-        # 控制四层 Top-P 路由标志位，避免在代码里硬编码。
-        topks=[1, 4, 16, -2],
         # 四层网络的 Top-P 路由标志位。每个标志位会到
         # topp_route_configs 中查出真实 maxk、P 阈值、温度和能量补偿。
-        # 默认值等价于重构前 bi_topp_vote.py 中硬编码的 [16, 12, 8, 6]。
-        topp_route_flags=[16, 12, 8, 6],
+        # 当前默认值等价于重构前 bi_topp_vote.py 中硬编码的 [16, 12, 8, 6]。
+        topks=[16, 12, 8, 6],
         # Top-P v3 路由参数表：
         # maxk 表示 torch.topk 的最大候选窗口数；
         # p 表示累计概率裁剪阈值；

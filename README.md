@@ -132,64 +132,6 @@ CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_
   train_dataloader.batch_size=4
 ```
 
-开启特征图保存时建议只用于调试或可视化，训练计时请保持关闭：
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
-  --cfg-options \
-  model.backbone.feature_vis_config.enabled=True \
-  model.backbone.feature_vis_config.save_dir=cam/features_imgs4 \
-  model.backbone.feature_vis_config.out_size=512 \
-  model.backbone.feature_vis_config.channel_reduce=mean \
-  train_dataloader.batch_size=1
-```
-
-开启注意力图保存时，可以配置参考图、保存路径、查询窗口和是否只保存一次：
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
-  --cfg-options \
-  model.backbone.attn_vis_config.enabled=True \
-  model.backbone.attn_vis_config.save_topk=True \
-  model.backbone.attn_vis_config.save_heatmap=False \
-  model.backbone.attn_vis_config.query_index=32 \
-  model.backbone.attn_vis_config.trigger_maxk=25 \
-  model.backbone.attn_vis_config.image_path=/path/to/source.jpg \
-  model.backbone.attn_vis_config.topk_save_path=cam/attn/attn_stage_topk.png \
-  model.backbone.attn_vis_config.once=True \
-  train_dataloader.batch_size=1
-```
-
-如果需要同时指定训练轮数、工作目录或继续训练，可以直接追加参数：
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
-  --work-dir ./work_dirs/VTFormer-s \
-  --resume \
-  --cfg-options \
-  model.backbone.use_topp_flash=True \
-  model.backbone.topp_flash_backend=torch_block \
-  model.backbone.topp_flash_block_windows=16 \
-  model.backbone.feature_vis_config.enabled=False \
-  model.backbone.attn_vis_config.enabled=False \
-  train_dataloader.batch_size=4 \
-  train_cfg.max_epochs=200
-```
-
-如果显存仍然吃紧，可以继续减小批大小，或配合混合精度：
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
-  --amp \
-  --cfg-options \
-  model.backbone.use_topp_flash=True \
-  model.backbone.topp_flash_backend=torch_block \
-  model.backbone.topp_flash_block_windows=8 \
-  model.backbone.feature_vis_config.enabled=False \
-  model.backbone.attn_vis_config.enabled=False \
-  train_dataloader.batch_size=2
-```
-
 ### 训练配置
 
 | 配置项 | 值 | 说明 |
@@ -238,8 +180,7 @@ backbone=dict(
     type='BiFormer_fusion',
     embed_dim=[64, 128, 256, 512],
     depth=[3, 4, 6, 3],
-    topks=[1, 4, 16, -2],           # 每个 stage 的 topk 设置
-    topp_route_flags=[16, 12, 8, 6], # 四层 Top-P 路由标志位
+    topks=[16, 12, 8, 6],           # 四层 Top-P 路由标志位
     topp_route_configs={             # 标志位到真实路由参数的映射
         16: dict(maxk=25, p=0.2, temperature=0.0175, energy=4.0),
         12: dict(maxk=18, p=0.4, temperature=0.025, energy=1.5),
@@ -273,7 +214,7 @@ backbone=dict(
 - `topk > 0`：使用 ToppAttention（Top-P 稀疏注意力）
 - `topk == -1`：使用标准全局注意力
 - `topk == -2`：使用带局部位置编码的全局注意力（AttentionLePE）
-- `topp_route_flags`：当前四层 Top-P 注意力实际使用的路由标志位，本配置文件显式设置为 `[16, 12, 8, 6]`，与重构前硬编码一致。
+- `topks`：当前四层 Top-P 注意力实际使用的路由标志位，本配置文件显式设置为 `[16, 12, 8, 6]`，与重构前硬编码一致。
 - `topp_route_configs`：每个标志位对应真实 `maxk`、累计概率阈值 `p`、温度 `temperature` 和能量补偿 `energy`，现在必须由配置文件提供。
 - `feature_vis_config.enabled`：是否保存特征图，打开后会触发处理器同步和磁盘写入，不建议用于正式测速。
 - `attn_vis_config.enabled`：是否保存注意力图，`trigger_maxk` 可限制只在指定真实 `maxk` 的层保存。
