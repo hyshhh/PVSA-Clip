@@ -12,6 +12,9 @@ _base_ = [
 # --------------------------
 # 数据预处理配置
 # --------------------------
+# 注意: 此 crop_size 仅作为 data_preprocessor 的最小 padding 尺寸,
+# 实际模型输入尺寸由 cityscapes.py 中的 RandomCrop crop_size=(512,512) 决定.
+# 当 pipeline 输出 (512,512) > 此 size (256,256) 时, padding 为 0, 此值不生效.
 crop_size = (256, 256)
 # crop_size = (224, 224)
 data_preprocessor = dict(
@@ -21,7 +24,7 @@ data_preprocessor = dict(
     bgr_to_rgb=True,
     pad_val=0,
     seg_pad_val=255,
-    size=crop_size
+    size=crop_size  # 仅做 padding 补齐, 不做 resize; 实际输入尺寸取决于 pipeline 的 RandomCrop
 )
 # --------------------------
 # 训练配置

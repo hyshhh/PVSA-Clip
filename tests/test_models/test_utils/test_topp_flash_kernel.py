@@ -78,6 +78,48 @@ def test_topp_flash_cuda_forward_matches_reference_if_available(monkeypatch):
     torch.testing.assert_close(out_flash, out_ref, rtol=1e-4, atol=1e-4)
 
 
+def test_topp_flash_cuda_forward_fp16_if_available(monkeypatch):
+    if not torch.cuda.is_available():
+        pytest.skip('CUDA is unavailable.')
+    if not torch.cuda.is_bf16_supported():
+        pytest.skip('BF16 is not supported on this device.')
+    if shutil.which('ninja') is None:
+        pytest.skip('Ninja is unavailable.')
+    kernel = _load_kernel_module()
+    if not kernel.is_topp_flash_available('cuda'):
+        pytest.skip('PVSA CUDA extension build environment is unavailable.')
+    monkeypatch.setenv('PVSA_TOPP_FLASH_STRICT_CUDA', '1')
+
+    inputs = _make_inputs(dtype=torch.float16, device='cuda')
+    with torch.no_grad():
+        out_ref = kernel.topp_attention_reference(**inputs)
+        out_flash = kernel.topp_flash_attention(
+            **inputs, block_windows=3, backend='cuda')
+    # 半精度容差更大
+    torch.testing.assert_close(out_flash, out_ref, rtol=1e-2, atol=1e-2)
+
+
+def test_topp_flash_cuda_forward_bf16_if_available(monkeypatch):
+    if not torch.cuda.is_available():
+        pytest.skip('CUDA is unavailable.')
+    if not torch.cuda.is_bf16_supported():
+        pytest.skip('BF16 is not supported on this device.')
+    if shutil.which('ninja') is None:
+        pytest.skip('Ninja is unavailable.')
+    kernel = _load_kernel_module()
+    if not kernel.is_topp_flash_available('cuda'):
+        pytest.skip('PVSA CUDA extension build environment is unavailable.')
+    monkeypatch.setenv('PVSA_TOPP_FLASH_STRICT_CUDA', '1')
+
+    inputs = _make_inputs(dtype=torch.bfloat16, device='cuda')
+    with torch.no_grad():
+        out_ref = kernel.topp_attention_reference(**inputs)
+        out_flash = kernel.topp_flash_attention(
+            **inputs, block_windows=3, backend='cuda')
+    # 半精度容差更大
+    torch.testing.assert_close(out_flash, out_ref, rtol=1e-2, atol=1e-2)
+
+
 def test_topp_flash_backward_matches_reference():
     kernel = _load_kernel_module()
     inputs = _make_inputs()

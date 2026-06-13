@@ -1,6 +1,7 @@
 # dataset settings
 dataset_type = 'CityscapesDataset'
 data_root = '/media/ddc/新加卷/hys/ljf/mmsegmentation-main/mmsegmentation-main/data/cityscapes_cleaned/'
+# 此 crop_size 决定了实际输入模型的尺寸 (RandomCrop 裁剪后直接送入模型)
 crop_size = (512, 512)
 train_pipeline = [
     dict(type='LoadImageFromFile'),

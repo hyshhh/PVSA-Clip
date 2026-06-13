@@ -6,6 +6,7 @@ import time
 import numpy as np
 import torch
 from mmengine import Config
+from mmengine.config import DictAction
 from mmengine.fileio import dump
 from mmengine.model.utils import revert_sync_batchnorm
 from mmengine.registry import init_default_scope
@@ -26,6 +27,16 @@ def parse_args():
         help=('if specified, the results will be dumped '
               'into the directory as json'))
     parser.add_argument('--repeat-times', type=int, default=1)
+    parser.add_argument(
+        '--cfg-options',
+        nargs='+',
+        action=DictAction,
+        help='override some settings in the used config, the key-value pair '
+        'in xxx=yyy format will be merged into config file. If the value to '
+        'be overwritten is a list, it should be like key="[a,b]" or key=a,b '
+        'It also allows nested list/tuple values, e.g. key="[(a,b),(c,d)]" '
+        'Note that the quotation marks are necessary and that no white space '
+        'is allowed.')
     args = parser.parse_args()
     return args
 
@@ -33,6 +44,8 @@ def parse_args():
 def main():
     args = parse_args()
     cfg = Config.fromfile(args.config)
+    if args.cfg_options is not None:
+        cfg.merge_from_dict(args.cfg_options)
 
     init_default_scope(cfg.get('default_scope', 'mmseg'))
 

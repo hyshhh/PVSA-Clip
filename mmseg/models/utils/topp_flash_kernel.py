@@ -352,9 +352,10 @@ def _can_run_cuda_forward(q_pix: Tensor, kv_pix: Tensor, r_weight: Tensor,
     tensors = (q_pix, kv_pix, r_weight, r_idx, r_mask)
     if not all(tensor.is_cuda for tensor in tensors):
         return False
-    if q_pix.dtype != torch.float32:
+    # 支持 float32, float16, bfloat16
+    if q_pix.dtype not in (torch.float32, torch.float16, torch.bfloat16):
         return False
-    if kv_pix.dtype != torch.float32 or r_weight.dtype != torch.float32:
+    if kv_pix.dtype != q_pix.dtype or r_weight.dtype != q_pix.dtype:
         return False
     return r_idx.dtype == torch.long and r_mask.dtype == torch.bool
 
