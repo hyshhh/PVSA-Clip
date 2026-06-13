@@ -22,6 +22,7 @@ class BiFormer_fusion(VTFormer):
                  topp_flash_backend=None,
                  topp_flash_block_windows=64,
                  use_pruned_kv_gather=False,
+                 feature_vis_config=None,
                  **kwargs):
         try:
             super().__init__(
@@ -66,6 +67,14 @@ class BiFormer_fusion(VTFormer):
         # self.pool8=nn.AvgPool2d(kernel_size=8, stride=8)
         # self.norm = nn.LayerNorm(normalized_shape=1)  # 根据实际维度调整
         self.sigmoid = nn.Sigmoid()
+        default_feature_vis_config = dict(
+            enabled=False,
+            save_dir='cam/features_imgs4',
+            out_size=512,
+            channel_reduce='mean')
+        if feature_vis_config:
+            default_feature_vis_config.update(feature_vis_config)
+        self.feature_vis_config = default_feature_vis_config
         
 
 
@@ -90,20 +99,20 @@ class BiFormer_fusion(VTFormer):
         out = []
         cnn_encoder_out = x
 
-        # 保存图片的目录
-        flag=1
-        save_dir = 'cam/features_imgs4'
-        os.makedirs(save_dir, exist_ok=True)
+        feature_vis_enabled = self.feature_vis_config.get('enabled', False)
+        save_dir = self.feature_vis_config.get('save_dir', 'cam/features_imgs4')
+        if feature_vis_enabled:
+            os.makedirs(save_dir, exist_ok=True)
         channel1=[]
         channel2=[]
         channel3=[]
         for i in range(4):
-            if flag==1:
+            if feature_vis_enabled:
                 self._save_feature_channel_as_image(x, f'{save_dir}/stage{i}_xinput.png')
             cnn_encoder_out = self.downsample_layers2[i](cnn_encoder_out)
             x = self.downsample_layers[i](x)
             x = self.stages[i](x)
-            if flag==1:
+            if feature_vis_enabled:
                 self._save_feature_channel_as_image(x, f'{save_dir}/stage{i}_before_FAM_x.png')
                 self._save_feature_channel_as_image(cnn_encoder_out, f'{save_dir}/stage{i}_before_FAM_cnn.png')
 
@@ -111,7 +120,7 @@ class BiFormer_fusion(VTFormer):
             channel1.append(x)
             channel2.append(cnn_encoder_out)
 
-            if flag==1:
+            if feature_vis_enabled:
                 self._save_feature_channel_as_image(x, f'{save_dir}/stage{i}_after_FAM_x.png')
                 self._save_feature_channel_as_image(cnn_encoder_out, f'{save_dir}/stage{i}_after_FAM_cnn.png')
 
@@ -122,13 +131,13 @@ class BiFormer_fusion(VTFormer):
             C2=self.conv12[i](channel1[i + 1])
             bn_channel1 = self.sigmoid(self.bn[i](C1))
             bn_channel2 = self.sigmoid(self.bn[i](C2))
-            if flag==1 and i==0:
+            if feature_vis_enabled and i==0:
                 self._save_feature_channel_as_image(self.upsample2(bn_channel1), f'{save_dir}/mask1.png')
                 self._save_feature_channel_as_image(self.upsample2(bn_channel2), f'{save_dir}/mask2.png')
             channel3[i] = channel3[i] + self.upsample2(bn_channel1) * channel3[i] + self.upsample2(bn_channel2) * channel3[i]
         
         for i in range(4):
-            if flag==1:
+            if feature_vis_enabled:
                 self._save_feature_channel_as_image(channel3[i], f'{save_dir}/stage{i}_after_channel.png')
             out.append(self.extra_norms[i](channel3[i]))
         return tuple(out)
@@ -139,8 +148,8 @@ class BiFormer_fusion(VTFormer):
         self,
         feature_map,
         file_path,
-        out_size=512,        # (H, W)，如 (512, 512)
-        channel_reduce="mean" # "mean" | "max"
+        out_size=None,        # (H, W)，如 (512, 512)
+        channel_reduce=None # "mean" | "max"
     ):
         """
         feature_map: [B, C, H, W] or [C, H, W]
@@ -148,6 +157,11 @@ class BiFormer_fusion(VTFormer):
         out_size: 上采样到的空间尺寸 (H, W)，None 表示不变
         channel_reduce: 通道聚合方式
         """
+
+        if out_size is None:
+            out_size = self.feature_vis_config.get('out_size', 512)
+        if channel_reduce is None:
+            channel_reduce = self.feature_vis_config.get('channel_reduce', 'mean')
 
         # ---------- 1. 维度统一 ----------
         if feature_map.dim() == 4:

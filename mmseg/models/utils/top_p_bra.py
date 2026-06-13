@@ -1,4 +1,5 @@
-from typing import Tuple
+import os
+from typing import Dict, Optional, Tuple
 import warnings
 
 import cv2
@@ -11,6 +12,24 @@ from einops import rearrange
 from torch import Tensor
 
 from .topp_flash_kernel import is_topp_flash_available, topp_flash_attention
+
+
+DEFAULT_ATTN_VIS_CONFIG = dict(enabled=False)
+
+
+def _normalize_route_configs(route_configs: Optional[Dict]) -> Dict[int, Dict]:
+    if not route_configs:
+        raise ValueError(
+            'topp_route_configs must be provided by config when using '
+            'ToppAttention.')
+    return {int(key): dict(value) for key, value in route_configs.items()}
+
+
+def _normalize_attn_vis_config(attn_vis_config: Optional[Dict]) -> Dict:
+    config = DEFAULT_ATTN_VIS_CONFIG.copy()
+    if attn_vis_config:
+        config.update(attn_vis_config)
+    return config
 
 def overlay_topk_attn_block_no_heatmap(img, topk_score, topk_index, total_patches, dark_ratio=0.3):
     """
@@ -110,9 +129,11 @@ class TopkRouting(nn.Module):
         soft_routing: bool, wether make output value multiplied by routing weights
     """
 
-    def __init__(self,qk_dim,topk=4, qk_scale=None, param_routing=False, diff_routing=False,W=False):
+    def __init__(self, qk_dim, topk=4, qk_scale=None, param_routing=False,
+                 diff_routing=False, W=False, route_configs=None,
+                 attn_vis_config=None):
         super().__init__()
-        self.topk = topk
+        self.route_flag = topk
         self.qk_dim = qk_dim
         self.scale = qk_scale or qk_dim ** -0.5
         self.diff_routing = diff_routing
@@ -122,28 +143,19 @@ class TopkRouting(nn.Module):
         # routing activate
         self.routing_act = nn.Softmax(dim=-1)
         self.flag=0
-#top—p-v2\3_2025_12_25,关于top-p和温度的调整，v3.0添加能量补偿因子
-        if self.topk==16:
-            self.topk=25
-            self.P= 0.2  
-            self.Temperature=0.0175
-            self.energy=4
-        elif self.topk==12:
-            self.topk=18
-            self.P = 0.4  
-            self.Temperature=0.025
-            self.energy=1.5
-        elif self.topk==8:
-            self.topk=36
-            self.P = 0.6
-            self.Temperature=0.05  
-            self.energy=0.75
-        elif self.topk==6:
-            self.P = 0.8
-            self.topk=49
-            self.Temperature=0.15
-            self.energy=0.4
-        
+        route_configs = _normalize_route_configs(route_configs)
+        if self.route_flag not in route_configs:
+            raise KeyError(
+                f'topk flag {self.route_flag} is not configured in '
+                'topp_route_configs.')
+        route_config = route_configs[self.route_flag]
+        self.topk = int(route_config['maxk'])
+        self.P = float(route_config['p'])
+        self.Temperature = float(route_config['temperature'])
+        self.energy = float(route_config['energy'])
+        self.attn_vis_config = _normalize_attn_vis_config(attn_vis_config)
+        self._attn_vis_saved = False
+
         self.silu=True
         #能量补偿因子
         
@@ -165,41 +177,13 @@ class TopkRouting(nn.Module):
             attn = GA
             print("HH",attn[0][1])
             print(2)
-        attn[0][32] = -torch.tensor([
-            0.127, 0.120, 0.104, 0.125, 0.112, 0.126, 0.108, 0.125,
-            0.131, 0.110, 0.107, 0.109, 0.100, 0.102, 0.123, 0.090,
-            0.125, 0.096, 0.094, 0.082, 0.096, 0.095, 0.042, 0.092,
-            0.116, 0.078, 0.104, 0.005, -0.098, -0.088, -0.102, -0.075,
-            -0.045, -0.106, -0.088, -0.117, -0.091, -0.088, -0.081, -0.093,
-            -0.120, -0.122, -0.097, -0.122, -0.128, -0.124, -0.122, -0.124,
-            -0.128
-            ], device='cuda:0')
         # 3️⃣ Top-k selection (no sorting for speed)
         topk_score, topk_index = torch.topk(
             attn, k=self.topk, dim=-1, sorted=True
         )  # (n, p2, k)
-        if self.flag==0 and self.topk==9:
-            print("第0",attn[0][2])
-            
-            overlay = overlay_attn_block("/media/ddc/新加卷/hys/ljf/mmsegmentation-main/mmsegmentation-main/data/gqyyz/image/test1/2024_08_19_195748172_cropped_1.jpg", attn[0][32])
-            cv2.imwrite("/media/ddc/新加卷/hys/ljf/mmsegmentation-main/mmsegmentation-main/cam/attn/attn_stage.png", overlay)
 
         topk_score = torch.softmax(topk_score /self.Temperature, dim=-1)
-        if self.flag==0 and self.topk==25:
-            img_path = "/media/ddc/新加卷/hys/ljf/mmsegmentation-main/mmsegmentation-main/data/gqyyz/image/test1/2024_08_19_195748172_cropped_1.jpg"
-            
-            total_patches = attn.shape[-1] 
-            overlay_topk = overlay_topk_attn_block_no_heatmap(
-                img=img_path, 
-                topk_score=topk_score[0][32], 
-                topk_index=topk_index[0][32], 
-                total_patches=total_patches,
-                dark_ratio=0.3 # 背景变暗比例，0.3表示背景保留30%亮度，你可以自己调！
-            )
-            save_path = "/media/ddc/新加卷/hys/ljf/mmsegmentation-main/mmsegmentation-main/cam/attn/attn_stage_topk.png"
-            cv2.imwrite(save_path, overlay_topk)
-            # print("第1",topk_score[0][0])
-            # print("第1'",topk_index[0][0])
+        self._maybe_save_attention(attn, topk_score, topk_index)
 
         # 5️⃣ Cumulative probability pruning
         cumsum = torch.cumsum(topk_score, dim=-1)      # (n, p2, k)
@@ -239,6 +223,57 @@ class TopkRouting(nn.Module):
         #     print("第4",r_weight[0][0])
 
         return topk_score, topk_index, valid_mask
+
+    def _maybe_save_attention(self, attn: Tensor, topk_score: Tensor,
+                              topk_index: Tensor) -> None:
+        config = self.attn_vis_config
+        if not config.get('enabled', False):
+            return
+        if config.get('once', True) and self._attn_vis_saved:
+            return
+        trigger_maxk = config.get('trigger_maxk')
+        if trigger_maxk is not None and self.topk != int(trigger_maxk):
+            return
+
+        if 'query_index' not in config:
+            warnings.warn('attention visualize query_index is not configured.')
+            return
+        query_index = int(config['query_index'])
+        if query_index >= attn.size(1):
+            warnings.warn(
+                f'attention visualize query_index={query_index} exceeds '
+                f'available windows={attn.size(1)}.')
+            return
+
+        img_path = config.get('image_path')
+        if not img_path:
+            warnings.warn('attention visualize image_path is empty.')
+            return
+
+        if config.get('save_heatmap', False):
+            overlay = overlay_attn_block(img_path, attn[0][query_index])
+            save_path = config.get('heatmap_save_path')
+            if save_path:
+                save_dir = os.path.dirname(save_path)
+                if save_dir:
+                    os.makedirs(save_dir, exist_ok=True)
+                cv2.imwrite(save_path, overlay)
+
+        if config.get('save_topk', False):
+            overlay_topk = overlay_topk_attn_block_no_heatmap(
+                img=img_path,
+                topk_score=topk_score[0][query_index],
+                topk_index=topk_index[0][query_index],
+                total_patches=attn.shape[-1],
+                dark_ratio=float(config.get('dark_ratio', 1.0)))
+            save_path = config.get('topk_save_path')
+            if save_path:
+                save_dir = os.path.dirname(save_path)
+                if save_dir:
+                    os.makedirs(save_dir, exist_ok=True)
+                cv2.imwrite(save_path, overlay_topk)
+
+        self._attn_vis_saved = True
 
 class KVGather(nn.Module):
     def __init__(self, mul_weight='none'):
@@ -309,7 +344,8 @@ class ToppAttention(nn.Module):
                  side_dwconv=3,
                  auto_pad=False,W=False, use_topp_flash=False,
                  topp_flash_block_windows=64, topp_flash_backend=None,
-                 use_pruned_kv_gather=False):
+                 use_pruned_kv_gather=False, topp_route_configs=None,
+                 attn_vis_config=None):
         super().__init__()
         # local attention setting
         self.dim = dim
@@ -323,6 +359,8 @@ class ToppAttention(nn.Module):
         self.topp_flash_block_windows = topp_flash_block_windows
         self.topp_flash_backend = topp_flash_backend
         self.use_pruned_kv_gather = use_pruned_kv_gather
+        self.topp_route_configs = topp_route_configs
+        self.attn_vis_config = attn_vis_config
         self._topp_flash_warned = False
 
         ################side_dwconv (i.e. LCE in ShuntedTransformer)###########
@@ -343,7 +381,9 @@ class ToppAttention(nn.Module):
                                   
                                   topk=self.topk,
                                   diff_routing=self.diff_routing,
-                                  param_routing=self.param_routing,W=self.W)
+                                  param_routing=self.param_routing,W=self.W,
+                                  route_configs=self.topp_route_configs,
+                                  attn_vis_config=self.attn_vis_config)
         if self.soft_routing:  # soft routing, always diffrentiable (if no detach)
             mul_weight = 'soft'
         elif self.diff_routing:  # hard differentiable routing
