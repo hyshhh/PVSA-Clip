@@ -58,12 +58,7 @@ pip install -r requirements/runtime.txt
 ```
 
 ### 训练
-```bash
-# 单卡训练
-python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py
-# 多卡训练
-bash tools/dist_train.sh configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py ${GPU_NUM}
-```
+
 
 四种注意力后端对应的训练命令如下。
 
@@ -91,34 +86,7 @@ CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_
   --cfg-options model.backbone.use_topp_flash=True model.backbone.topp_flash_backend=cuda model.backbone.topp_flash_block_windows=16 model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False train_dataloader.batch_size=4
 ```
 
-### 训练配置
-| 配置项 | 值 | 说明 |
-|--------|----|------|
-| 训练轮数 | 200 epochs | 基于 `EpochBasedTrainLoop` |
-| 批量大小 | 4 | 单卡训练默认值 |
-| 学习率 | 6e-4 | AdamW 优化器 |
-| 验证间隔 | 10 epochs | 每 10 个 epoch 验证一次 |
-| 检查点保存间隔 | 10 epochs | 每 10 个 epoch 保存一次 |
-
-训练轮数也可以通过命令行覆盖：
-```bash
-CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
-  --cfg-options train_cfg.max_epochs=300
 ```
-
-### 推荐硬件
-- **GPU**: NVIDIA RTX 3090 或更高（24GB 显存）
-- **显存需求**: 约 8-10GB（使用 `torch_block` 后端）
-
-### 训练环境
-| 项目 | 值 |
-|------|-----|
-| GPU | *待填写* |
-| CUDA | *待填写* |
-| PyTorch | *待填写* |
-| 显存占用 | *待填写* |
-
-注意：`configs-h/_base_/models/VTFormer-s.py` 只是模型片段配置，缺少数据集、训练循环、优化器、运行时作用域等内容，不能直接用于训练。
 
 ### 测试方法
 使用 `tools/analysis_tools/benchmark.py` 测试推理速度（FPS），该脚本会自动运行 200 次推理并计算平均 FPS。
@@ -132,12 +100,10 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py configs-h/biform
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth --cfg-options model.backbone.use_topp_flash=False model.backbone.use_pruned_kv_gather=True model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False
 ```
-
 3. `torch_block` 模式（分块循环计算，显存和速度均衡）：
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth --cfg-options model.backbone.use_topp_flash=True model.backbone.topp_flash_backend=torch_block model.backbone.topp_flash_block_windows=16 model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False
 ```
-
 4. `cuda` 模式（自定义 CUDA 后端，显存最低）：
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth --cfg-options model.backbone.use_topp_flash=True model.backbone.topp_flash_backend=cuda model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False
@@ -148,57 +114,7 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py configs-h/biform
 export PVSA_TOPP_FLASH_STRICT_CUDA=1
 ```
 
-## 配置说明
 
-### 模型配置
-```python
-backbone=dict(
-    type='BiFormer_fusion',
-    embed_dim=[64, 128, 256, 512],
-    depth=[3, 4, 6, 3],
-    topks=[16, 12, 8, 6],           # 四层 Top-P 路由标志位
-    topp_route_configs={             # 标志位到真实路由参数的映射
-        16: dict(maxk=25, p=0.2, temperature=0.0175, energy=4.0),
-        12: dict(maxk=18, p=0.4, temperature=0.025, energy=1.5),
-        8: dict(maxk=36, p=0.6, temperature=0.05, energy=0.75),
-        6: dict(maxk=49, p=0.8, temperature=0.15, energy=0.4),
-    },
-    n_win=7,                         # 窗口数量
-    use_topp_flash=True,             # 是否启用分块后端
-    topp_flash_backend='torch_block', # 'torch_block' 或 'cuda'
-    topp_flash_block_windows=16,      # 分块大小
-    use_pruned_kv_gather=False,       # 是否在普通 kv_gather 路径裁剪无效路由
-    feature_vis_config=dict(enabled=False, save_dir='cam/features_imgs4', out_size=512, channel_reduce='mean'),
-    attn_vis_config=dict(enabled=False, save_topk=True, save_heatmap=False, query_index=32, trigger_maxk=25, image_path='/path/to/source.jpg', topk_save_path='cam/attn/attn_stage_topk.png', once=True)
-)
-```
-
-### topk 参数说明
-- `topk > 0`：使用 ToppAttention（Top-P 稀疏注意力）
-- `topk == -1`：使用标准全局注意力
-- `topk == -2`：使用带局部位置编码的全局注意力（AttentionLePE）
-- `topks`：当前四层 Top-P 注意力实际使用的路由标志位，本配置文件显式设置为 `[16, 12, 8, 6]`，与重构前硬编码一致。
-- `topp_route_configs`：每个标志位对应真实 `maxk`、累计概率阈值 `p`、温度 `temperature` 和能量补偿 `energy`，现在必须由配置文件提供。
-- `feature_vis_config.enabled`：是否保存特征图，打开后会触发处理器同步和磁盘写入，不建议用于正式测速。
-- `attn_vis_config.enabled`：是否保存注意力图，`trigger_maxk` 可限制只在指定真实 `maxk` 的层保存。
-
-## 环境变量
-| 变量名 | 说明 | 默认值 |
-|--------|------|--------|
-| `PVSA_TOPP_FLASH_BACKEND` | 强制指定后端 | `torch_block` |
-| `PVSA_TOPP_FLASH_STRICT_CUDA` | CUDA 失败时是否报错 | `0` |
-| `PVSA_TOPP_FLASH_VERBOSE` | 打印编译日志 | `0` |
-| `PVSA_TOPP_FLASH_ARCH` | 目标 GPU 架构 | 自动检测 |
-
-## 性能对比
-三种后端的显存占用对比（相对值）：
-| 后端 | 显存峰值 | 推理速度 |
-|------|---------|---------|
-| kv_gather | 100% | 最快（小 topk） |
-| torch_block | ~13% | 中等 |
-| cuda | ~0% | 最慢 |
-
-## CUDA 后端编译
 
 ### 编译方法
 项目通过 `torch.utils.cpp_extension.load()` 在第一次使用 `cuda` 后端时自动 JIT 编译 CUDA 扩展，不需要手动写 `setup.py`。
