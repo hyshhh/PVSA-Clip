@@ -90,9 +90,10 @@ def main():
         # the first several iterations may be very slow so skip them
         num_warmup = 5
         pure_inf_time = 0
-        total_iters = 200
+        total_iters = max(200, len(data_loader))
+        i = -1
 
-        # benchmark with 200 batches and take the average
+        # benchmark with enough batches and take the average
         for i, data in enumerate(data_loader):
             data = model.data_preprocessor(data, True)
             inputs = data['inputs']
@@ -116,11 +117,17 @@ def main():
                           f'fps: {fps:.2f} img / s')
 
             if (i + 1) == total_iters:
-                fps = (i + 1 - num_warmup) / pure_inf_time
-                print(f'Overall fps: {fps:.2f} img / s\n')
-                benchmark_dict[f'overall_fps_{time_index + 1}'] = round(fps, 2)
-                overall_fps_list.append(fps)
                 break
+
+        effective_iters = min(i + 1, total_iters)
+        if effective_iters > num_warmup and pure_inf_time > 0:
+            fps = (effective_iters - num_warmup) / pure_inf_time
+            print(f'Overall fps: {fps:.2f} img / s\n')
+            benchmark_dict[f'overall_fps_{time_index + 1}'] = round(fps, 2)
+            overall_fps_list.append(fps)
+        else:
+            print(f'Warning: not enough iterations ({effective_iters}) '
+                  f'to compute FPS (need > {num_warmup})')
     benchmark_dict['average_fps'] = round(np.mean(overall_fps_list), 2)
     benchmark_dict['fps_variance'] = round(np.var(overall_fps_list), 4)
     print(f'Average fps of {repeat_times} evaluations: '

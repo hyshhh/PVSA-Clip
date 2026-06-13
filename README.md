@@ -86,27 +86,57 @@ CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_
   --cfg-options model.backbone.use_topp_flash=True model.backbone.topp_flash_backend=cuda model.backbone.topp_flash_block_windows=16 model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False train_dataloader.batch_size=4
 ```
 
-```
-
 ### 测试方法
-使用 `tools/analysis_tools/benchmark.py` 测试推理速度（FPS），该脚本会自动运行 200 次推理并计算平均 FPS。
+使用 `tools/analysis_tools/benchmark.py` 测试推理速度（FPS），该脚本会自动运行足够轮次并计算平均 FPS。
+
+> **前提**：确保 Python 加载的是本项目代码，而非旧版 mmseg。如果之前在其他路径安装过 mmseg（`pip install -e .`），需要在每次运行前设置 `PYTHONPATH`：
+> ```bash
+> export PYTHONPATH=/path/to/PVSA-Net:$PYTHONPATH
+> ```
+> 或者一次性重新注册当前路径：`pip install -e . --force-reinstall --no-deps`
 
 1. `kv_gather` 模式（原始注意力路径）：
 ```bash
-CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth --cfg-options model.backbone.use_topp_flash=False model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False
+CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
+  configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+  /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth \
+  --cfg-options model.backbone.use_topp_flash=False \
+  model.backbone.feature_vis_config.enabled=False \
+  model.backbone.attn_vis_config.enabled=False
 ```
 
 2. `pruned_kv_gather` 模式（按 keep_len 裁剪无效路由）：
 ```bash
-CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth --cfg-options model.backbone.use_topp_flash=False model.backbone.use_pruned_kv_gather=True model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False
+CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
+  configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+  /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth \
+  --cfg-options model.backbone.use_topp_flash=False \
+  model.backbone.use_pruned_kv_gather=True \
+  model.backbone.feature_vis_config.enabled=False \
+  model.backbone.attn_vis_config.enabled=False
 ```
+
 3. `torch_block` 模式（分块循环计算，显存和速度均衡）：
 ```bash
-CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth --cfg-options model.backbone.use_topp_flash=True model.backbone.topp_flash_backend=torch_block model.backbone.topp_flash_block_windows=16 model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False
+CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
+  configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+  /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth \
+  --cfg-options model.backbone.use_topp_flash=True \
+  model.backbone.topp_flash_backend=torch_block \
+  model.backbone.topp_flash_block_windows=16 \
+  model.backbone.feature_vis_config.enabled=False \
+  model.backbone.attn_vis_config.enabled=False
 ```
+
 4. `cuda` 模式（自定义 CUDA 后端，显存最低）：
 ```bash
-CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth --cfg-options model.backbone.use_topp_flash=True model.backbone.topp_flash_backend=cuda model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False
+CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
+  configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+  /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth \
+  --cfg-options model.backbone.use_topp_flash=True \
+  model.backbone.topp_flash_backend=cuda \
+  model.backbone.feature_vis_config.enabled=False \
+  model.backbone.attn_vis_config.enabled=False
 ```
 
 如果需要强制确认 CUDA 后端没有静默回退到 `torch_block`，测试前设置：
