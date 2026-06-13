@@ -12,13 +12,22 @@
 - 按累积概率 `cumsum <= P` 进行截断
 - 保留概率质量集中的窗口，自动过滤噪声
 
-### 三种计算后端
-| 后端 | 配置 | 显存 | 速度 | 适用场景 |
-|------|------|------|------|----------|
-| **kv_gather** | `use_topp_flash=False` | 高 | 快 | 显存充足时使用 |
-| **kv_gather + fast** | `use_fast_attention=True` | 中 | 最快 | 推荐，Top-P 剪枝前移 |
-| **pruned_kv_gather** | `use_pruned_kv_gather=True` | 高 | 中 | 按 keep_len 裁剪无效路由 |
-| **cuda** | `backend='cuda'` | 低 | 中 | 极致显存优化，需编译环境 |
+### 五种注意力后端
+
+#### A. 不使用 Top-P Flash Attention（`use_topp_flash=False`）
+
+| 后端 | 配置 | 优化点 | 优化层级 | 显存 | 速度 | 适用场景 |
+|------|------|--------|----------|------|------|----------|
+| **kv_gather** | `use_topp_flash=False` | 无优化，原始实现 | 基础 | 高 | 中 | 显存充足时使用 |
+| **pruned_kv_gather** | `use_pruned_kv_gather=True` | 按 keep_len 裁剪无效路由窗口 | 路由层 | 高 | 中 | 减少无效计算 |
+| **kv_gather + fast** | `use_fast_attention=True` | Top-P 剪枝前移，减少无效 gather 和 matmul | 路由层 | 中 | 最快 | 推荐，速度最快 |
+
+#### B. 使用 Top-P Flash Attention（`use_topp_flash=True`）
+
+| 后端 | 配置 | 优化点 | 优化层级 | 显存 | 速度 | 适用场景 |
+|------|------|--------|----------|------|------|----------|
+| **torch_block** | `backend='torch_block'` | 分块计算，避免一次性 materialize 大矩阵 | 计算层 | 低 | 最快 | 推荐，无需编译 |
+| **cuda** | `backend='cuda'` | 自定义 CUDA kernel，在线 softmax，warp 协作 | 计算层 | 最低 | 中 | 极致显存优化，需编译环境 |
 
 ### Top-P 参数配置
 | 原 topk | 实际 topk | P 阈值 | 温度 | 能量补偿 |
