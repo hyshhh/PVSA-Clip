@@ -345,7 +345,8 @@ class ToppAttention(nn.Module):
                  auto_pad=False,W=False, use_topp_flash=False,
                  topp_flash_block_windows=64, topp_flash_backend=None,
                  use_pruned_kv_gather=False, topp_route_configs=None,
-                 attn_vis_config=None):
+                 attn_vis_config=None,
+                 use_fast_attention=False):
         super().__init__()
         # local attention setting
         self.dim = dim
@@ -361,6 +362,7 @@ class ToppAttention(nn.Module):
         self.use_pruned_kv_gather = use_pruned_kv_gather
         self.topp_route_configs = topp_route_configs
         self.attn_vis_config = attn_vis_config
+        self.use_fast_attention = use_fast_attention
         self._topp_flash_warned = False
 
         ################side_dwconv (i.e. LCE in ShuntedTransformer)###########
@@ -538,6 +540,13 @@ class ToppAttention(nn.Module):
                 out = out[:, :H_in, :W_in, :].contiguous()
             return out
 
+        if self.use_fast_attention and not ret_attn_mask:
+            return self._attention_fast(
+                q_pix=q_pix, kv_pix=kv_pix,
+                r_weight=r_weight, r_idx=r_idx, r_mask=r_mask,
+                H=H, W=W, lepe=lepe, H_in=H_in, W_in=W_in,
+                pad_r=pad_r, pad_b=pad_b)
+
         kv_pix_sel = self.kv_gather(r_idx=r_idx, r_weight=r_weight, kv=kv_pix)  # (n, p^2, topk, h_kv*w_kv, c_qk+c_v)
         k_pix_sel, v_pix_sel = kv_pix_sel.split([self.qk_dim, self.dim], dim=-1)
         # kv_pix_sel: (n, p^2, topk, h_kv*w_kv, c_qk)
@@ -635,3 +644,41 @@ class ToppAttention(nn.Module):
             i=self.n_win,
             h=H // self.n_win,
             w=W // self.n_win)
+
+    def _attention_fast(self, q_pix, kv_pix, r_weight, r_idx, r_mask,
+                        H, W, lepe, H_in, W_in, pad_r, pad_b):
+        keep_len = r_mask.sum(dim=-1)
+        keep_max = int(keep_len.max().clamp(min=1).item())
+        topk = r_idx.size(-1)
+        keep_max = min(keep_max, topk)
+
+        r_idx_f = r_idx[:, :, :keep_max]
+        r_weight_f = r_weight[:, :, :keep_max]
+        r_mask_f = r_mask[:, :, :keep_max]
+
+        kv_pix_sel = self.kv_gather(r_idx=r_idx_f, r_weight=r_weight_f, kv=kv_pix)
+        k_pix_sel, v_pix_sel = kv_pix_sel.split([self.qk_dim, self.dim], dim=-1)
+
+        k_pix_sel = rearrange(k_pix_sel, 'n p2 k w2 (m c) -> (n p2) m c (k w2)',
+                              m=self.num_heads)
+        v_pix_sel = rearrange(v_pix_sel, 'n p2 k w2 (m c) -> (n p2) m (k w2) c',
+                              m=self.num_heads)
+        q_pix = rearrange(q_pix, 'n p2 w2 (m c) -> (n p2) m w2 c',
+                          m=self.num_heads)
+
+        attn_weight = (q_pix * self.scale) @ k_pix_sel
+        route_mask = r_mask_f[..., None].expand(-1, -1, -1, kv_pix.size(-2))
+        route_mask = rearrange(route_mask, 'n p2 k w2 -> (n p2) 1 1 (k w2)')
+        attn_weight = attn_weight.masked_fill(
+            ~route_mask, torch.finfo(attn_weight.dtype).min)
+        attn_weight = self.attn_act(attn_weight)
+        out = attn_weight @ v_pix_sel
+        out = rearrange(out, '(n j i) m (h w) c -> n (j h) (i w) (m c)',
+                        j=self.n_win, i=self.n_win,
+                        h=H // self.n_win, w=W // self.n_win)
+
+        out = out + lepe
+        out = self.wo(out)
+        if self.auto_pad and (pad_r > 0 or pad_b > 0):
+            out = out[:, :H_in, :W_in, :].contiguous()
+        return out

@@ -60,6 +60,7 @@ model = dict(
         topp_flash_backend='torch_block',
         topp_flash_block_windows=16,
         use_pruned_kv_gather=False,
+        use_fast_attention=False,
         # 特征图保存开关。训练默认关闭；打开后会把 FAM 前后和融合后的
         # 特征图保存到 save_dir，频繁写图会明显降低训练速度。
         feature_vis_config=dict(

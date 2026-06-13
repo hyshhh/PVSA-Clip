@@ -47,7 +47,8 @@ class Block(nn.Module):
                  use_topp_flash=False, topp_flash_block_windows=64,
                  topp_flash_backend=None,
                  use_pruned_kv_gather=False, topp_route_configs=None,
-                 attn_vis_config=None):
+                 attn_vis_config=None,
+                 use_fast_attention=False):
         super().__init__()
         qk_dim = qk_dim or dim
 
@@ -83,7 +84,8 @@ class Block(nn.Module):
                                                 topp_flash_backend=topp_flash_backend,
                                                 use_pruned_kv_gather=use_pruned_kv_gather,
                                                 topp_route_configs=topp_route_configs,
-                                                attn_vis_config=attn_vis_config)
+                                                attn_vis_config=attn_vis_config,
+                                                use_fast_attention=use_fast_attention)
         elif topk == -1:
             self.attn = Attention(dim=dim)
         elif topk == -2:
@@ -370,7 +372,8 @@ class VTFormer(nn.Module):
                  topp_flash_backend=None,
                  use_pruned_kv_gather=False,
                  topp_route_configs=None,
-                 attn_vis_config=None):
+                 attn_vis_config=None,
+                 use_fast_attention=False):
 
         super().__init__()
         self.W=W
@@ -380,6 +383,7 @@ class VTFormer(nn.Module):
         self.use_pruned_kv_gather = use_pruned_kv_gather
         self.topp_route_configs = topp_route_configs
         self.attn_vis_config = attn_vis_config
+        self.use_fast_attention = use_fast_attention
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
         self.norm_eval = norm_eval
@@ -507,7 +511,8 @@ class VTFormer(nn.Module):
                         topp_flash_backend=self.topp_flash_backend,
                         use_pruned_kv_gather=self.use_pruned_kv_gather,
                         topp_route_configs=self.topp_route_configs,
-                        attn_vis_config=self.attn_vis_config) for j in range(depth[i])],  # 是否自动为卷积层补零，使得输出尺寸与输入一致
+                        attn_vis_config=self.attn_vis_config,
+                        use_fast_attention=self.use_fast_attention) for j in range(depth[i])],  # 是否自动为卷积层补零，使得输出尺寸与输入一致
             )
             if i in use_checkpoint_stages:
                 stage = checkpoint_wrapper(stage)
