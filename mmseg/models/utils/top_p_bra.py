@@ -344,7 +344,8 @@ class ToppAttention(nn.Module):
                  side_dwconv=3,
                  auto_pad=False,W=False, use_topp_flash=False,
                  topp_flash_block_windows=64, topp_flash_backend=None,
-                 use_pruned_kv_gather=False, topp_route_configs=None,
+                 use_pruned_kv_gather=False, pruned_kv_num_groups=1,
+                 topp_route_configs=None,
                  attn_vis_config=None,
                  use_fast_attention=False):
         super().__init__()
@@ -360,6 +361,7 @@ class ToppAttention(nn.Module):
         self.topp_flash_block_windows = topp_flash_block_windows
         self.topp_flash_backend = topp_flash_backend
         self.use_pruned_kv_gather = use_pruned_kv_gather
+        self.pruned_kv_num_groups = pruned_kv_num_groups
         self.topp_route_configs = topp_route_configs
         self.attn_vis_config = attn_vis_config
         self.use_fast_attention = use_fast_attention
@@ -595,6 +597,7 @@ class ToppAttention(nn.Module):
         topk = r_idx.size(-1)
         head_q = self.qk_dim // self.num_heads
         head_v = self.dim // self.num_heads
+        num_groups = self.pruned_kv_num_groups
 
         keep_len = r_mask.sum(dim=-1).reshape(flat_size).long().clamp(min=1)
         q_flat = rearrange(q_pix, 'n p2 w2 (m c) -> (n p2) m w2 c',
@@ -603,38 +606,47 @@ class ToppAttention(nn.Module):
         weight_flat = r_weight.reshape(flat_size, topk).to(kv_pix.dtype)
         out_flat = q_flat.new_empty(flat_size, self.num_heads, q_len, head_v)
 
-        for keep in torch.unique(keep_len, sorted=True):
-            keep_int = int(keep.item())
-            flat_ids = torch.nonzero(keep_len == keep, as_tuple=False).flatten()
-            if flat_ids.numel() == 0:
+        sorted_indices = torch.argsort(keep_len)
+        col_indices = torch.arange(topk, device=q_pix.device)
+
+        for chunk in torch.chunk(sorted_indices, num_groups):
+            group_keep = keep_len[chunk]
+            group_max_keep = int(group_keep.max().item())
+            if group_max_keep == 0:
                 continue
 
-            batch = flat_ids.numel()
+            flat_ids = chunk
             n_ids = torch.div(flat_ids, p2, rounding_mode='floor')
+            kept_b_idx = idx_flat.index_select(0, flat_ids)[:, :group_max_keep]
             q = q_flat.index_select(0, flat_ids)
             kv_batch = kv_pix.index_select(0, n_ids)
-            idx = idx_flat.index_select(0, flat_ids)[:, :keep_int]
-            weight = weight_flat.index_select(0, flat_ids)[:, :keep_int]
+            group_col = col_indices[:group_max_keep]
 
             kv_sel = torch.gather(
                 kv_batch,
                 dim=1,
-                index=idx.view(batch, keep_int, 1, 1).expand(
+                index=kept_b_idx.unsqueeze(-1).unsqueeze(-1).expand(
                     -1, -1, kv_len, c_kv))
-            kv_sel = weight.view(batch, keep_int, 1, 1) * kv_sel
+            weight = weight_flat.index_select(0, flat_ids)[:, :group_max_keep]
+            kv_sel = weight.unsqueeze(-1).unsqueeze(-1) * kv_sel
             k_sel, v_sel = kv_sel.split([self.qk_dim, self.dim], dim=-1)
 
-            k_sel = k_sel.view(batch, keep_int, kv_len, self.num_heads,
-                               head_q).permute(0, 3, 4, 1, 2).reshape(
-                                   batch, self.num_heads, head_q,
-                                   keep_int * kv_len)
-            v_sel = v_sel.view(batch, keep_int, kv_len, self.num_heads,
-                               head_v).permute(0, 3, 1, 2, 4).reshape(
-                                   batch, self.num_heads,
-                                   keep_int * kv_len, head_v)
-            attn_weight = self.attn_act((q * self.scale) @ k_sel)
-            group_out = attn_weight @ v_sel
-            out_flat.index_copy_(0, flat_ids, group_out)
+            k_sel = k_sel.view(-1, group_max_keep, kv_len, self.num_heads,
+                               head_q).permute(0, 3, 4, 1, 2)
+            v_sel = v_sel.view(-1, group_max_keep, kv_len, self.num_heads,
+                               head_v).permute(0, 3, 1, 2, 4)
+
+            q = q * self.scale
+            mask = torch.zeros(q.size(0), 1, 1, group_max_keep,
+                               device=q.device, dtype=kv_pix.dtype)
+            mask.masked_fill_(
+                group_col[None, None, :] >= group_keep[:, None, None, :],
+                float('-inf'))
+            attn = self.attn_act(
+                q @ k_sel.flatten(3) + mask.unsqueeze(-2))
+            out_chunk = attn @ v_sel.flatten(3)
+
+            out_flat.index_copy_(0, flat_ids, out_chunk)
 
         return rearrange(
             out_flat,
