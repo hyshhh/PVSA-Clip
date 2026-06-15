@@ -185,7 +185,7 @@ __global__ void topp_flash_head32_nwin7_kernel(
     const scalar_t *__restrict__ q_pix,
     const scalar_t *__restrict__ kv_pix,
     const scalar_t *__restrict__ r_weight,
-    const int32_t *__restrict__ r_idx,
+    const int64_t *__restrict__ r_idx,
     const int64_t *__restrict__ keep_len,
     float *__restrict__ out,
     int64_t n,
@@ -376,41 +376,63 @@ void launch_generic<float>(torch::Tensor q_pix,
       n_win, height, width);
 }
 
+template <typename scalar_t, int NUM_HEADS, int QUERY_TILE>
+void launch_special_tile(torch::Tensor q_pix,
+                         torch::Tensor kv_pix,
+                         torch::Tensor r_weight,
+                         torch::Tensor r_idx,
+                         torch::Tensor keep_len,
+                         torch::Tensor out,
+                         float scale,
+                         int64_t height,
+                         int64_t width,
+                         cudaStream_t stream) {
+  const int64_t n = q_pix.size(0);
+  const int64_t q_len = q_pix.size(2);
+  const int64_t kv_len = kv_pix.size(2);
+  const int64_t topk = r_idx.size(2);
+  const int64_t q_tiles = (q_len + QUERY_TILE - 1) / QUERY_TILE;
+  const int blocks = static_cast<int>(n * SPECIAL_P2 * NUM_HEADS * q_tiles);
+  const int threads = QUERY_TILE * WARP_SIZE;
+
+  topp_flash_head32_nwin7_kernel<scalar_t, QUERY_TILE, NUM_HEADS>
+      <<<blocks, threads, 0, stream>>>(
+          tensor_data_ptr<scalar_t>(q_pix),
+          tensor_data_ptr<scalar_t>(kv_pix),
+          tensor_data_ptr<scalar_t>(r_weight),
+          r_idx.data_ptr<int64_t>(),
+          keep_len.data_ptr<int64_t>(),
+          out.data_ptr<float>(),
+          n, q_len, kv_len, topk, scale, height, width, q_tiles);
+}
+
 template <typename scalar_t, int NUM_HEADS>
 void launch_special(torch::Tensor q_pix,
                     torch::Tensor kv_pix,
                     torch::Tensor r_weight,
-                    torch::Tensor r_idx_i32,
+                    torch::Tensor r_idx,
                     torch::Tensor keep_len,
                     torch::Tensor out,
                     float scale,
                     int64_t height,
                     int64_t width,
                     cudaStream_t stream) {
-  constexpr int QUERY_TILE = WARPS_PER_BLOCK;
-  const int64_t n = q_pix.size(0);
-  const int64_t q_len = q_pix.size(2);
-  const int64_t kv_len = kv_pix.size(2);
-  const int64_t topk = r_idx_i32.size(2);
-  const int64_t q_tiles = (q_len + QUERY_TILE - 1) / QUERY_TILE;
-  const int blocks = static_cast<int>(n * SPECIAL_P2 * NUM_HEADS * q_tiles);
-
-  topp_flash_head32_nwin7_kernel<scalar_t, QUERY_TILE, NUM_HEADS>
-      <<<blocks, THREADS_PER_BLOCK, 0, stream>>>(
-          tensor_data_ptr<scalar_t>(q_pix),
-          tensor_data_ptr<scalar_t>(kv_pix),
-          tensor_data_ptr<scalar_t>(r_weight),
-          r_idx_i32.data_ptr<int32_t>(),
-          keep_len.data_ptr<int64_t>(),
-          out.data_ptr<float>(),
-          n, q_len, kv_len, topk, scale, height, width, q_tiles);
+  if (q_pix.size(2) <= 4) {
+    launch_special_tile<scalar_t, NUM_HEADS, 4>(
+        q_pix, kv_pix, r_weight, r_idx, keep_len, out, scale, height, width,
+        stream);
+  } else {
+    launch_special_tile<scalar_t, NUM_HEADS, WARPS_PER_BLOCK>(
+        q_pix, kv_pix, r_weight, r_idx, keep_len, out, scale, height, width,
+        stream);
+  }
 }
 
 template <typename scalar_t>
 void dispatch_special(torch::Tensor q_pix,
                       torch::Tensor kv_pix,
                       torch::Tensor r_weight,
-                      torch::Tensor r_idx_i32,
+                      torch::Tensor r_idx,
                       torch::Tensor keep_len,
                       torch::Tensor out,
                       int64_t num_heads,
@@ -419,16 +441,16 @@ void dispatch_special(torch::Tensor q_pix,
                       int64_t width,
                       cudaStream_t stream) {
   if (num_heads == 2) {
-    launch_special<scalar_t, 2>(q_pix, kv_pix, r_weight, r_idx_i32, keep_len,
+    launch_special<scalar_t, 2>(q_pix, kv_pix, r_weight, r_idx, keep_len,
                                 out, scale, height, width, stream);
   } else if (num_heads == 4) {
-    launch_special<scalar_t, 4>(q_pix, kv_pix, r_weight, r_idx_i32, keep_len,
+    launch_special<scalar_t, 4>(q_pix, kv_pix, r_weight, r_idx, keep_len,
                                 out, scale, height, width, stream);
   } else if (num_heads == 8) {
-    launch_special<scalar_t, 8>(q_pix, kv_pix, r_weight, r_idx_i32, keep_len,
+    launch_special<scalar_t, 8>(q_pix, kv_pix, r_weight, r_idx, keep_len,
                                 out, scale, height, width, stream);
   } else {
-    launch_special<scalar_t, 16>(q_pix, kv_pix, r_weight, r_idx_i32, keep_len,
+    launch_special<scalar_t, 16>(q_pix, kv_pix, r_weight, r_idx, keep_len,
                                  out, scale, height, width, stream);
   }
 }
@@ -489,17 +511,16 @@ torch::Tensor topp_flash_forward_cuda(torch::Tensor q_pix,
                                  n_win, height, width);
 
   if (use_special) {
-    auto r_idx_i32 = r_idx.to(torch::kInt).contiguous();
     if (q_pix.scalar_type() == torch::kFloat16) {
-      dispatch_special<__half>(q_pix, kv_pix, r_weight, r_idx_i32, keep_len,
+      dispatch_special<__half>(q_pix, kv_pix, r_weight, r_idx, keep_len,
                                out, num_heads, static_cast<float>(scale),
                                height, width, stream);
     } else if (q_pix.scalar_type() == torch::kBFloat16) {
       dispatch_special<__nv_bfloat16>(
-          q_pix, kv_pix, r_weight, r_idx_i32, keep_len, out, num_heads,
+          q_pix, kv_pix, r_weight, r_idx, keep_len, out, num_heads,
           static_cast<float>(scale), height, width, stream);
     } else {
-      dispatch_special<float>(q_pix, kv_pix, r_weight, r_idx_i32, keep_len,
+      dispatch_special<float>(q_pix, kv_pix, r_weight, r_idx, keep_len,
                               out, num_heads, static_cast<float>(scale),
                               height, width, stream);
     }

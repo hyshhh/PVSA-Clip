@@ -252,17 +252,25 @@ def _maybe_time_debug(debug: bool, debug_key: Optional[tuple],
     _CUDA_TIMING_LOGGED.add(debug_key)
     if debug_path in ('cuda_specialized', 'cuda_generic'):
         _load_cuda_extension()
+    repeat = max(1, int(os.getenv('PVSA_TOPP_FLASH_TIMING_REPEAT', '5')))
+    warmup = max(0, int(os.getenv('PVSA_TOPP_FLASH_TIMING_WARMUP', '2')))
+    out = None
     with torch.cuda.device(timing_tensor.device):
+        for _ in range(warmup):
+            out = runner()
+        torch.cuda.synchronize(timing_tensor.device)
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
-        out = runner()
+        for _ in range(repeat):
+            out = runner()
         end.record()
         end.synchronize()
-        elapsed_ms = start.elapsed_time(end)
+        elapsed_ms = start.elapsed_time(end) / repeat
     print(
         '[PVSA TopP Flash] '
-        f'timing path={debug_path} elapsed_ms={elapsed_ms:.4f}')
+        f'timing path={debug_path} elapsed_ms={elapsed_ms:.4f} '
+        f'warmup={warmup} repeat={repeat}')
     return out
 
 
