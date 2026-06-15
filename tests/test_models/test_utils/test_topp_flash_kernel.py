@@ -52,6 +52,45 @@ def _make_inputs(dtype=torch.float64, device='cpu'):
     }
 
 
+def _make_specialized_inputs(dtype=torch.float32, device='cuda'):
+    torch.manual_seed(11)
+    n = 1
+    n_win = 7
+    p2 = n_win * n_win
+    h = w = 14
+    q_len = 4
+    kv_len = 4
+    qk_dim = 64
+    dim = 64
+    num_heads = 2
+    topk = 6
+    q_pix = torch.randn(n, p2, q_len, qk_dim, dtype=dtype, device=device)
+    kv_pix = torch.randn(
+        n, p2, kv_len, qk_dim + dim, dtype=dtype, device=device)
+    r_weight = torch.rand(n, p2, topk, dtype=dtype, device=device)
+    r_idx = torch.randint(0, p2, (n, p2, topk), device=device)
+    keep_len = torch.arange(p2, device=device).view(n, p2)
+    keep_len = keep_len.remainder(topk).add_(1)
+    pos = torch.arange(topk, device=device).view(1, 1, topk)
+    r_mask = pos < keep_len[..., None]
+    r_weight = r_weight * r_mask.to(dtype)
+    r_idx = r_idx.masked_fill(~r_mask, 0)
+    return {
+        'q_pix': q_pix,
+        'kv_pix': kv_pix,
+        'r_weight': r_weight,
+        'r_idx': r_idx,
+        'r_mask': r_mask,
+        'num_heads': num_heads,
+        'qk_dim': qk_dim,
+        'dim': dim,
+        'scale': qk_dim**-0.5,
+        'n_win': n_win,
+        'H': h,
+        'W': w,
+    }
+
+
 def test_topp_flash_forward_matches_reference():
     kernel = _load_kernel_module()
     inputs = _make_inputs()
@@ -71,6 +110,25 @@ def test_topp_flash_cuda_forward_matches_reference_if_available(monkeypatch):
     monkeypatch.setenv('PVSA_TOPP_FLASH_STRICT_CUDA', '1')
 
     inputs = _make_inputs(dtype=torch.float32, device='cuda')
+    with torch.no_grad():
+        out_ref = kernel.topp_attention_reference(**inputs)
+        out_flash = kernel.topp_flash_attention(
+            **inputs, block_windows=3, backend='cuda')
+    torch.testing.assert_close(out_flash, out_ref, rtol=1e-4, atol=1e-4)
+
+
+def test_topp_flash_cuda_specialized_forward_matches_reference_if_available(
+        monkeypatch):
+    if not torch.cuda.is_available():
+        pytest.skip('CUDA is unavailable.')
+    if shutil.which('ninja') is None:
+        pytest.skip('Ninja is unavailable.')
+    kernel = _load_kernel_module()
+    if not kernel.is_topp_flash_available('cuda'):
+        pytest.skip('PVSA CUDA extension build environment is unavailable.')
+    monkeypatch.setenv('PVSA_TOPP_FLASH_STRICT_CUDA', '1')
+
+    inputs = _make_specialized_inputs(dtype=torch.float32, device='cuda')
     with torch.no_grad():
         out_ref = kernel.topp_attention_reference(**inputs)
         out_flash = kernel.topp_flash_attention(
