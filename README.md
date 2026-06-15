@@ -107,11 +107,28 @@ CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_
 ### 测试方法
 使用 `tools/analysis_tools/benchmark.py` 测试推理速度（FPS），该脚本会自动运行足够轮次并计算平均 FPS。
 
-> **前提**：确保 Python 加载的是本项目代码，而非旧版 mmseg。如果之前在其他路径安装过 mmseg（`pip install -e .`），需要在每次运行前设置 `PYTHONPATH`：
+> **前提 1 - PYTHONPATH**：确保 Python 加载的是本项目代码，而非旧版 mmseg。如果之前在其他路径安装过 mmseg（`pip install -e .`），需要在每次运行前设置 `PYTHONPATH`：
 > ```bash
 > export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-v1:$PYTHONPATH
 > ```
 > 或者一次性重新注册当前路径：`pip install -e . --force-reinstall --no-deps`
+
+> **前提 2 - GCC 编译器**：使用 `cuda` 后端时，nvcc 的 host 编译器必须是 GCC 11 及以下。系统默认 GCC 13 与 PyTorch 旧版 pybind11 不兼容，会导致 `pybind11/cast.h` 模板编译错误。切换方法：
+> ```bash
+> # 查看当前 GCC 版本
+> gcc --version
+>
+> # 如果是 GCC 13，切换到 GCC 11
+> sudo update-alternatives --set gcc /usr/bin/gcc-11
+> sudo update-alternatives --set g++ /usr/bin/g++-11
+>
+> # 或者临时指定（不影响系统默认）
+> export CC=/usr/bin/gcc-11
+> export CXX=/usr/bin/g++-11
+>
+> # 清除旧编译缓存后重新运行
+> rm -rf ~/.cache/torch_extensions/py*/pvsa_topp_flash_cuda
+> ```
 
 #### A. 不使用 Top-P Flash Attention（`use_topp_flash=False`）
 
