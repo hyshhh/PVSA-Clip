@@ -11,9 +11,11 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
 
-from .topp_flash_kernel import (can_run_topp_route_cuda,
+from .topp_flash_kernel import (can_run_topp_fused_cuda,
+                                can_run_topp_route_cuda,
                                 is_topp_flash_available,
-                                topp_flash_attention, topp_route_cuda,
+                                topp_flash_attention,
+                                topp_flash_fused_attention, topp_route_cuda,
                                 warn_topp_route_cuda_fallback)
 
 
@@ -57,9 +59,10 @@ def _log_topp_stage_debug(path: str, x: Tensor, q_pix: Tensor, kv_pix: Tensor,
                           r_idx: Tensor, times: Dict[str, float],
                           num_heads: int, qk_dim: int, dim: int,
                           n_win: int) -> None:
+    route_shape = tuple(r_idx.shape) if hasattr(r_idx, 'shape') else tuple(r_idx)
     key = (
         path, tuple(x.shape), tuple(q_pix.shape), tuple(kv_pix.shape),
-        tuple(r_idx.shape), num_heads, qk_dim, dim, n_win)
+        route_shape, num_heads, qk_dim, dim, n_win)
     if key in _TOPP_FLASH_STAGE_LOGGED:
         return
     _TOPP_FLASH_STAGE_LOGGED.add(key)
@@ -70,7 +73,7 @@ def _log_topp_stage_debug(path: str, x: Tensor, q_pix: Tensor, kv_pix: Tensor,
     print(
         '[PVSA TopP Stage] '
         f'path={path} x={tuple(x.shape)} q={tuple(q_pix.shape)} '
-        f'kv={tuple(kv_pix.shape)} route={tuple(r_idx.shape)} '
+        f'kv={tuple(kv_pix.shape)} route={route_shape} '
         f'heads={num_heads} qk_dim={qk_dim} dim={dim} n_win={n_win} '
         f'{parts}')
 
@@ -581,6 +584,55 @@ class ToppAttention(nn.Module):
         lepe = rearrange(lepe, 'n c (j h) (i w) -> n (j h) (i w) c', j=self.n_win, i=self.n_win)
 
         ############ gather q dependent k/v #################
+
+        if self.use_topp_flash and not ret_attn_mask:
+            if self.attn_vis_config.get('enabled', False):
+                raise RuntimeError(
+                    'topp fused CUDA inference requires attn_vis disabled.')
+            if self.W and GA is not None:
+                raise RuntimeError(
+                    'topp fused CUDA inference does not support GA route input.')
+            if not is_topp_flash_available(self.topp_flash_backend):
+                raise RuntimeError(
+                    'topp fused CUDA inference extension is unavailable.')
+            if not can_run_topp_fused_cuda(
+                    q_win, q_pix, kv_pix, self.router.topk, self.num_heads,
+                    self.qk_dim, self.dim, self.n_win, H, W):
+                raise RuntimeError(
+                    'topp fused CUDA inference shape rejected: '
+                    f'q_win={tuple(q_win.shape)} q_pix={tuple(q_pix.shape)} '
+                    f'kv_pix={tuple(kv_pix.shape)} topk={self.router.topk} '
+                    f'heads={self.num_heads} qk_dim={self.qk_dim} '
+                    f'dim={self.dim} n_win={self.n_win} H={H} W={W}')
+            out = run_stage(
+                'fused',
+                lambda: topp_flash_fused_attention(
+                    route_query=q_win,
+                    q_pix=q_pix,
+                    kv_pix=kv_pix,
+                    topk=self.router.topk,
+                    p=self.router.P,
+                    temperature=self.router.Temperature,
+                    energy=self.router.energy,
+                    route_scale=self.router.scale,
+                    attn_scale=self.scale,
+                    num_heads=self.num_heads,
+                    qk_dim=self.qk_dim,
+                    dim=self.dim,
+                    n_win=self.n_win,
+                    H=H,
+                    W=W,
+                    debug=self.topp_flash_debug))
+            out = out + lepe
+            out = run_stage('wo', lambda: self.wo(out))
+            if self.auto_pad and (pad_r > 0 or pad_b > 0):
+                out = out[:, :H_in, :W_in, :].contiguous()
+            _log_topp_stage_debug(
+                'topp_fused', x, q_pix, kv_pix,
+                (q_win.size(0), q_win.size(1), self.router.topk),
+                stage_times, self.num_heads, self.qk_dim, self.dim,
+                self.n_win)
+            return out
 
         # 路由机制
         r_weight, r_idx, r_mask = run_stage(
