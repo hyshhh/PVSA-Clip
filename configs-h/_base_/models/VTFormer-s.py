@@ -29,6 +29,7 @@ model = dict(
         # p 表示累计概率裁剪阈值；
         # temperature 表示路由得分 softmax 温度；
         # energy 表示裁剪后的能量补偿系数。
+        # 测试不同 maxk/p 时，直接修改这里的值，不要用 --cfg-options（无法覆盖整数键）
         topp_route_configs={
             16: dict(maxk=25, p=0.2, temperature=0.0175, energy=4.0),
             12: dict(maxk=18, p=0.4, temperature=0.025, energy=1.5),

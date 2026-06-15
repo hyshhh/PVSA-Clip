@@ -113,7 +113,9 @@ CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_
 > ```
 > 或者一次性重新注册当前路径：`pip install -e . --force-reinstall --no-deps`
 
-> **前提 2 - GCC 编译器**：使用 `cuda` 后端时，nvcc 的 host 编译器必须是 GCC 11 及以下。系统默认 GCC 13 与 PyTorch 旧版 pybind11 不兼容，会导致 `pybind11/cast.h` 模板编译错误。切换方法：
+> **前提 2 - cfg-options 限制**：`--cfg-options` 无法覆盖 `topp_route_configs` 中的整数键（如 `16`、`12`）。如果需要调整 `maxk`、`p` 等参数，必须直接修改 `configs-h/_base_/models/VTFormer-s.py` 中的 `topp_route_configs`。
+
+> **前提 3 - GCC 编译器**：使用 `cuda` 后端时，nvcc 的 host 编译器必须是 GCC 11 及以下。系统默认 GCC 13 与 PyTorch 旧版 pybind11 不兼容，会导致 `pybind11/cast.h` 模板编译错误。切换方法：
 > ```bash
 > # 查看当前 GCC 版本
 > gcc --version
