@@ -36,6 +36,8 @@ model = dict(
             8: dict(maxk=36, p=0.6, temperature=0.05, energy=0.75),
             6: dict(maxk=49, p=0.8, temperature=0.15, energy=0.4),
         },
+        # 调试开关：打印每层路由的 maxk、p、max_len、keep_len 统计
+        debug_route=False,
         side_dwconv=5,
         before_attn_dwconv=3,
         layer_scale_init_value=-1,

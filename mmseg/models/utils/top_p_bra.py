@@ -131,13 +131,14 @@ class TopkRouting(nn.Module):
 
     def __init__(self, qk_dim, topk=4, qk_scale=None, param_routing=False,
                  diff_routing=False, W=False, route_configs=None,
-                 attn_vis_config=None):
+                 attn_vis_config=None, debug_route=False):
         super().__init__()
         self.route_flag = topk
         self.qk_dim = qk_dim
         self.scale = qk_scale or qk_dim ** -0.5
         self.diff_routing = diff_routing
         self.W=W
+        self.debug_route = debug_route
         # TODO: norm layer before/after linear?
         self.emb = nn.Linear(qk_dim, qk_dim) if param_routing else nn.Identity()
         # routing activate
@@ -194,6 +195,12 @@ class TopkRouting(nn.Module):
 
         # 6️⃣ Vectorized truncation (NO LOOP)
         max_len = keep_len.max()
+
+        if self.debug_route:
+            print(f'[Route] flag={self.route_flag} maxk={self.topk} p={self.P} '
+                  f'temp={self.Temperature} energy={self.energy} '
+                  f'max_len={max_len.item()} keep_len_min={keep_len.min().item():.0f} '
+                  f'keep_len_mean={keep_len.float().mean().item():.1f}')
 
         # truncate to max_len
         topk_score = topk_score[..., :max_len]
@@ -347,7 +354,8 @@ class ToppAttention(nn.Module):
                  use_pruned_kv_gather=False, pruned_kv_num_groups=1,
                  topp_route_configs=None,
                  attn_vis_config=None,
-                 use_fast_attention=False):
+                 use_fast_attention=False,
+                 debug_route=False):
         super().__init__()
         # local attention setting
         self.dim = dim
@@ -387,7 +395,8 @@ class ToppAttention(nn.Module):
                                   diff_routing=self.diff_routing,
                                   param_routing=self.param_routing,W=self.W,
                                   route_configs=self.topp_route_configs,
-                                  attn_vis_config=self.attn_vis_config)
+                                  attn_vis_config=self.attn_vis_config,
+                                  debug_route=debug_route)
         if self.soft_routing:  # soft routing, always diffrentiable (if no detach)
             mul_weight = 'soft'
         elif self.diff_routing:  # hard differentiable routing

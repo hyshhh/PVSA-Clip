@@ -49,7 +49,8 @@ class Block(nn.Module):
                  use_pruned_kv_gather=False, pruned_kv_num_groups=1,
                  topp_route_configs=None,
                  attn_vis_config=None,
-                 use_fast_attention=False):
+                 use_fast_attention=False,
+                 debug_route=False):
         super().__init__()
         qk_dim = qk_dim or dim
 
@@ -87,7 +88,8 @@ class Block(nn.Module):
                                                 pruned_kv_num_groups=pruned_kv_num_groups,
                                                 topp_route_configs=topp_route_configs,
                                                 attn_vis_config=attn_vis_config,
-                                                use_fast_attention=use_fast_attention)
+                                                use_fast_attention=use_fast_attention,
+                                                debug_route=debug_route)
         elif topk == -1:
             self.attn = Attention(dim=dim)
         elif topk == -2:
@@ -376,7 +378,8 @@ class VTFormer(nn.Module):
                  pruned_kv_num_groups=1,
                  topp_route_configs=None,
                  attn_vis_config=None,
-                 use_fast_attention=False):
+                 use_fast_attention=False,
+                 debug_route=False):
 
         super().__init__()
         self.W=W
@@ -388,6 +391,7 @@ class VTFormer(nn.Module):
         self.topp_route_configs = topp_route_configs
         self.attn_vis_config = attn_vis_config
         self.use_fast_attention = use_fast_attention
+        self.debug_route = debug_route
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
         self.norm_eval = norm_eval
@@ -517,7 +521,8 @@ class VTFormer(nn.Module):
                         pruned_kv_num_groups=self.pruned_kv_num_groups,
                         topp_route_configs=self.topp_route_configs,
                         attn_vis_config=self.attn_vis_config,
-                        use_fast_attention=self.use_fast_attention) for j in range(depth[i])],  # 是否自动为卷积层补零，使得输出尺寸与输入一致
+                        use_fast_attention=self.use_fast_attention,
+                        debug_route=self.debug_route) for j in range(depth[i])],  # 是否自动为卷积层补零，使得输出尺寸与输入一致
             )
             if i in use_checkpoint_stages:
                 stage = checkpoint_wrapper(stage)
