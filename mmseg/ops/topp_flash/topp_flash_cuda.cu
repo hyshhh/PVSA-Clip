@@ -49,6 +49,7 @@ __global__ void topp_route_nwin7_kernel(
     float *__restrict__ route_weight,
     int64_t *__restrict__ route_idx,
     bool *__restrict__ route_mask,
+    int *__restrict__ max_keep,
     int64_t n,
     int64_t qk_dim,
     int64_t topk,
@@ -145,6 +146,7 @@ __global__ void topp_route_nwin7_kernel(
       selected_scores[tk] = prob;
     }
     if (keep_len < 1) keep_len = 1;
+    atomicMax(max_keep, keep_len);
 
     const int64_t out_base = static_cast<int64_t>(row) * topk;
     for (int tk = 0; tk < topk; tk++) {
@@ -153,6 +155,17 @@ __global__ void topp_route_nwin7_kernel(
       route_idx[out_base + tk] = valid ? selected_idx[tk] : 0;
       route_mask[out_base + tk] = valid;
     }
+  }
+}
+
+__global__ void topp_route_scale_kernel(float *__restrict__ route_weight,
+                                        int64_t total,
+                                        const int *__restrict__ max_keep,
+                                        float energy) {
+  const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x +
+                      threadIdx.x;
+  if (idx < total) {
+    route_weight[idx] *= static_cast<float>(max_keep[0]) * energy;
   }
 }
 
@@ -676,6 +689,7 @@ std::vector<torch::Tensor> topp_route_forward_cuda(torch::Tensor query,
       {n, SPECIAL_P2, topk}, query.options().dtype(torch::kLong));
   auto route_mask = torch::empty(
       {n, SPECIAL_P2, topk}, query.options().dtype(torch::kBool));
+  auto max_keep = torch::zeros({1}, query.options().dtype(torch::kInt));
 
   auto stream = at::cuda::getCurrentCUDAStream();
   const int blocks = static_cast<int>(n * SPECIAL_P2);
@@ -684,9 +698,15 @@ std::vector<torch::Tensor> topp_route_forward_cuda(torch::Tensor query,
       route_weight.data_ptr<float>(),
       route_idx.data_ptr<int64_t>(),
       route_mask.data_ptr<bool>(),
+      max_keep.data_ptr<int>(),
       n, qk_dim, topk, static_cast<float>(p),
       static_cast<float>(temperature), static_cast<float>(energy),
       static_cast<float>(scale));
+  const int64_t route_elems = route_weight.numel();
+  const int scale_blocks = static_cast<int>((route_elems + 255) / 256);
+  topp_route_scale_kernel<<<scale_blocks, 256, 0, stream>>>(
+      route_weight.data_ptr<float>(), route_elems, max_keep.data_ptr<int>(),
+      static_cast<float>(energy));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {route_weight, route_idx, route_mask};
 }

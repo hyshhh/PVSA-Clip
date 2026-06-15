@@ -216,17 +216,13 @@ class TopkRouting(nn.Module):
                     topk_score, topk_index, valid_mask = topp_route_cuda(
                         query, self.topk, self.P, self.Temperature,
                         self.energy, self.scale)
-                    keep_len = valid_mask.sum(dim=-1, keepdim=True)
-                    max_len = keep_len.max()
-                    topk_score = topk_score[..., :max_len] * max_len * self.energy
-                    topk_index = topk_index[..., :max_len]
-                    valid_mask = valid_mask[..., :max_len]
                     if self.debug_route:
+                        keep_len = valid_mask.sum(dim=-1)
                         print(
                             f'[Route] flag={self.route_flag} maxk={self.topk} '
                             f'p={self.P} temp={self.Temperature} '
                             f'energy={self.energy} '
-                            f'max_len={max_len.item()} '
+                            f'max_len={keep_len.max().item()} '
                             f'keep_len_min={keep_len.min().item():.0f} '
                             f'keep_len_mean={keep_len.float().mean().item():.1f}')
                     return topk_score, topk_index, valid_mask
