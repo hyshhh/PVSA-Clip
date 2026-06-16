@@ -119,6 +119,12 @@ test_evaluator = val_evaluator
 # --------------------------
 # 模型额外配置（仅修改部分）
 # --------------------------
+grad_spike_debug = False
+grad_spike_debug_cfg = dict(
+    type='GradSpikeDebugHook',
+    threshold=10000,
+    topk=10,
+    interval=1)
 model = dict(
     data_preprocessor=data_preprocessor,
     test_cfg=dict(mode='whole')
@@ -126,3 +132,5 @@ model = dict(
 default_hooks = dict(
     checkpoint=dict(type='CheckpointHook', by_epoch=True, interval=25)
 )
+if grad_spike_debug:
+    custom_hooks = [grad_spike_debug_cfg]

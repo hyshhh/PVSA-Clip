@@ -14,7 +14,7 @@ CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_
 如果训练中偶发出现超大梯度，可以临时打开梯度尖峰定位钩子，只在异常时打印梯度最大的参数：
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
-  --cfg-options model.backbone.topp_flash_backend=None model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False train_dataloader.batch_size=16 custom_hooks="[dict(type='GradSpikeDebugHook', threshold=10000, topk=10, interval=1)]" \
+  --cfg-options model.backbone.topp_flash_backend=None model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False train_dataloader.batch_size=16 grad_spike_debug=True \
   --work-dir /media/ddc/新加卷/hys/hysnew3/PVSA-v2.3/work_dirs/nex/0.1111
 ```
 ## 原始路径推理
