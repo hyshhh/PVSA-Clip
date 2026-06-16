@@ -8,6 +8,7 @@
 只使用原始路径训练：
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+  --work-dir /media/ddc/新加卷/hys/hysnew3/PVSA-v2.3/work_dirs/gqy \
   --cfg-options model.backbone.topp_flash_backend=None model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False train_dataloader.batch_size=4
 ```
 ## 原始路径推理
@@ -27,7 +28,7 @@ python tools/analysis_tools/get_flops.py \
 CUDA_VISIBLE_DEVICES=0 python tools/test.py \
   configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
   /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth \
-  --show-dir qmy/test
+  --show-dir /media/ddc/新加卷/hys/hysnew3/PVSA-v2.3/vis_results/gqy
 ```
 ## 自定义 CUDA 核推理
 首次运行或修改 CUDA 源码后，建议先清理旧编译缓存：
