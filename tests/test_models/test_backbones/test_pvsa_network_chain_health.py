@@ -81,6 +81,8 @@ def test_fusion_and_route_mechanism_options_are_configurable():
     assert "mask_source='branch_low'" in backbone
     assert "mask_source must be one of 'branch_low' or 'fused_low'." in backbone
     assert 'route_pooling=' in backbone
+    assert "route_pooling='avgmax'" in backbone
+    assert 'route_pooling=route_pooling' in backbone
     assert 'if i in self.fam_stages:' in fusion
     assert 'self.bn11 = nn.ModuleList()' in fusion
     assert 'self.bn12 = nn.ModuleList()' in fusion

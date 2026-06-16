@@ -152,6 +152,7 @@ class Block(nn.Module):
                  attn_vis_config=None,
                  use_fast_attention=False,
                  debug_route=False,
+                 route_pooling='avgmax',
                  topp_flash_debug=False):
         super().__init__()
         qk_dim = qk_dim or dim
@@ -182,6 +183,7 @@ class Block(nn.Module):
                                                 attn_vis_config=attn_vis_config,
                                                 use_fast_attention=use_fast_attention,
                                                 debug_route=debug_route,
+                                                route_pooling=route_pooling,
                                                 topp_flash_debug=topp_flash_debug)
         elif topk == -1:
             self.use_topp_attention = False
