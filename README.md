@@ -8,22 +8,22 @@
 只使用原始路径训练：
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
-  --cfg-options model.backbone.use_topp_flash=False model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False train_dataloader.batch_size=4
+  --cfg-options model.backbone.topp_flash_backend=None model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False train_dataloader.batch_size=4
 ```
 ## 原始路径推理
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
   configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
   /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth \
-  --cfg-options model.backbone.use_topp_flash=False
+  --cfg-options model.backbone.topp_flash_backend=None
 ```
 ## 自定义 CUDA 核推理
 首次运行或修改 CUDA 源码后，建议先清理旧编译缓存：
 ```bash
 rm -rf ~/.cache/torch_extensions/py*/pvsa_topp_flash_cuda
 ```
-TopP Flash 推理只保留两个开关：
-- `model.backbone.topp_flash_backend=torch` 或 `cuda`
+TopP 推理只保留两个开关：
+- `model.backbone.topp_flash_backend=None` 或 `cuda`
 - `model.backbone.topp_flash_debug=False` 或 `True`
 
 推理模板：
@@ -34,14 +34,13 @@ export CXX=/usr/bin/g++-11
 CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
   configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
   /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth \
-  --cfg-options model.backbone.use_topp_flash=True \
-  model.backbone.topp_flash_backend=cuda \
+  --cfg-options model.backbone.topp_flash_backend=cuda \
   model.backbone.topp_flash_debug=False
 ```
 
 打印各环节时间时，只把 `model.backbone.topp_flash_debug` 改成 `True`。
 
-最后一层改成 49 窗口全连接注意力评估：
+最后一层默认使用 49 窗口全连接路由，不再需要额外开关。
 ```bash
 export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-V2.2:$PYTHONPATH
 export CC=/usr/bin/gcc-11
@@ -49,13 +48,11 @@ export CXX=/usr/bin/g++-11
 CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
   configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
   /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth \
-  --cfg-options model.backbone.use_topp_flash=True \
-  model.backbone.topp_flash_backend=cuda \
-  model.backbone.topp_flash_debug=True \
-  model.backbone.topp_flash_full_last_stage=True
+  --cfg-options model.backbone.topp_flash_backend=cuda \
+  model.backbone.topp_flash_debug=True
 ```
 
-PyTorch 后端示例：
+普通后端示例：
 ```bash
 export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-V2.2:$PYTHONPATH
 export CC=/usr/bin/gcc-11
@@ -63,8 +60,7 @@ export CXX=/usr/bin/g++-11
 CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
   configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
   /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth \
-  --cfg-options model.backbone.use_topp_flash=True \
-  model.backbone.topp_flash_backend=torch \
+  --cfg-options model.backbone.topp_flash_backend=None \
   model.backbone.topp_flash_debug=False
 ```
 

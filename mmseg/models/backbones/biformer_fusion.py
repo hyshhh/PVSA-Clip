@@ -49,39 +49,32 @@ def _log_topp_branch_stage_debug(stage, x_shape, cnn_shape, out_shape, times):
 class BiFormer_fusion(VTFormer):
     def __init__(self,
                  pretrained=None,
-                 use_topp_flash=False,
                  topp_flash_backend=None,
                  topp_flash_block_windows=64,
                  topp_flash_debug=False,
-                 topp_flash_full_last_stage=False,
                  use_pruned_kv_gather=False,
                  feature_vis_config=None,
                  **kwargs):
         try:
             super().__init__(
-                use_topp_flash=use_topp_flash,
                 topp_flash_backend=topp_flash_backend,
                 topp_flash_block_windows=topp_flash_block_windows,
                 topp_flash_debug=topp_flash_debug,
-                topp_flash_full_last_stage=topp_flash_full_last_stage,
                 use_pruned_kv_gather=use_pruned_kv_gather,
                 **kwargs)
         except TypeError as exc:
             flash_args = (
-                'use_topp_flash',
                 'topp_flash_backend',
                 'topp_flash_block_windows',
                 'topp_flash_debug',
-                'topp_flash_full_last_stage',
                 'use_pruned_kv_gather',
             )
             if not any(arg in str(exc) for arg in flash_args):
                 raise
-            if (use_topp_flash or topp_flash_backend is not None
-                    or topp_flash_debug or topp_flash_full_last_stage
+            if (topp_flash_backend is not None or topp_flash_debug
                     or use_pruned_kv_gather):
                 warnings.warn(
-                    '当前 VTFormer 不支持 Top-P Flash 参数，已降级为普通注意力路径。')
+                    '当前 VTFormer 不支持 Top-P CUDA 参数，已降级为普通注意力路径。')
             super().__init__(**kwargs)
         self.topp_flash_debug = topp_flash_debug
         self.extra_norms = nn.ModuleList()
@@ -135,6 +128,8 @@ class BiFormer_fusion(VTFormer):
 
 
     def forward_features(self, x: torch.Tensor):
+        if not self.training:
+            self.optimize_for_inference()
         out = []
         cnn_encoder_out = x
         stage_profile = self.topp_flash_debug
@@ -216,9 +211,9 @@ class BiFormer_fusion(VTFormer):
                 self._save_feature_channel_as_image(self.upsample2(bn_channel2), f'{save_dir}/mask2.png')
             channel3[i] = run_stage_timer(
                 stage_times, 'mask_fusion', channel3[i],
-                lambda i=i: channel3[i] +
-                self.upsample2(bn_channel1) * channel3[i] +
-                self.upsample2(bn_channel2) * channel3[i])
+                lambda i=i: channel3[i] * (
+                    1 + self.upsample2(bn_channel1) +
+                    self.upsample2(bn_channel2)))
             if stage_times:
                 _log_topp_branch_stage_debug(
                     f'mask{i}', tuple(channel1[i + 1].shape),

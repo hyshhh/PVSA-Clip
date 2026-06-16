@@ -47,22 +47,15 @@ model = dict(
         pre_norm=True,
         pe=None,
         auto_pad=True,
-        # Top-p attention backend switch.
-        # 1) Original path: use_topp_flash=False. This keeps the old
-        #    kv_gather -> attention implementation and uses the most memory.
-        # 2) CUDA path: set use_topp_flash=True and
-        #    topp_flash_backend='cuda'. The CUDA kernel uses keep_len instead
-        #    of r_mask internally and should be used on a server with a valid
-        #    CUDA extension build toolchain. Set PVSA_TOPP_FLASH_STRICT_CUDA=1
-        #    on the server if you want failures instead of fallback.
-        use_topp_flash=True,
-        topp_flash_backend='cuda',
+        # Top-P 推理后端切换：
+        # - topp_flash_backend=None：训练和普通推理路径。
+        # - topp_flash_backend='cuda'：自定义 CUDA 路由/注意力推理路径。
+        # 最后一层默认使用 49 个窗口全连接路由，不再暴露额外开关。
+        topp_flash_backend=None,
         topp_flash_block_windows=16,
         # 打开后打印 PVSA TopP Stage，包括 Transformer、Router kernel、
         # Flash kernel、CNN 分支和融合模块耗时。
         topp_flash_debug=False,
-        # 实验开关：最后一层跳过 Top-P 路由，直接用 49 个窗口全连接注意力。
-        topp_flash_full_last_stage=False,
         use_pruned_kv_gather=False,
         # pruned_kv_gather 粗分桶数量。按 keep_len 范围切成 N 个桶，
         # 例如 topk=8 且 N=2 时，桶范围为 1-4 和 5-8。

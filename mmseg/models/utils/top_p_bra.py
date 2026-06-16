@@ -22,6 +22,19 @@ DEFAULT_ATTN_VIS_CONFIG = dict(enabled=False)
 _TOPP_FLASH_STAGE_LOGGED = set()
 
 
+def _normalize_topp_backend(backend: Optional[str]) -> Optional[str]:
+    if backend is None:
+        return None
+    backend = str(backend).strip().lower()
+    if backend in ('', 'none', 'false', 'off'):
+        return None
+    return backend
+
+
+def _use_topp_cuda_backend(backend: Optional[str]) -> bool:
+    return _normalize_topp_backend(backend) in ('cuda', 'cuda_forward')
+
+
 def _normalize_route_configs(route_configs: Optional[Dict]) -> Dict[int, Dict]:
     if not route_configs:
         raise ValueError(
@@ -390,15 +403,14 @@ class ToppAttention(nn.Module):
                  kv_per_win=4, kv_downsample_ratio=4, kv_downsample_kernel=None, kv_downsample_mode='identity',
                  topk=4, param_attention="qkvo", param_routing=False, diff_routing=False, soft_routing=True,
                  side_dwconv=3,
-                 auto_pad=False,W=False, use_topp_flash=False,
+                 auto_pad=False,W=False,
                  topp_flash_block_windows=64, topp_flash_backend=None,
                  use_pruned_kv_gather=False, pruned_kv_num_groups=1,
                  topp_route_configs=None,
                  attn_vis_config=None,
                  use_fast_attention=False,
                  debug_route=False,
-                 topp_flash_debug=False,
-                 topp_flash_full_last_stage=False):
+                 topp_flash_debug=False):
         super().__init__()
         # local attention setting
         self.dim = dim
@@ -408,16 +420,14 @@ class ToppAttention(nn.Module):
         assert self.qk_dim % num_heads == 0 and self.dim % num_heads == 0, 'qk_dim and dim must be divisible by num_heads!'
         self.scale = qk_scale or self.qk_dim ** -0.5
         self.W=W
-        self.use_topp_flash = use_topp_flash
         self.topp_flash_block_windows = topp_flash_block_windows
-        self.topp_flash_backend = topp_flash_backend
+        self.topp_flash_backend = _normalize_topp_backend(topp_flash_backend)
         self.use_pruned_kv_gather = use_pruned_kv_gather
         self.pruned_kv_num_groups = pruned_kv_num_groups
         self.topp_route_configs = topp_route_configs
         self.attn_vis_config = attn_vis_config
         self.use_fast_attention = use_fast_attention
         self.topp_flash_debug = topp_flash_debug
-        self.topp_flash_full_last_stage = topp_flash_full_last_stage
         self._topp_flash_warned = False
 
         ################side_dwconv (i.e. LCE in ShuntedTransformer)###########
@@ -564,29 +574,25 @@ class ToppAttention(nn.Module):
 
         ############ gather q dependent k/v #################
 
-        if self.use_topp_flash and not ret_attn_mask:
+        if _use_topp_cuda_backend(self.topp_flash_backend) and not ret_attn_mask:
             if self.training:
                 raise RuntimeError(
-                    'topp flash optimized path is inference-only. '
-                    'Set model.backbone.use_topp_flash=False for training.')
+                    'topp cuda backend is inference-only. '
+                    'Set model.backbone.topp_flash_backend=None for training.')
             if self.attn_vis_config.get('enabled', False):
                 raise RuntimeError(
-                    'topp flash inference requires attn_vis disabled.')
+                    'topp cuda inference requires attn_vis disabled.')
             if self.W and GA is not None:
                 raise RuntimeError(
-                    'topp flash inference does not support GA route input.')
+                    'topp cuda inference does not support GA route input.')
             if not is_topp_flash_available(self.topp_flash_backend):
                 raise RuntimeError(
-                    'topp flash extension is unavailable.')
+                    'topp cuda extension is unavailable.')
 
-            route_with_cuda = str(self.topp_flash_backend or '').strip().lower() in (
-                'cuda', 'cuda_forward')
             full_route = (
-                self.topp_flash_full_last_stage and
                 self.qk_dim == 512 and self.dim == 512 and
                 self.n_win == 7 and self.router.topk == 49)
-            if route_with_cuda and can_run_topp_route_cuda(
-                    q_win, self.router.topk):
+            if can_run_topp_route_cuda(q_win, self.router.topk):
                 try:
                     r_weight, r_idx, keep_len = run_stage(
                         'router',
@@ -621,9 +627,8 @@ class ToppAttention(nn.Module):
                         lambda: self.router(q_win, k_win, GA))
                     keep_len = r_mask.sum(dim=-1).contiguous().long()
             else:
-                if route_with_cuda:
-                    warn_topp_route_cuda_fallback(
-                        'shape, dtype, or runtime state rejected CUDA route kernel.')
+                warn_topp_route_cuda_fallback(
+                    'shape, dtype, or runtime state rejected CUDA route kernel.')
                 r_weight, r_idx, r_mask = run_stage(
                     'router',
                     lambda: self.router(q_win, k_win, GA))

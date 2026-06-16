@@ -198,11 +198,9 @@ def run_full_module_check(args, device):
         qk_dim=args.qk_dim,
         kv_downsample_mode='identity',
         topk=6,
-        auto_pad=False,
-        use_topp_flash=False)
+        auto_pad=False)
     ref = ToppAttention(**module_kwargs).to(device).eval()
     flash = copy.deepcopy(ref).to(device).eval()
-    flash.use_topp_flash = True
     flash.topp_flash_block_windows = args.block_windows
     flash.topp_flash_backend = args.backend
 

@@ -5,6 +5,7 @@ from typing import Optional, Union
 
 import torch
 import torch.nn as nn
+from torch.nn.utils.fusion import fuse_conv_bn_eval
 
 from einops.layers.torch import Rearrange
 from fairscale.nn.checkpoint import checkpoint_wrapper
@@ -16,6 +17,48 @@ from ..utils.common import Attention, AttentionLePE, DWConv
 from ..utils.bra_legacy_hys_v4 import BiLevelRoutingAttention
 from ..utils.top_p_bra import ToppAttention
 from mmseg.registry import MODELS
+
+
+def _normalize_topp_backend(backend):
+    if backend is None:
+        return None
+    backend = str(backend).strip().lower()
+    if backend in ('', 'none', 'false', 'off'):
+        return None
+    return backend
+
+
+def _use_topp_cuda_backend(backend):
+    return _normalize_topp_backend(backend) in ('cuda', 'cuda_forward')
+
+
+def _fuse_conv_bn(conv, bn):
+    if not isinstance(bn, nn.modules.batchnorm._BatchNorm):
+        return conv, bn
+    if conv.training or bn.training:
+        return conv, bn
+    fused = fuse_conv_bn_eval(conv, bn)
+    return fused, nn.Identity()
+
+
+def _fuse_sequential_conv_bn(module):
+    for child in module.children():
+        _fuse_sequential_conv_bn(child)
+    if not isinstance(module, nn.Sequential):
+        return
+    children = list(module.children())
+    i = 0
+    while i + 1 < len(children):
+        if isinstance(children[i], nn.Conv2d) and isinstance(
+                children[i + 1], nn.modules.batchnorm._BatchNorm):
+            children[i], children[i + 1] = _fuse_conv_bn(
+                children[i], children[i + 1])
+            i += 2
+        else:
+            i += 1
+    module._modules.clear()
+    for idx, child in enumerate(children):
+        module.add_module(str(idx), child)
 
 
 
@@ -44,15 +87,14 @@ class Block(nn.Module):
                  topk=4, param_attention="qkvo", param_routing=False, diff_routing=False, soft_routing=False,
                  mlp_ratio=4, mlp_dwconv=False,
                  side_dwconv=5, before_attn_dwconv=3, pre_norm=True, auto_pad=False,W=False,
-                 use_topp_flash=False, topp_flash_block_windows=64,
+                 topp_flash_block_windows=64,
                  topp_flash_backend=None,
                  use_pruned_kv_gather=False, pruned_kv_num_groups=1,
                  topp_route_configs=None,
                  attn_vis_config=None,
                  use_fast_attention=False,
                  debug_route=False,
-                 topp_flash_debug=False,
-                 topp_flash_full_last_stage=False):
+                 topp_flash_debug=False):
         super().__init__()
         qk_dim = qk_dim or dim
 
@@ -83,7 +125,6 @@ class Block(nn.Module):
                                                 diff_routing=diff_routing, soft_routing=soft_routing,
                                                 side_dwconv=side_dwconv,
                                                 auto_pad=auto_pad,W=self.W,
-                                                use_topp_flash=use_topp_flash,
                                                 topp_flash_block_windows=topp_flash_block_windows,
                                                 topp_flash_backend=topp_flash_backend,
                                                 use_pruned_kv_gather=use_pruned_kv_gather,
@@ -92,8 +133,7 @@ class Block(nn.Module):
                                                 attn_vis_config=attn_vis_config,
                                                 use_fast_attention=use_fast_attention,
                                                 debug_route=debug_route,
-                                                topp_flash_debug=topp_flash_debug,
-                                                topp_flash_full_last_stage=topp_flash_full_last_stage)
+                                                topp_flash_debug=topp_flash_debug)
         elif topk == -1:
             self.attn = Attention(dim=dim)
         elif topk == -2:
@@ -262,6 +302,15 @@ class DepthWiseConvModule(nn.Module):
             identity = self.downsample(x)      
         return out + identity
 
+    def fuse_for_inference(self):
+        if self.training:
+            return
+        self.fc1, self.bn1 = _fuse_conv_bn(self.fc1, self.bn1)
+        self.pe_conv, self.bn2 = _fuse_conv_bn(self.pe_conv, self.bn2)
+        self.fc2, self.bn3 = _fuse_conv_bn(self.fc2, self.bn3)
+        if self.downsample is not None:
+            _fuse_sequential_conv_bn(self.downsample)
+
 class ChannelWeights(nn.Module):
     def __init__(self, dim, reduction=1):
         super(ChannelWeights, self).__init__()
@@ -375,7 +424,6 @@ class VTFormer(nn.Module):
                  mlp_dwconv=False,
                  norm_eval=False,
                  W=False,
-                 use_topp_flash=False,
                  topp_flash_block_windows=64,
                  topp_flash_backend=None,
                  use_pruned_kv_gather=False,
@@ -384,14 +432,12 @@ class VTFormer(nn.Module):
                  attn_vis_config=None,
                  use_fast_attention=False,
                  debug_route=False,
-                 topp_flash_debug=False,
-                 topp_flash_full_last_stage=False):
+                 topp_flash_debug=False):
 
         super().__init__()
         self.W=W
-        self.use_topp_flash = use_topp_flash
         self.topp_flash_block_windows = topp_flash_block_windows
-        self.topp_flash_backend = topp_flash_backend
+        self.topp_flash_backend = _normalize_topp_backend(topp_flash_backend)
         self.use_pruned_kv_gather = use_pruned_kv_gather
         self.pruned_kv_num_groups = pruned_kv_num_groups
         self.topp_route_configs = topp_route_configs
@@ -399,7 +445,7 @@ class VTFormer(nn.Module):
         self.use_fast_attention = use_fast_attention
         self.debug_route = debug_route
         self.topp_flash_debug = topp_flash_debug
-        self.topp_flash_full_last_stage = topp_flash_full_last_stage
+        self._inference_fused = False
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
         self.norm_eval = norm_eval
@@ -522,7 +568,6 @@ class VTFormer(nn.Module):
                         pre_norm=pre_norm,
                         auto_pad=auto_pad,
                         W=self.W,
-                        use_topp_flash=self.use_topp_flash,
                         topp_flash_block_windows=self.topp_flash_block_windows,
                         topp_flash_backend=self.topp_flash_backend,
                         use_pruned_kv_gather=self.use_pruned_kv_gather,
@@ -531,8 +576,7 @@ class VTFormer(nn.Module):
                         attn_vis_config=self.attn_vis_config,
                         use_fast_attention=self.use_fast_attention,
                         debug_route=self.debug_route,
-                        topp_flash_debug=self.topp_flash_debug,
-                        topp_flash_full_last_stage=self.topp_flash_full_last_stage) for j in range(depth[i])],  # 是否自动为卷积层补零，使得输出尺寸与输入一致
+                        topp_flash_debug=self.topp_flash_debug) for j in range(depth[i])],  # 是否自动为卷积层补零，使得输出尺寸与输入一致
             )
             if i in use_checkpoint_stages:
                 stage = checkpoint_wrapper(stage)
@@ -574,6 +618,18 @@ class VTFormer(nn.Module):
     def reset_classifier(self, num_classes, global_pool=''):
         self.num_classes = num_classes
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
+
+    def optimize_for_inference(self):
+        if self.training or self._inference_fused:
+            return
+        for layer in self.downsample_layers:
+            _fuse_sequential_conv_bn(layer)
+        for layer in self.downsample_layers2:
+            _fuse_sequential_conv_bn(layer)
+        for module in self.modules():
+            if isinstance(module, DepthWiseConvModule):
+                module.fuse_for_inference()
+        self._inference_fused = True
 
     def forward_features(self, x):
         for i in range(4):
