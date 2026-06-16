@@ -38,3 +38,21 @@ def test_depthwise_conv_module_fuse_for_inference_matches_eval_output():
     assert isinstance(module.bn1, torch.nn.Identity)
     assert isinstance(module.bn2, torch.nn.Identity)
     assert isinstance(module.bn3, torch.nn.Identity)
+
+
+def test_flops_analysis_disables_dynamic_inference_fusion():
+    root = Path(__file__).resolve().parents[3]
+    backbone = (
+        root / 'mmseg' / 'models' / 'backbones' / 'bi_topp_vote.py'
+    ).read_text(encoding='utf-8')
+    fusion = (
+        root / 'mmseg' / 'models' / 'backbones' / 'biformer_fusion.py'
+    ).read_text(encoding='utf-8')
+    flops = (
+        root / 'tools' / 'analysis_tools' / 'get_flops.py'
+    ).read_text(encoding='utf-8')
+
+    assert 'self._disable_inference_fusion = False' in backbone
+    assert 'or self._disable_inference_fusion' in backbone
+    assert 'or self._disable_inference_fusion' in fusion
+    assert "model.backbone._disable_inference_fusion = True" in flops

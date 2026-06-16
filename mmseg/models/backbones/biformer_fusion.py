@@ -142,7 +142,8 @@ class BiFormer_fusion(VTFormer):
 
     def optimize_for_inference(self):
         super().optimize_for_inference()
-        if self.training or self._branch_inference_fused:
+        if (self.training or self._branch_inference_fused
+                or self._disable_inference_fusion):
             return
         for idx in range(len(self.conv11)):
             bn11 = self.bn11[idx]

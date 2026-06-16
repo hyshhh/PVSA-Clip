@@ -575,6 +575,7 @@ class VTFormer(nn.Module):
             extra_block_type)
         self.depth = [cfg['blocks'] for cfg in self.stage_archs]
         self._inference_fused = False
+        self._disable_inference_fusion = False
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
         self.norm_eval = norm_eval
@@ -736,7 +737,8 @@ class VTFormer(nn.Module):
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
     def optimize_for_inference(self):
-        if self.training or self._inference_fused:
+        if (self.training or self._inference_fused
+                or self._disable_inference_fusion):
             return
         for layer in self.downsample_layers:
             _fuse_sequential_conv_bn(layer)
