@@ -72,8 +72,8 @@ model = dict(
         layer_scale_init_value=-1,
         qk_dims=[64, 128, 256, 512],
         head_dim=32,
-        # 旧实现实际强制启用了soft routing；这里显式写出，避免配置和运行行为不一致。
-        param_routing=False, diff_routing=False, soft_routing=True,
+        # 训练默认使用硬路由选择，避免路由权重直接放大KV导致梯度尖峰。
+        param_routing=False, diff_routing=False, soft_routing=False,
         pre_norm=True,
         pe=None,
         auto_pad=True,
