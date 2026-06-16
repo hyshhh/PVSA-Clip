@@ -9,6 +9,8 @@ def test_biformer_fusion_reports_wall_time_and_serial_diagnostics():
 
     assert 'def _time_cuda_wall' in source
     assert 'stage_total_wall' in source
+    assert 'PVSA_SERIAL_STAGE_PROFILE' in source
+    assert 'serial_stage_profile' in source
     assert 'serial_cnn_branch' in source
     assert 'serial_trans_down' in source
     assert 'serial_trans_stage' in source
