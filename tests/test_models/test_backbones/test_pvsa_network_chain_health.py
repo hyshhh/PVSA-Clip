@@ -98,6 +98,6 @@ def test_fusion_and_route_mechanism_options_are_configurable():
     assert 'q_route = 0.5 * (q.mean([2, 3]) + q.amax(dim=(2, 3)))' in route
     assert 'fam_stages=[0, 1, 2, 3]' in model_cfg
     assert "mask_source='branch_low'" in model_cfg
-    assert "route_pooling='avgmax'" in model_cfg
+    assert "route_pooling='avg'" in model_cfg
     assert 'img_scale = (224, 224)' in dataset_cfg
     assert 'crop_size = (224, 224)' in dataset_cfg

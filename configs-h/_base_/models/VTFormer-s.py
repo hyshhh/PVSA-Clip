@@ -45,8 +45,8 @@ model = dict(
         # mask_source='branch_low'：当前低层Transformer/CNN分别生成mask；
         # mask_source='fused_low'：当前低层融合特征channel3生成mask。
         mask_source='branch_low',
-        # 路由窗口特征池化方式：avg为旧版均值池化，avgmax融合均值和最大响应。
-        route_pooling='avgmax',
+        # 路由窗口特征池化方式。训练默认用avg，避免max响应偶发放大路由梯度。
+        route_pooling='avg',
         kv_downsample_mode='identity',
         kv_per_wins=[-1, -1, -1, -1],
         # 四层网络的 Top-P 路由标志位。每个标志位会到
