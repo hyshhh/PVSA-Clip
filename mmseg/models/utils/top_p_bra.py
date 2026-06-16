@@ -234,7 +234,10 @@ class TopkRouting(nn.Module):
             attn, k=self.topk, dim=-1, sorted=True
         )  # (n, p2, k)
 
-        topk_score = torch.softmax(topk_score /self.Temperature, dim=-1)
+        topk_score = torch.nan_to_num(topk_score, nan=0.0, posinf=50.0,
+                                      neginf=-50.0)
+        topk_score = (topk_score / self.Temperature).clamp(-50.0, 50.0)
+        topk_score = torch.softmax(topk_score, dim=-1)
         self._maybe_save_attention(attn, topk_score, topk_index)
 
         # 5️⃣ Cumulative probability pruning

@@ -90,11 +90,12 @@ optim_wrapper = dict(
     _delete_=True,
     type='OptimWrapper',
     optimizer=dict(type='AdamW', lr=6e-4, betas=(0.9, 0.999), weight_decay=0.01),
+    clip_grad=dict(max_norm=1.0, norm_type=2),
     paramwise_cfg=dict(
         custom_keys={
             'pos_block': dict(decay_mult=0.0),
             'norm': dict(decay_mult=0.0),
-            'head': dict(lr_mult=10.0)
+            'head': dict(lr_mult=1.0)
         })
 )
 

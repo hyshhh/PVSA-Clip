@@ -71,6 +71,7 @@ class BiFormer_fusion(VTFormer):
                  topp_flash_debug=False,
                  use_pruned_kv_gather=False,
                  feature_vis_config=None,
+                 mask_fusion_scale=0.5,
                  **kwargs):
         try:
             super().__init__(
@@ -120,6 +121,7 @@ class BiFormer_fusion(VTFormer):
         if feature_vis_config:
             default_feature_vis_config.update(feature_vis_config)
         self.feature_vis_config = default_feature_vis_config
+        self.mask_fusion_scale = float(mask_fusion_scale)
         self._branch_inference_fused = False
         self._parallel_branch_streams = {}
 
@@ -266,7 +268,8 @@ class BiFormer_fusion(VTFormer):
             channel3[i] = _run_with_optional_wall_time(
                 stage_profile, channel3[i], stage_times, 'mask_fusion',
                 lambda i=i: channel3[i] * (
-                    1 + bn_channel1 + bn_channel2))
+                    1 + self.mask_fusion_scale * (
+                        bn_channel1 + bn_channel2)))
             if stage_times:
                 _log_topp_branch_stage_debug(
                     f'mask{i}', tuple(mask_source1.shape),

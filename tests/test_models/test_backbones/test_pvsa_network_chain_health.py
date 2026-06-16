@@ -86,6 +86,9 @@ def test_fusion_and_route_mechanism_options_are_configurable():
     assert 'if i in self.fam_stages:' in fusion
     assert 'self.bn11 = nn.ModuleList()' in fusion
     assert 'self.bn12 = nn.ModuleList()' in fusion
+    assert 'mask_fusion_scale=0.5' in fusion
+    assert 'self.mask_fusion_scale = float(mask_fusion_scale)' in fusion
+    assert 'self.mask_fusion_scale * (' in fusion
     assert "if self.mask_source == 'branch_low':" in fusion
     assert 'mask_source1 = channel1[i]' in fusion
     assert 'mask_source2 = channel2[i]' in fusion

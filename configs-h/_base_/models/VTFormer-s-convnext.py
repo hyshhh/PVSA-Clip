@@ -7,6 +7,7 @@ _base_ = './VTFormer-s.py'
 model = dict(
     backbone=dict(
         extra_block_type='convnext',
+        mask_fusion_scale=0.5,
         stage_archs=[
             dict(
                 blocks=3,
