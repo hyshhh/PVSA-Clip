@@ -85,6 +85,9 @@ __global__ void topp_route_nwin7_kernel_fixed_normed(
   const int batch = row / SPECIAL_P2;
   const int q_win = row - batch * SPECIAL_P2;
   const int tid = threadIdx.x;
+  const int lane = tid & (WARP_SIZE - 1);
+  const int warp_id = tid / WARP_SIZE;
+  constexpr int WARPS_IN_BLOCK = BLOCK_THREADS / WARP_SIZE;
   const int64_t batch_base =
       static_cast<int64_t>(batch) * SPECIAL_P2 * QK_DIM;
   const int64_t q_base = batch_base + static_cast<int64_t>(q_win) * QK_DIM;
@@ -94,18 +97,20 @@ __global__ void topp_route_nwin7_kernel_fixed_normed(
   }
   __syncthreads();
 
-  if (tid < SPECIAL_P2) {
-    const int k_win = tid;
+  for (int k_win = warp_id; k_win < SPECIAL_P2; k_win += WARPS_IN_BLOCK) {
     const int64_t k_base = batch_base + static_cast<int64_t>(k_win) * QK_DIM;
     float dot = 0.0f;
 #pragma unroll 4
-    for (int d = 0; d < QK_DIM; d++) {
+    for (int d = lane; d < QK_DIM; d += WARP_SIZE) {
       dot += s_q[d] * query[k_base + d];
     }
-    const int64_t norm_base = static_cast<int64_t>(batch) * SPECIAL_P2;
-    const float inv_q = rsqrtf(route_norm[norm_base + q_win]);
-    const float inv_k = rsqrtf(route_norm[norm_base + k_win]);
-    s_scores[k_win] = dot * inv_q * inv_k * scale;
+    dot = warp_reduce_sum(dot);
+    if (lane == 0) {
+      const int64_t norm_base = static_cast<int64_t>(batch) * SPECIAL_P2;
+      const float inv_q = rsqrtf(route_norm[norm_base + q_win]);
+      const float inv_k = rsqrtf(route_norm[norm_base + k_win]);
+      s_scores[k_win] = dot * inv_q * inv_k * scale;
+    }
   }
   __syncthreads();
 
@@ -1056,8 +1061,8 @@ void launch_route_batch_nwin7(torch::Tensor query,
   const int route_blocks = static_cast<int>(n * SPECIAL_P2);
   topp_route_norm_nwin7_kernel<QK_DIM><<<norm_blocks, WARP_SIZE, 0, stream>>>(
       query.data_ptr<float>(), route_norm.data_ptr<float>(), n);
-  topp_route_nwin7_kernel_fixed_normed<QK_DIM, ROUTE_THREADS>
-      <<<route_blocks, ROUTE_THREADS, 0, stream>>>(
+  topp_route_nwin7_kernel_fixed_normed<QK_DIM, THREADS_PER_BLOCK>
+      <<<route_blocks, THREADS_PER_BLOCK, 0, stream>>>(
           query.data_ptr<float>(), route_norm.data_ptr<float>(),
           route_weight.data_ptr<float>(), route_idx.data_ptr<int32_t>(),
           route_keep_len.data_ptr<int32_t>(), n, topk, p, temperature,
