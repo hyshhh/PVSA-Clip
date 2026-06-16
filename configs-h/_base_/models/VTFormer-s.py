@@ -15,6 +15,9 @@ model = dict(
         embed_dim=[64, 128, 256, 512],     # BiFormer的通道配置
         depth=[3, 4, 6, 3],               # 每个stage的block数量
         # depth=[1, 3, 4, 2],               # 每个stage的block数量
+        # Transformer分支下采样后额外堆叠的DepthWiseConvModule数量。
+        # 默认[0, 0, 0, 0]等价于原始结构；增加会增强分支但会增加耗时，需重新训练或微调。
+        transformer_branch_depth=[0, 0, 0, 0],
         # CNN并行分支每个stage额外堆叠的DepthWiseConvModule数量。
         # 默认[2, 1, 2, 1]等价于原始源码写死结构；减小会加速，但需重新训练或微调。
         cnn_branch_depth=[2, 1, 2, 1],

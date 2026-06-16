@@ -32,14 +32,14 @@ def _use_topp_cuda_backend(backend):
     return _normalize_topp_backend(backend) in ('cuda', 'cuda_forward')
 
 
-def _normalize_cnn_branch_depth(cnn_branch_depth):
-    if cnn_branch_depth is None:
-        return [2, 1, 2, 1]
-    if len(cnn_branch_depth) != 4:
-        raise ValueError('cnn_branch_depth must contain 4 stage depths.')
-    depths = [int(depth) for depth in cnn_branch_depth]
+def _normalize_branch_depth(branch_depth, default, name):
+    if branch_depth is None:
+        return list(default)
+    if len(branch_depth) != 4:
+        raise ValueError(f'{name} must contain 4 stage depths.')
+    depths = [int(depth) for depth in branch_depth]
     if any(depth < 0 for depth in depths):
-        raise ValueError('cnn_branch_depth values must be non-negative.')
+        raise ValueError(f'{name} values must be non-negative.')
     return depths
 
 
@@ -444,6 +444,7 @@ class VTFormer(nn.Module):
                  attn_vis_config=None,
                  use_fast_attention=False,
                  debug_route=False,
+                 transformer_branch_depth=None,
                  cnn_branch_depth=None,
                  topp_flash_debug=False):
 
@@ -458,7 +459,11 @@ class VTFormer(nn.Module):
         self.use_fast_attention = use_fast_attention
         self.debug_route = debug_route
         self.topp_flash_debug = topp_flash_debug
-        self.cnn_branch_depth = _normalize_cnn_branch_depth(cnn_branch_depth)
+        self.transformer_branch_depth = _normalize_branch_depth(
+            transformer_branch_depth, [0, 0, 0, 0],
+            'transformer_branch_depth')
+        self.cnn_branch_depth = _normalize_branch_depth(
+            cnn_branch_depth, [2, 1, 2, 1], 'cnn_branch_depth')
         self._inference_fused = False
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
@@ -473,13 +478,19 @@ class VTFormer(nn.Module):
 
 
         # NOTE: uniformer uses two 3*3 conv, while in many other transformers this is one 7*7 conv
-        stem = nn.Sequential(
+        stem_layers = [
             nn.Conv2d(in_chans, embed_dim[0] // 2, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
             nn.BatchNorm2d(embed_dim[0] // 2),
             nn.GELU(),
             nn.Conv2d(embed_dim[0] // 2, embed_dim[0], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
             nn.BatchNorm2d(embed_dim[0]),
-        )
+        ]
+        stem_layers.extend([
+            DepthWiseConvModule(
+                embed_dim[0], 4 * embed_dim[0], embed_dim[0], 3, 1, 1)
+            for _ in range(self.transformer_branch_depth[0])
+        ])
+        stem = nn.Sequential(*stem_layers)
         stem2_layers = [
             nn.Conv2d(in_chans, embed_dim[0] // 2, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
             nn.BatchNorm2d(embed_dim[0] // 2),
@@ -512,10 +523,17 @@ class VTFormer(nn.Module):
             nn.Conv2d(2*embed_dim[0], embed_dim[0], kernel_size=(1,1), stride=(1, 1), padding=(0, 0),bias=True)
             )
         for i in range(3):
-            downsample_layer = nn.Sequential(
+            downsample_layers = [
                 nn.Conv2d(embed_dim[i], embed_dim[i + 1], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
                 nn.BatchNorm2d(embed_dim[i + 1])
-            )
+            ]
+            downsample_layers.extend([
+                DepthWiseConvModule(
+                    embed_dim[i + 1], 4 * embed_dim[i + 1],
+                    embed_dim[i + 1], 3, 1, 1)
+                for _ in range(self.transformer_branch_depth[i + 1])
+            ])
+            downsample_layer = nn.Sequential(*downsample_layers)
             layers = [
                 nn.Conv2d(embed_dim[i], embed_dim[i + 1], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
                 nn.BatchNorm2d(embed_dim[i + 1])
