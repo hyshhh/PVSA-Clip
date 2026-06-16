@@ -30,7 +30,7 @@ data_preprocessor = dict(
 # 训练配置
 # --------------------------
 train_dataloader = dict(
-    batch_size=4,
+    batch_size=16,
     num_workers=8,
     sampler=dict(type='DefaultSampler', shuffle=True)
 )
