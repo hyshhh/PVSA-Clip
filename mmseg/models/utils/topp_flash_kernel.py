@@ -17,7 +17,7 @@ from torch.utils.cpp_extension import CUDA_HOME, load
 
 
 _CUDA_BACKENDS = {'cuda', 'cuda_forward'}
-_TORCH_BACKENDS = {'torch', 'torch_block', 'block'}
+_TORCH_BACKENDS = {'torch', 'torch_block', 'block', 'pytorch'}
 _CUDA_EXTENSION = None
 _CUDA_EXTENSION_ERROR = None
 _CUDA_FALLBACK_WARNED = False
@@ -47,7 +47,11 @@ def topp_route_cuda(query: Tensor,
                     temperature: float,
                     energy: float,
                     scale: float) -> Tuple[Tensor, Tensor, Tensor]:
-    """Fused CUDA inference route for fixed 7x7 windows."""
+    """CUDA route kernel for fixed 7x7 windows.
+
+    Returns:
+        route_weight, route_idx, keep_len
+    """
     extension = _load_cuda_extension()
     return tuple(extension.route_forward(
         query.contiguous(), int(topk), float(p), float(temperature),
@@ -208,7 +212,7 @@ def topp_flash_attention(q_pix: Tensor,
                          kv_pix: Tensor,
                          r_weight: Tensor,
                          r_idx: Tensor,
-                         r_mask: Tensor,
+                         r_mask: Optional[Tensor],
                          num_heads: int,
                          qk_dim: int,
                          dim: int,
@@ -218,16 +222,25 @@ def topp_flash_attention(q_pix: Tensor,
                          W: int,
                          block_windows: int = 64,
                          backend: Optional[str] = None,
-                         debug: bool = False) -> Tensor:
+                         debug: bool = False,
+                         keep_len: Optional[Tensor] = None) -> Tensor:
     """Compute routed attention via CUDA kernel or torch_block backend."""
     backend = _normalize_backend(backend)
+    if keep_len is None:
+        if r_mask is None:
+            raise ValueError('either r_mask or keep_len must be provided.')
+        keep_len = r_mask.sum(dim=-1).contiguous().long()
+    else:
+        keep_len = keep_len.contiguous().long()
     debug_key = None
     debug_path = None
     if debug:
         debug_path, debug_key = _log_topp_flash_debug(
-            q_pix, kv_pix, r_weight, r_idx, r_mask, num_heads, qk_dim, dim,
+            q_pix, kv_pix, r_weight, r_idx, keep_len, num_heads, qk_dim, dim,
             n_win, H, W, backend)
     if backend in _TORCH_BACKENDS:
+        if r_mask is None:
+            r_mask = _keep_len_to_mask(keep_len, r_idx.size(-1))
         def run_torch_block():
             return _ToppBlockAttentionFunction.apply(
                 q_pix, kv_pix, r_weight, r_idx, r_mask, num_heads, qk_dim,
@@ -236,31 +249,28 @@ def topp_flash_attention(q_pix: Tensor,
         return _maybe_time_debug(debug, debug_key, debug_path, q_pix,
                                  run_torch_block)
     if backend in _CUDA_BACKENDS:
-        if _can_run_cuda_forward(q_pix, kv_pix, r_weight, r_idx, r_mask):
+        if _can_run_cuda_forward(q_pix, kv_pix, r_weight, r_idx, keep_len):
             try:
                 def run_cuda():
-                    return _ToppCudaForwardFunction.apply(
-                        q_pix, kv_pix, r_weight, r_idx, r_mask, num_heads,
-                        qk_dim, dim, float(scale), n_win, H, W,
-                        int(block_windows))
+                    extension = _load_cuda_extension()
+                    return extension.forward(
+                        q_pix.contiguous(), kv_pix.contiguous(),
+                        r_weight.contiguous(), r_idx.contiguous().int(),
+                        keep_len.contiguous().int(),
+                        num_heads, qk_dim, dim, float(scale),
+                        n_win, H, W)
 
                 return _maybe_time_debug(debug, debug_key, debug_path, q_pix,
                                          run_cuda)
             except Exception as exc:
                 if debug:
                     print(f'[PVSA TopP Flash] CUDA fallback reason: {exc}')
-                if _strict_cuda_backend():
-                    raise
-                _warn_cuda_fallback(str(exc))
-        if _strict_cuda_backend():
-            raise RuntimeError(
-                'PVSA CUDA backend is requested but cannot run with the '
-                'current device, dtype, or build environment.')
-        else:
-            _warn_cuda_fallback()
-        return _ToppBlockAttentionFunction.apply(
-            q_pix, kv_pix, r_weight, r_idx, r_mask, num_heads, qk_dim, dim,
-            float(scale), n_win, H, W, int(block_windows))
+                raise RuntimeError(
+                    'PVSA CUDA backend failed while running the custom '
+                    f'attention kernel: {exc}') from exc
+        raise RuntimeError(
+            'PVSA CUDA backend is requested but cannot run with the '
+            'current device, dtype, or build environment.')
     else:
         raise RuntimeError(
             f'topp flash backend {backend!r} is unavailable in this build.')
@@ -309,11 +319,11 @@ def _specialized_cuda_reject_reasons(q_pix: Tensor, r_idx: Tensor,
 
 
 def _log_topp_flash_debug(q_pix: Tensor, kv_pix: Tensor, r_weight: Tensor,
-                          r_idx: Tensor, r_mask: Tensor, num_heads: int,
+                          r_idx: Tensor, keep_len: Tensor, num_heads: int,
                           qk_dim: int, dim: int, n_win: int, H: int, W: int,
                           backend: str) -> Tuple[str, tuple]:
     can_build = _can_build_cuda_extension()
-    can_run = _can_run_cuda_forward(q_pix, kv_pix, r_weight, r_idx, r_mask)
+    can_run = _can_run_cuda_forward(q_pix, kv_pix, r_weight, r_idx, keep_len)
     specialized = (
         backend in _CUDA_BACKENDS and can_run and
         _can_use_specialized_cuda_kernel(q_pix, r_idx, num_heads, qk_dim,
@@ -335,7 +345,6 @@ def _log_topp_flash_debug(q_pix: Tensor, kv_pix: Tensor, r_weight: Tensor,
         return path, key
     _CUDA_DEBUG_LOGGED.add(key)
 
-    keep_len = r_mask.sum(dim=-1)
     keep_min = int(keep_len.min().item()) if keep_len.numel() else 0
     keep_max = int(keep_len.max().item()) if keep_len.numel() else 0
     keep_mean = float(keep_len.float().mean().item()) if keep_len.numel() else 0.0
@@ -415,7 +424,12 @@ def _maybe_time_debug(debug: bool, debug_key: Optional[tuple],
 
 
 def _profile_topp_flash() -> bool:
-    return os.getenv('PVSA_TOPP_FLASH_PROFILE', '0') == '1'
+    return os.getenv('PVSA_TOPP_FLASH_PROFILE', '1') == '1'
+
+
+def _keep_len_to_mask(keep_len: Tensor, topk: int) -> Tensor:
+    col = torch.arange(topk, device=keep_len.device)
+    return col.view(1, 1, topk) < keep_len.unsqueeze(-1)
 
 
 class _ToppBlockAttentionFunction(torch.autograd.Function):
@@ -632,10 +646,10 @@ def _can_build_cuda_extension() -> bool:
 
 
 def _can_run_cuda_forward(q_pix: Tensor, kv_pix: Tensor, r_weight: Tensor,
-                          r_idx: Tensor, r_mask: Tensor) -> bool:
+                          r_idx: Tensor, keep_len: Tensor) -> bool:
     if not _can_build_cuda_extension():
         return False
-    tensors = (q_pix, kv_pix, r_weight, r_idx, r_mask)
+    tensors = (q_pix, kv_pix, r_weight, r_idx, keep_len)
     if not all(tensor.is_cuda for tensor in tensors):
         return False
     # 支持 float32, float16, bfloat16
@@ -643,7 +657,8 @@ def _can_run_cuda_forward(q_pix: Tensor, kv_pix: Tensor, r_weight: Tensor,
         return False
     if kv_pix.dtype != q_pix.dtype or r_weight.dtype != q_pix.dtype:
         return False
-    return r_idx.dtype == torch.long and r_mask.dtype == torch.bool
+    return (r_idx.dtype in (torch.int32, torch.int64, torch.long) and
+            keep_len.dtype in (torch.int32, torch.int64, torch.long))
 
 
 def _cuda_source_paths() -> Tuple[Path, Path]:

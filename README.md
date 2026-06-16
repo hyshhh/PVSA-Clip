@@ -4,21 +4,6 @@
 
 1. 原始路径：用于训练和普通推理。
 2. 自定义 CUDA 核路径：只用于推理加速。
-### 原始路径
-
-```
-路由权重补偿统一为：
-```python
-topk_score = topk_score * energy
-```
-其中 `energy` 仍从配置文件读取，可以继续调节。
-### 自定义 CUDA 核推理路径
-配置：
-
-```text
-model.backbone.use_topp_flash=True
-model.backbone.topp_flash_backend=cuda
-```
 ## 训练
 只使用原始路径训练：
 ```bash
@@ -30,16 +15,18 @@ CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_
 CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
   configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
   /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth \
-  --cfg-options model.backbone.use_topp_flash=False \
-  model.backbone.feature_vis_config.enabled=False \
-  model.backbone.attn_vis_config.enabled=False
+  --cfg-options model.backbone.use_topp_flash=False
 ```
 ## 自定义 CUDA 核推理
 首次运行或修改 CUDA 源码后，建议先清理旧编译缓存：
 ```bash
 rm -rf ~/.cache/torch_extensions/py*/pvsa_topp_flash_cuda
 ```
-推理命令：
+TopP Flash 推理只保留两个开关：
+- `model.backbone.topp_flash_backend=torch` 或 `cuda`
+- `model.backbone.topp_flash_debug=False` 或 `True`
+
+推理模板：
 ```bash
 export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-V2.2:$PYTHONPATH
 export CC=/usr/bin/gcc-11
@@ -49,27 +36,24 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
   /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth \
   --cfg-options model.backbone.use_topp_flash=True \
   model.backbone.topp_flash_backend=cuda \
-  model.backbone.feature_vis_config.enabled=False \
-  model.backbone.attn_vis_config.enabled=False
+  model.backbone.topp_flash_debug=False
 ```
-日志版推理命令：
+
+打印各环节时间时，只把 `model.backbone.topp_flash_debug` 改成 `True`。
+
+PyTorch 后端示例：
 ```bash
 export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-V2.2:$PYTHONPATH
 export CC=/usr/bin/gcc-11
 export CXX=/usr/bin/g++-11
-export PVSA_TOPP_FLASH_VERBOSE=1
 CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
   configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
   /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth \
   --cfg-options model.backbone.use_topp_flash=True \
-  model.backbone.topp_flash_backend=cuda \
-  model.backbone.feature_vis_config.enabled=False \
-  model.backbone.attn_vis_config.enabled=False
+  model.backbone.topp_flash_backend=torch \
+  model.backbone.topp_flash_debug=False
 ```
-如果需要查看编译日志：
-```bash
-export PVSA_TOPP_FLASH_VERBOSE=1
-```
+
 如果服务器 GPU 架构自动检测失败，可以手动指定：
 ```bash
 export PVSA_TOPP_FLASH_ARCH="8.6"

@@ -11,9 +11,10 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
 
-from .topp_flash_kernel import (can_run_topp_fused_cuda,
+from .topp_flash_kernel import (can_run_topp_route_cuda,
                                 is_topp_flash_available,
-                                topp_flash_fused_attention)
+                                topp_flash_attention, topp_route_cuda,
+                                warn_topp_route_cuda_fallback)
 
 
 DEFAULT_ATTN_VIS_CONFIG = dict(enabled=False)
@@ -49,7 +50,7 @@ def _time_cuda_stage(enabled: bool, tensor: Tensor, fn):
 
 
 def _profile_topp_stage() -> bool:
-    return os.getenv('PVSA_TOPP_STAGE_PROFILE', '0') == '1'
+    return os.getenv('PVSA_TOPP_STAGE_PROFILE', '1') == '1'
 
 
 def _log_topp_stage_debug(path: str, x: Tensor, q_pix: Tensor, kv_pix: Tensor,
@@ -77,7 +78,7 @@ def _log_topp_stage_debug(path: str, x: Tensor, q_pix: Tensor, kv_pix: Tensor,
 def overlay_topk_attn_block_no_heatmap(img, topk_score, topk_index, total_patches, dark_ratio=0.3):
     """
     无热力图版本的 Top-K 注意力可视化 (聚光灯效果)
-    
+
     Args:
         img: 图像路径或 numpy 数组
         topk_score: 1D tensor, 某个 query 对应的 top-k 得分
@@ -118,7 +119,7 @@ def overlay_topk_attn_block_no_heatmap(img, topk_score, topk_index, total_patche
     # 6. 生成聚光灯效果
     # 将 mask 扩展为 3 通道，以便与图像计算
     mask = attn_map_block[..., np.newaxis]
-    
+
     # 生成一张变暗的底图
     dark_img = (img * dark_ratio).astype(np.uint8)
 
@@ -202,7 +203,7 @@ class TopkRouting(nn.Module):
 
         self.silu=True
         #能量补偿因子
-        
+
 #top—p-v3_2025_12_25
     def forward(self, query: Tensor, key: Tensor,GA):
 
@@ -259,7 +260,7 @@ class TopkRouting(nn.Module):
         # apply mask
         topk_score = topk_score * valid_mask.to(topk_score.dtype)
         topk_index = topk_index.masked_fill(~valid_mask, 0)
-        
+
         #能量补偿
         topk_score = topk_score * self.energy
 
@@ -435,7 +436,7 @@ class ToppAttention(nn.Module):
         assert not (self.param_routing and not self.diff_routing)  # cannot be with_param=True and diff_routing=False
         self.router = TopkRouting(qk_dim=self.qk_dim,
                                   qk_scale=self.scale,
-                                  
+
                                   topk=self.topk,
                                   diff_routing=self.diff_routing,
                                   param_routing=self.param_routing,W=self.W,
@@ -565,50 +566,75 @@ class ToppAttention(nn.Module):
         ############ gather q dependent k/v #################
 
         if self.use_topp_flash and not ret_attn_mask:
+            if self.training:
+                raise RuntimeError(
+                    'topp flash optimized path is inference-only. '
+                    'Set model.backbone.use_topp_flash=False for training.')
             if self.attn_vis_config.get('enabled', False):
                 raise RuntimeError(
-                    'topp fused CUDA inference requires attn_vis disabled.')
+                    'topp flash inference requires attn_vis disabled.')
             if self.W and GA is not None:
                 raise RuntimeError(
-                    'topp fused CUDA inference does not support GA route input.')
+                    'topp flash inference does not support GA route input.')
             if not is_topp_flash_available(self.topp_flash_backend):
                 raise RuntimeError(
-                    'topp fused CUDA inference extension is unavailable.')
-            if not can_run_topp_fused_cuda(
-                    q_win, q_pix, kv_pix, self.router.topk, self.num_heads,
-                    self.qk_dim, self.dim, self.n_win, H, W):
-                raise RuntimeError(
-                    'topp fused CUDA inference shape rejected: '
-                    f'q_win={tuple(q_win.shape)} q_pix={tuple(q_pix.shape)} '
-                    f'kv_pix={tuple(kv_pix.shape)} topk={self.router.topk} '
-                    f'heads={self.num_heads} qk_dim={self.qk_dim} '
-                    f'dim={self.dim} n_win={self.n_win} H={H} W={W}')
+                    'topp flash extension is unavailable.')
+
+            route_with_cuda = str(self.topp_flash_backend or '').strip().lower() in (
+                'cuda', 'cuda_forward')
+            if route_with_cuda and can_run_topp_route_cuda(
+                    q_win, self.router.topk):
+                try:
+                    r_weight, r_idx, keep_len = run_stage(
+                        'router',
+                        lambda: topp_route_cuda(
+                            query=q_win,
+                            topk=self.router.topk,
+                            p=self.router.P,
+                            temperature=self.router.Temperature,
+                            energy=self.router.energy,
+                            scale=self.router.scale))
+                    r_mask = None
+                except Exception as exc:
+                    warn_topp_route_cuda_fallback(str(exc))
+                    r_weight, r_idx, r_mask = run_stage(
+                        'router',
+                        lambda: self.router(q_win, k_win, GA))
+                    keep_len = r_mask.sum(dim=-1).contiguous().long()
+            else:
+                if route_with_cuda:
+                    warn_topp_route_cuda_fallback(
+                        'shape, dtype, or runtime state rejected CUDA route kernel.')
+                r_weight, r_idx, r_mask = run_stage(
+                    'router',
+                    lambda: self.router(q_win, k_win, GA))
+                keep_len = r_mask.sum(dim=-1).contiguous().long()
+
             out = run_stage(
-                'fused',
-                lambda: topp_flash_fused_attention(
-                    route_query=q_win,
+                'attn',
+                lambda: topp_flash_attention(
                     q_pix=q_pix,
                     kv_pix=kv_pix,
-                    topk=self.router.topk,
-                    p=self.router.P,
-                    temperature=self.router.Temperature,
-                    energy=self.router.energy,
-                    route_scale=self.router.scale,
-                    attn_scale=self.scale,
+                    r_weight=r_weight,
+                    r_idx=r_idx,
+                    r_mask=r_mask,
+                    keep_len=keep_len,
                     num_heads=self.num_heads,
                     qk_dim=self.qk_dim,
                     dim=self.dim,
+                    scale=self.scale,
                     n_win=self.n_win,
                     H=H,
                     W=W,
+                    backend=self.topp_flash_backend,
                     debug=self.topp_flash_debug))
             out = out + lepe
             out = run_stage('wo', lambda: self.wo(out))
             if self.auto_pad and (pad_r > 0 or pad_b > 0):
                 out = out[:, :H_in, :W_in, :].contiguous()
             _log_topp_stage_debug(
-                'topp_fused', x, q_pix, kv_pix,
-                (q_win.size(0), q_win.size(1), self.router.topk),
+                f'topp_flash_{self.topp_flash_backend or "torch"}',
+                x, q_pix, kv_pix, r_idx,
                 stage_times, self.num_heads, self.qk_dim, self.dim,
                 self.n_win)
             return out
@@ -697,32 +723,38 @@ class ToppAttention(nn.Module):
         weight_flat = r_weight.reshape(flat_size, topk).to(kv_pix.dtype)
         out_flat = q_flat.new_empty(flat_size, self.num_heads, q_len, head_v)
 
-        col_indices = torch.arange(topk, device=q_pix.device)
+        sorted_keep, sorted_idx = torch.sort(keep_len)
+        boundaries = torch.linspace(0, 1, num_groups + 1,
+                                    device=keep_len.device)
+        quantiles = torch.quantile(keep_len.float(), boundaries).long().clamp(
+            min=1, max=topk)
+        quantiles[-1] = topk
+        all_bounds = torch.stack([quantiles[:-1], quantiles[1:] + 1]).T
+        edges = torch.searchsorted(sorted_keep, all_bounds.flatten())
+        edges_cpu = edges.cpu().tolist()
 
-        for group_idx in range(num_groups):
-            bucket_start = group_idx * topk // num_groups + 1
-            bucket_end = (group_idx + 1) * topk // num_groups
-            flat_ids = torch.nonzero(
-                (keep_len >= bucket_start) & (keep_len <= bucket_end),
-                as_tuple=False).flatten()
+        for g in range(num_groups):
+            left = edges_cpu[2 * g]
+            right = edges_cpu[2 * g + 1]
+            flat_ids = sorted_idx[left:right]
             if flat_ids.numel() == 0:
                 continue
 
             group_keep = keep_len.index_select(0, flat_ids)
-            group_max_keep = bucket_end
+            group_max_keep = int(group_keep.max().item())
             n_ids = torch.div(flat_ids, p2, rounding_mode='floor')
             kept_b_idx = idx_flat.index_select(0, flat_ids)[:, :group_max_keep]
             q = q_flat.index_select(0, flat_ids)
             kv_batch = kv_pix.index_select(0, n_ids)
-            group_col = col_indices[:group_max_keep]
+            group_col = torch.arange(group_max_keep, device=q_pix.device)
 
             kv_sel = torch.gather(
                 kv_batch,
                 dim=1,
-                index=kept_b_idx.unsqueeze(-1).unsqueeze(-1).expand(
-                    -1, -1, kv_len, c_kv))
+                index=kept_b_idx[:, :, None, None].expand(-1, -1, kv_len,
+                                                          c_kv))
             weight = weight_flat.index_select(0, flat_ids)[:, :group_max_keep]
-            kv_sel = weight.unsqueeze(-1).unsqueeze(-1) * kv_sel
+            kv_sel = weight[:, :, None, None] * kv_sel
             k_sel, v_sel = kv_sel.split([self.qk_dim, self.dim], dim=-1)
 
             k_sel = k_sel.view(-1, group_max_keep, kv_len, self.num_heads,
@@ -736,8 +768,8 @@ class ToppAttention(nn.Module):
             mask_group.masked_fill_(
                 group_col >= group_keep[:, None],
                 float('-inf'))
-            mask = mask_group.unsqueeze(-1).expand(
-                -1, -1, kv_len).reshape(q.size(0), -1).unsqueeze(1).unsqueeze(1)
+            mask = mask_group[:, :, None].expand(-1, -1, kv_len).reshape(
+                q.size(0), -1).unsqueeze(1).unsqueeze(1)
             attn = self.attn_act(q @ k_sel.flatten(3) + mask)
             out_chunk = attn @ v_sel.reshape(
                 -1, self.num_heads, group_max_keep * kv_len, head_v)
