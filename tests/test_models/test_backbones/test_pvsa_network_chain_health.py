@@ -82,6 +82,8 @@ def test_fusion_and_route_mechanism_options_are_configurable():
     assert 'if i in self.fam_stages:' in fusion
     assert 'self.bn11 = nn.ModuleList()' in fusion
     assert 'self.bn12 = nn.ModuleList()' in fusion
+    assert 'self.conv11[i](channel1[i + 1])' in fusion
+    assert 'self.conv12[i](channel2[i + 1])' in fusion
     assert "route_pooling must be one of 'avg', 'max', or 'avgmax'." in route
     assert 'q_route = 0.5 * (q.mean([2, 3]) + q.amax(dim=(2, 3)))' in route
     assert 'fam_stages=[0, 1, 2, 3]' in model_cfg

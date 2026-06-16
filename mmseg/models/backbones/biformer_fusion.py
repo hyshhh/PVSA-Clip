@@ -252,8 +252,8 @@ class BiFormer_fusion(VTFormer):
                 stage_profile, channel1[i + 1], stage_times, 'mask_conv1',
                 lambda i=i: self.conv11[i](channel1[i + 1]))
             C2 = _run_with_optional_wall_time(
-                stage_profile, channel1[i + 1], stage_times, 'mask_conv2',
-                lambda i=i: self.conv12[i](channel1[i + 1]))
+                stage_profile, channel2[i + 1], stage_times, 'mask_conv2',
+                lambda i=i: self.conv12[i](channel2[i + 1]))
             bn_channel1 = _run_with_optional_wall_time(
                 stage_profile, C1, stage_times, 'mask_bn1',
                 lambda i=i: self.sigmoid(self.bn11[i](C1)))
@@ -271,7 +271,7 @@ class BiFormer_fusion(VTFormer):
             if stage_times:
                 _log_topp_branch_stage_debug(
                     f'mask{i}', tuple(channel1[i + 1].shape),
-                    tuple(channel3[i].shape), tuple(channel3[i].shape),
+                    tuple(channel2[i + 1].shape), tuple(channel3[i].shape),
                     stage_times)
 
         for i in range(4):
