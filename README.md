@@ -17,6 +17,18 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
   /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth \
   --cfg-options model.backbone.topp_flash_backend=None
 ```
+## 复杂度统计
+```bash
+python tools/analysis_tools/get_flops.py \
+  configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py --shape 224 224
+```
+## 推理并保存分割结果
+```bash
+CUDA_VISIBLE_DEVICES=0 python tools/test.py \
+  configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+  /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth \
+  --show-dir qmy/test
+```
 ## 自定义 CUDA 核推理
 首次运行或修改 CUDA 源码后，建议先清理旧编译缓存：
 ```bash
@@ -52,17 +64,6 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
   model.backbone.topp_flash_debug=True
 ```
 
-普通后端示例：
-```bash
-export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-V2.3:$PYTHONPATH
-export CC=/usr/bin/gcc-11
-export CXX=/usr/bin/g++-11
-CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
-  configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
-  /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth \
-  --cfg-options model.backbone.topp_flash_backend=None \
-  model.backbone.topp_flash_debug=False
-```
 
 如果服务器 GPU 架构自动检测失败，可以手动指定：
 ```bash
