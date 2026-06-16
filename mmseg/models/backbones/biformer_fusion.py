@@ -2,9 +2,11 @@ from mmseg.registry import MODELS
 import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
+from torch.nn.utils.fusion import fuse_conv_bn_eval
 # from .hys_Nex_21_6 import BiFormer
 # from .biformer import BiFormer
 from .bi_topp_vote import VTFormer
+from ..utils.topp_flash_kernel import _load_cuda_extension
 from timm.models.layers import LayerNorm2d
 from mmengine.runner import load_checkpoint
 import os
@@ -134,7 +136,7 @@ class BiFormer_fusion(VTFormer):
         if feature_vis_config:
             default_feature_vis_config.update(feature_vis_config)
         self.feature_vis_config = default_feature_vis_config
-        
+        self._branch_inference_fused = False
 
 
     def init_weights(self, pretrained=None):
@@ -152,6 +154,20 @@ class BiFormer_fusion(VTFormer):
                     nn.init.constant_(m.weight, 1.0)
         else:
             raise TypeError(f'pretrained must be a str or None, but got {type(pretrained)}')
+
+    def optimize_for_inference(self):
+        super().optimize_for_inference()
+        if self.training or self._branch_inference_fused:
+            return
+        for idx in range(len(self.conv11)):
+            bn = self.bn[idx]
+            if isinstance(bn, nn.modules.batchnorm._BatchNorm) and not bn.training:
+                self.conv11[idx] = fuse_conv_bn_eval(self.conv11[idx], bn)
+                self.conv12[idx] = fuse_conv_bn_eval(self.conv12[idx], bn)
+                self.bn[idx] = nn.Identity()
+        if self.topp_flash_backend in ('cuda', 'cuda_forward'):
+            _load_cuda_extension()
+        self._branch_inference_fused = True
 
 
     def forward_features(self, x: torch.Tensor):

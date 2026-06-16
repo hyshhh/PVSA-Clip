@@ -230,8 +230,9 @@ class FeatureAlignmentModule(nn.Module):
                 m.bias.data.zero_()
     
     def forward(self, x1, x2):
-        channel_weights = self.channel_weights(x1, x2)
-        spatial_weights = self.spatial_weights(x1, x2)
+        fused = torch.cat((x1, x2), dim=1)
+        channel_weights = self.channel_weights(x1, x2, fused)
+        spatial_weights = self.spatial_weights(x1, x2, fused)
         out_x1 = x1 + 0.5 * channel_weights[1] * x2 + 0.5 * spatial_weights[1] * x2
         out_x2 = x2 + 0.5* channel_weights[0] * x1 + 0.5 * spatial_weights[0] * x1
         return out_x1, out_x2
@@ -331,11 +332,11 @@ class ChannelWeights(nn.Module):
                     nn.Linear(self.dim, self.dim),
                     nn.Sigmoid())
 
-    def forward(self, x1, x2):
+    def forward(self, x1, x2, fused=None):
         B, C, H, W = x1.shape
         # print("!!!!!!!!!!!!")
         # print(B, C, H, W)#(1,12,256,256)
-        x = torch.cat((x1, x2), dim=1)
+        x = fused if fused is not None else torch.cat((x1, x2), dim=1)
         # print("a")
         # print(x.shape)
 
@@ -368,9 +369,9 @@ class SpatialWeights(nn.Module):
                     nn.Conv2d(self.dim // reduction, 2, kernel_size=1), 
                     nn.Sigmoid())
 
-    def forward(self, x1, x2):
+    def forward(self, x1, x2, fused=None):
         B, _, H, W = x1.shape
-        x = torch.cat((x1, x2), dim=1)
+        x = fused if fused is not None else torch.cat((x1, x2), dim=1)
         spatial_weights = self.mlp(x).reshape(B, 2, 1, H, W).permute(1, 0, 2, 3, 4)
         return spatial_weights
 class Stem224(nn.Module):
