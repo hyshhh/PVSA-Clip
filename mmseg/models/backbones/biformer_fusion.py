@@ -153,8 +153,6 @@ class BiFormer_fusion(VTFormer):
         out = []
         cnn_encoder_out = x
         stage_profile = self.topp_flash_debug
-        serial_stage_profile = (
-            stage_profile and os.getenv('PVSA_SERIAL_STAGE_PROFILE', '0') == '1')
 
         feature_vis_enabled = self.feature_vis_config.get('enabled', False)
         save_dir = self.feature_vis_config.get('save_dir', 'cam/features_imgs4')
@@ -165,14 +163,14 @@ class BiFormer_fusion(VTFormer):
         channel3=[]
 
         def run_stage_timer(times, name, tensor, fn):
-            result, elapsed = _time_cuda_stage(serial_stage_profile, tensor, fn)
+            result, elapsed = _time_cuda_stage(stage_profile, tensor, fn)
             if elapsed is not None:
                 times[name] = elapsed
             return result
 
         def run_parallel_branches(stage_idx, trans_x, cnn_x):
             if not _can_parallel_branches(
-                    trans_x, cnn_x, serial_stage_profile, feature_vis_enabled):
+                    trans_x, cnn_x, False, feature_vis_enabled):
                 next_cnn = self.downsample_layers2[stage_idx](cnn_x)
                 next_trans = self.downsample_layers[stage_idx](trans_x)
                 next_trans = self.stages[stage_idx](next_trans)
@@ -195,19 +193,8 @@ class BiFormer_fusion(VTFormer):
                 self._save_feature_channel_as_image(x, f'{save_dir}/stage{i}_xinput.png')
             def run_stage_body(i=i):
                 nonlocal x, cnn_encoder_out
-                if serial_stage_profile:
-                    cnn_encoder_out = run_stage_timer(
-                        stage_times, 'serial_cnn_branch', cnn_encoder_out,
-                        lambda i=i: self.downsample_layers2[i](cnn_encoder_out))
-                    x = run_stage_timer(
-                        stage_times, 'serial_trans_down', x,
-                        lambda i=i: self.downsample_layers[i](x))
-                    x = run_stage_timer(
-                        stage_times, 'serial_trans_stage', x,
-                        lambda i=i: self.stages[i](x))
-                else:
-                    x, cnn_encoder_out = run_parallel_branches(
-                        i, x, cnn_encoder_out)
+                x, cnn_encoder_out = run_parallel_branches(
+                    i, x, cnn_encoder_out)
                 x, cnn_encoder_out = run_stage_timer(
                     stage_times, 'fam', x,
                     lambda i=i: self.FAM[i](x, cnn_encoder_out))
