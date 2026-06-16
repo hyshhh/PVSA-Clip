@@ -32,6 +32,17 @@ def _use_topp_cuda_backend(backend):
     return _normalize_topp_backend(backend) in ('cuda', 'cuda_forward')
 
 
+def _normalize_cnn_branch_depth(cnn_branch_depth):
+    if cnn_branch_depth is None:
+        return [2, 1, 2, 1]
+    if len(cnn_branch_depth) != 4:
+        raise ValueError('cnn_branch_depth must contain 4 stage depths.')
+    depths = [int(depth) for depth in cnn_branch_depth]
+    if any(depth < 0 for depth in depths):
+        raise ValueError('cnn_branch_depth values must be non-negative.')
+    return depths
+
+
 def _fuse_conv_bn(conv, bn):
     if not isinstance(bn, nn.modules.batchnorm._BatchNorm):
         return conv, bn
@@ -433,6 +444,7 @@ class VTFormer(nn.Module):
                  attn_vis_config=None,
                  use_fast_attention=False,
                  debug_route=False,
+                 cnn_branch_depth=None,
                  topp_flash_debug=False):
 
         super().__init__()
@@ -446,6 +458,7 @@ class VTFormer(nn.Module):
         self.use_fast_attention = use_fast_attention
         self.debug_route = debug_route
         self.topp_flash_debug = topp_flash_debug
+        self.cnn_branch_depth = _normalize_cnn_branch_depth(cnn_branch_depth)
         self._inference_fused = False
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
@@ -467,15 +480,19 @@ class VTFormer(nn.Module):
             nn.Conv2d(embed_dim[0] // 2, embed_dim[0], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
             nn.BatchNorm2d(embed_dim[0]),
         )
-        stem2 = nn.Sequential(
+        stem2_layers = [
             nn.Conv2d(in_chans, embed_dim[0] // 2, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
             nn.BatchNorm2d(embed_dim[0] // 2),
             nn.GELU(),
             nn.Conv2d(embed_dim[0] // 2, embed_dim[0], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
             nn.BatchNorm2d(embed_dim[0]),
-            DepthWiseConvModule(embed_dim[0], 4*embed_dim[0],embed_dim[0],3, 1, 1),
-            DepthWiseConvModule(embed_dim[0], 4*embed_dim[0], embed_dim[0],3, 1, 1),
-        )
+        ]
+        stem2_layers.extend([
+            DepthWiseConvModule(
+                embed_dim[0], 4 * embed_dim[0], embed_dim[0], 3, 1, 1)
+            for _ in range(self.cnn_branch_depth[0])
+        ])
+        stem2 = nn.Sequential(*stem2_layers)
 
         if (pe is not None) and 0 in pe_stages:
             stem.append(get_pe_layer(emb_dim=embed_dim[0], name=pe))
@@ -494,12 +511,6 @@ class VTFormer(nn.Module):
         self.fusion.append(
             nn.Conv2d(2*embed_dim[0], embed_dim[0], kernel_size=(1,1), stride=(1, 1), padding=(0, 0),bias=True)
             )
-        #Larger
-        # num_layers = [4, 8, 4]
-        # num_layers = [2, 3, 4]
-        # num_layers = [2, 2, 2]
-        num_layers = [1, 2, 1]
-
         for i in range(3):
             downsample_layer = nn.Sequential(
                 nn.Conv2d(embed_dim[i], embed_dim[i + 1], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
@@ -510,9 +521,11 @@ class VTFormer(nn.Module):
                 nn.BatchNorm2d(embed_dim[i + 1])
             ]
             layers.extend([
-            DepthWiseConvModule(embed_dim[i + 1], 4 * embed_dim[i + 1], embed_dim[i + 1], 3, 1, 1)
-            for _ in range(num_layers[i])
-             ])
+                DepthWiseConvModule(
+                    embed_dim[i + 1], 4 * embed_dim[i + 1],
+                    embed_dim[i + 1], 3, 1, 1)
+                for _ in range(self.cnn_branch_depth[i + 1])
+            ])
             downsample_layer2 = nn.Sequential(*layers)
             #VTFormer1.4 1   v1.5-3
             # downsample_layer2 = nn.Sequential(
