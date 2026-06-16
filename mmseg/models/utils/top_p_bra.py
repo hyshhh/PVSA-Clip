@@ -604,18 +604,9 @@ class ToppAttention(nn.Module):
                             energy=self.router.energy,
                             scale=self.router.scale,
                             full_route=full_route,
-                            debug=False))
+                            debug=stage_debug))
                     r_mask = None
                     if stage_debug:
-                        topp_route_cuda(
-                            query=q_win,
-                            topk=self.router.topk,
-                            p=self.router.P,
-                            temperature=self.router.Temperature,
-                            energy=self.router.energy,
-                            scale=self.router.scale,
-                            full_route=full_route,
-                            debug=True)
                         router_kernel_ms = consume_topp_kernel_timing(
                             'Router kernel')
                         if router_kernel_ms is not None:
@@ -651,24 +642,8 @@ class ToppAttention(nn.Module):
                     H=H,
                     W=W,
                     backend=self.topp_flash_backend,
-                    debug=False))
+                    debug=stage_debug))
             if stage_debug:
-                topp_flash_attention(
-                    q_pix=q_pix,
-                    kv_pix=kv_pix,
-                    r_weight=r_weight,
-                    r_idx=r_idx,
-                    r_mask=r_mask,
-                    keep_len=keep_len,
-                    num_heads=self.num_heads,
-                    qk_dim=self.qk_dim,
-                    dim=self.dim,
-                    scale=self.scale,
-                    n_win=self.n_win,
-                    H=H,
-                    W=W,
-                    backend=self.topp_flash_backend,
-                    debug=True)
                 flash_kernel_ms = consume_topp_kernel_timing('Flash kernel')
                 if flash_kernel_ms is not None:
                     stage_times['Flash kernel'] = flash_kernel_ms

@@ -65,6 +65,13 @@ def _log_topp_branch_stage_debug(stage, x_shape, cnn_shape, out_shape, times):
         f'x={x_shape} cnn={cnn_shape} out={out_shape} {parts}')
 
 
+def _run_with_optional_wall_time(enabled, tensor, times, name, fn):
+    out, elapsed = _time_cuda_wall(enabled, tensor, fn)
+    if elapsed is not None:
+        times[name] = elapsed
+    return out
+
+
 @MODELS.register_module()
 class BiFormer_fusion(VTFormer):
     def __init__(self,
@@ -162,12 +169,6 @@ class BiFormer_fusion(VTFormer):
         channel2=[]
         channel3=[]
 
-        def run_stage_timer(times, name, tensor, fn):
-            result, elapsed = _time_cuda_stage(stage_profile, tensor, fn)
-            if elapsed is not None:
-                times[name] = elapsed
-            return result
-
         def run_parallel_branches(stage_idx, trans_x, cnn_x):
             if not _can_parallel_branches(
                     trans_x, cnn_x, False, feature_vis_enabled):
@@ -195,9 +196,7 @@ class BiFormer_fusion(VTFormer):
                 nonlocal x, cnn_encoder_out
                 x, cnn_encoder_out = run_parallel_branches(
                     i, x, cnn_encoder_out)
-                x, cnn_encoder_out = run_stage_timer(
-                    stage_times, 'fam', x,
-                    lambda i=i: self.FAM[i](x, cnn_encoder_out))
+                x, cnn_encoder_out = self.FAM[i](x, cnn_encoder_out)
                 return x, cnn_encoder_out
 
             _, stage_wall = _time_cuda_wall(
@@ -220,8 +219,8 @@ class BiFormer_fusion(VTFormer):
 
         for i in range(4):
             stage_times = {}
-            fused = run_stage_timer(
-                stage_times, 'fusion_conv', channel1[i],
+            fused = _run_with_optional_wall_time(
+                stage_profile, channel1[i], stage_times, 'fusion_conv',
                 lambda i=i: self.fusion[i](
                     torch.cat((channel1[i], channel2[i]), dim=1)))
             channel3.append(fused)  # dim=1 表示按通道拼接
@@ -232,23 +231,23 @@ class BiFormer_fusion(VTFormer):
                     stage_times)
         for i in range(3):
             stage_times = {}
-            C1 = run_stage_timer(
-                stage_times, 'mask_conv1', channel1[i + 1],
+            C1 = _run_with_optional_wall_time(
+                stage_profile, channel1[i + 1], stage_times, 'mask_conv1',
                 lambda i=i: self.conv11[i](channel1[i + 1]))
-            C2 = run_stage_timer(
-                stage_times, 'mask_conv2', channel1[i + 1],
+            C2 = _run_with_optional_wall_time(
+                stage_profile, channel1[i + 1], stage_times, 'mask_conv2',
                 lambda i=i: self.conv12[i](channel1[i + 1]))
-            bn_channel1 = run_stage_timer(
-                stage_times, 'mask_bn1', C1,
+            bn_channel1 = _run_with_optional_wall_time(
+                stage_profile, C1, stage_times, 'mask_bn1',
                 lambda i=i: self.sigmoid(self.bn[i](C1)))
-            bn_channel2 = run_stage_timer(
-                stage_times, 'mask_bn2', C2,
+            bn_channel2 = _run_with_optional_wall_time(
+                stage_profile, C2, stage_times, 'mask_bn2',
                 lambda i=i: self.sigmoid(self.bn[i](C2)))
             if feature_vis_enabled and i==0:
                 self._save_feature_channel_as_image(self.upsample2(bn_channel1), f'{save_dir}/mask1.png')
                 self._save_feature_channel_as_image(self.upsample2(bn_channel2), f'{save_dir}/mask2.png')
-            channel3[i] = run_stage_timer(
-                stage_times, 'mask_fusion', channel3[i],
+            channel3[i] = _run_with_optional_wall_time(
+                stage_profile, channel3[i], stage_times, 'mask_fusion',
                 lambda i=i: channel3[i] * (
                     1 + self.upsample2(bn_channel1) +
                     self.upsample2(bn_channel2)))
@@ -262,8 +261,8 @@ class BiFormer_fusion(VTFormer):
             if feature_vis_enabled:
                 self._save_feature_channel_as_image(channel3[i], f'{save_dir}/stage{i}_after_channel.png')
             stage_times = {}
-            normed = run_stage_timer(
-                stage_times, 'out_norm', channel3[i],
+            normed = _run_with_optional_wall_time(
+                stage_profile, channel3[i], stage_times, 'out_norm',
                 lambda i=i: self.extra_norms[i](channel3[i]))
             out.append(normed)
             if stage_times:

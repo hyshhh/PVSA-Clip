@@ -24,7 +24,6 @@ _CUDA_EXTENSION = None
 _CUDA_EXTENSION_ERROR = None
 _CUDA_FALLBACK_WARNED = False
 _CUDA_DEBUG_LOGGED = set()
-_CUDA_TIMING_LOGGED = set()
 _ROUTE_CUDA_FALLBACK_WARNED = False
 _LAST_KERNEL_TIMINGS = {}
 
@@ -298,28 +297,21 @@ def _log_topp_route_debug(query: Tensor, topk: int, p: float,
 def _maybe_time_debug(debug: bool, debug_key: Optional[tuple],
                       debug_path: Optional[str], timing_tensor: Tensor,
                       runner):
-    if not debug or debug_key is None or debug_key in _CUDA_TIMING_LOGGED:
+    if not debug or debug_key is None:
         return runner()
     if not torch.cuda.is_available() or not timing_tensor.is_cuda:
         return runner()
-    _CUDA_TIMING_LOGGED.add(debug_key)
     if debug_path in ('cuda_specialized', 'cuda_route'):
         _load_cuda_extension()
-    repeat = 5
-    warmup = 2
-    out = None
     with torch.cuda.device(timing_tensor.device):
-        for _ in range(warmup):
-            out = runner()
         torch.cuda.synchronize(timing_tensor.device)
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
-        for _ in range(repeat):
-            out = runner()
+        out = runner()
         end.record()
         end.synchronize()
-        elapsed_ms = start.elapsed_time(end) / repeat
+        elapsed_ms = start.elapsed_time(end)
     label = 'Flash kernel'
     if debug_path == 'cuda_route':
         label = 'Router kernel'
