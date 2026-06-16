@@ -19,6 +19,12 @@ import torch.nn.functional as F
 _TOPP_BRANCH_STAGE_LOGGED = set()
 
 
+def _can_parallel_branches(x, cnn_x, stage_profile, feature_vis_enabled):
+    return (not stage_profile and not feature_vis_enabled
+            and torch.cuda.is_available() and x.is_cuda and cnn_x.is_cuda
+            and x.device == cnn_x.device)
+
+
 def _time_cuda_stage(enabled, tensor, fn):
     if not enabled or not torch.cuda.is_available() or not tensor.is_cuda:
         return fn(), None
@@ -148,20 +154,42 @@ class BiFormer_fusion(VTFormer):
                 times[name] = elapsed
             return result
 
+        def run_parallel_branches(stage_idx, trans_x, cnn_x):
+            if not _can_parallel_branches(
+                    trans_x, cnn_x, stage_profile, feature_vis_enabled):
+                next_cnn = self.downsample_layers2[stage_idx](cnn_x)
+                next_trans = self.downsample_layers[stage_idx](trans_x)
+                next_trans = self.stages[stage_idx](next_trans)
+                return next_trans, next_cnn
+
+            trans_stream = torch.cuda.current_stream(trans_x.device)
+            cnn_stream = torch.cuda.Stream(device=cnn_x.device)
+            with torch.cuda.stream(cnn_stream):
+                next_cnn = self.downsample_layers2[stage_idx](cnn_x)
+            next_trans = self.downsample_layers[stage_idx](trans_x)
+            next_trans = self.stages[stage_idx](next_trans)
+            trans_stream.wait_stream(cnn_stream)
+            next_cnn.record_stream(trans_stream)
+            return next_trans, next_cnn
+
         for i in range(4):
             stage_times = {}
             stage_input_shape = tuple(x.shape)
             if feature_vis_enabled:
                 self._save_feature_channel_as_image(x, f'{save_dir}/stage{i}_xinput.png')
-            cnn_encoder_out = run_stage_timer(
-                stage_times, 'cnn_branch', cnn_encoder_out,
-                lambda i=i: self.downsample_layers2[i](cnn_encoder_out))
-            x = run_stage_timer(
-                stage_times, 'trans_down', x,
-                lambda i=i: self.downsample_layers[i](x))
-            x = run_stage_timer(
-                stage_times, 'trans_stage', x,
-                lambda i=i: self.stages[i](x))
+            if stage_profile:
+                cnn_encoder_out = run_stage_timer(
+                    stage_times, 'cnn_branch', cnn_encoder_out,
+                    lambda i=i: self.downsample_layers2[i](cnn_encoder_out))
+                x = run_stage_timer(
+                    stage_times, 'trans_down', x,
+                    lambda i=i: self.downsample_layers[i](x))
+                x = run_stage_timer(
+                    stage_times, 'trans_stage', x,
+                    lambda i=i: self.stages[i](x))
+            else:
+                x, cnn_encoder_out = run_parallel_branches(
+                    i, x, cnn_encoder_out)
             if feature_vis_enabled:
                 self._save_feature_channel_as_image(x, f'{save_dir}/stage{i}_before_FAM_x.png')
                 self._save_feature_channel_as_image(cnn_encoder_out, f'{save_dir}/stage{i}_before_FAM_cnn.png')
