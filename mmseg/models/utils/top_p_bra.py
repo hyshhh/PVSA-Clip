@@ -590,8 +590,17 @@ class ToppAttention(nn.Module):
                             temperature=self.router.Temperature,
                             energy=self.router.energy,
                             scale=self.router.scale,
-                            debug=self.topp_flash_debug))
+                            debug=False))
                     r_mask = None
+                    if stage_debug:
+                        topp_route_cuda(
+                            query=q_win,
+                            topk=self.router.topk,
+                            p=self.router.P,
+                            temperature=self.router.Temperature,
+                            energy=self.router.energy,
+                            scale=self.router.scale,
+                            debug=True)
                 except Exception as exc:
                     warn_topp_route_cuda_fallback(str(exc))
                     r_weight, r_idx, r_mask = run_stage(
@@ -624,7 +633,24 @@ class ToppAttention(nn.Module):
                     H=H,
                     W=W,
                     backend=self.topp_flash_backend,
-                    debug=self.topp_flash_debug))
+                    debug=False))
+            if stage_debug:
+                topp_flash_attention(
+                    q_pix=q_pix,
+                    kv_pix=kv_pix,
+                    r_weight=r_weight,
+                    r_idx=r_idx,
+                    r_mask=r_mask,
+                    keep_len=keep_len,
+                    num_heads=self.num_heads,
+                    qk_dim=self.qk_dim,
+                    dim=self.dim,
+                    scale=self.scale,
+                    n_win=self.n_win,
+                    H=H,
+                    W=W,
+                    backend=self.topp_flash_backend,
+                    debug=True)
             out = out + lepe
             out = run_stage('wo', lambda: self.wo(out))
             if self.auto_pad and (pad_r > 0 or pad_b > 0):
