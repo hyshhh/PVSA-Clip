@@ -12,10 +12,16 @@ def test_vtformer_exposes_stage_arch_config():
 
     assert 'stage_archs=None' in source
     assert "cfg['blocks']" in source
-    assert "cfg['trans_dwconv']" in source
-    assert "cfg['cnn_dwconv']" in source
+    assert "cfg.get('trans_extra')" in source
+    assert "cfg.get('cnn_extra')" in source
+    assert "self.stage_archs[0]['trans_extra']" in source
+    assert "self.stage_archs[0]['cnn_extra']" in source
+    assert 'class MBConvModule' in source
+    assert 'class ConvNeXtBlock' in source
     assert 'stage_archs=[' in config
-    assert 'dict(blocks=3, trans_dwconv=0, cnn_dwconv=2)' in config
+    assert "trans_extra=dict(type='dwconv', depth=0)" in config
+    assert "cnn_extra=dict(type='dwconv', depth=2)" in config
+    assert "'dwconv', 'mbconv', 'convnext'" in source
 
 
 def test_vtformer_keeps_legacy_depth_configs_as_fallback():

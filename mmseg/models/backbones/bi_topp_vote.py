@@ -1,20 +1,15 @@
 import math
 from collections import OrderedDict
-from functools import partial
-from typing import Optional, Union
 
 import torch
 import torch.nn as nn
+from mmcv.cnn.bricks import DropPath
 from torch.nn.utils.fusion import fuse_conv_bn_eval
 
 from einops.layers.torch import Rearrange
 from fairscale.nn.checkpoint import checkpoint_wrapper
-from timm.models import register_model
-from timm.models.layers import DropPath, to_2tuple, trunc_normal_
-from timm.models.vision_transformer import _cfg
+from timm.models.layers import trunc_normal_
 from ..utils.common import Attention, AttentionLePE, DWConv
-# from ..utils.bra_legacy import BiLevelRoutingAttention
-from ..utils.bra_legacy_hys_v4 import BiLevelRoutingAttention
 from ..utils.top_p_bra import ToppAttention
 from mmseg.registry import MODELS
 
@@ -28,10 +23,6 @@ def _normalize_topp_backend(backend):
     return backend
 
 
-def _use_topp_cuda_backend(backend):
-    return _normalize_topp_backend(backend) in ('cuda', 'cuda_forward')
-
-
 def _normalize_branch_depth(branch_depth, default, name):
     if branch_depth is None:
         return list(default)
@@ -41,6 +32,19 @@ def _normalize_branch_depth(branch_depth, default, name):
     if any(depth < 0 for depth in depths):
         raise ValueError(f'{name} values must be non-negative.')
     return depths
+
+
+def _normalize_extra_block_cfg(extra_cfg, fallback_depth=0):
+    if extra_cfg is None:
+        return dict(type='dwconv', depth=int(fallback_depth))
+    if isinstance(extra_cfg, int):
+        return dict(type='dwconv', depth=int(extra_cfg))
+    cfg = dict(extra_cfg)
+    cfg.setdefault('type', 'dwconv')
+    cfg.setdefault('depth', fallback_depth)
+    cfg['type'] = str(cfg['type']).strip().lower()
+    cfg['depth'] = int(cfg['depth'])
+    return cfg
 
 
 def _normalize_stage_archs(stage_archs, depth, transformer_branch_depth,
@@ -54,10 +58,14 @@ def _normalize_stage_archs(stage_archs, depth, transformer_branch_depth,
             if 'blocks' not in cfg:
                 raise ValueError(
                     f'stage_archs[{idx}] must define blocks.')
+            trans_extra = _normalize_extra_block_cfg(
+                cfg.get('trans_extra'), cfg.get('trans_dwconv', 0))
+            cnn_extra = _normalize_extra_block_cfg(
+                cfg.get('cnn_extra'), cfg.get('cnn_dwconv', 0))
             normalized.append(dict(
                 blocks=int(cfg['blocks']),
-                trans_dwconv=int(cfg.get('trans_dwconv', 0)),
-                cnn_dwconv=int(cfg.get('cnn_dwconv', 0))))
+                trans_extra=trans_extra,
+                cnn_extra=cnn_extra))
     else:
         trans_depth = _normalize_branch_depth(
             transformer_branch_depth, [0, 0, 0, 0],
@@ -67,16 +75,22 @@ def _normalize_stage_archs(stage_archs, depth, transformer_branch_depth,
         normalized = [
             dict(
                 blocks=int(depth[idx]),
-                trans_dwconv=trans_depth[idx],
-                cnn_dwconv=cnn_depth[idx])
+                trans_extra=_normalize_extra_block_cfg(trans_depth[idx]),
+                cnn_extra=_normalize_extra_block_cfg(cnn_depth[idx]))
             for idx in range(4)
         ]
     for idx, cfg in enumerate(normalized):
         if cfg['blocks'] < 0:
             raise ValueError(f'stage_archs[{idx}].blocks must be non-negative.')
-        if cfg['trans_dwconv'] < 0 or cfg['cnn_dwconv'] < 0:
-            raise ValueError(
-                f'stage_archs[{idx}] dwconv values must be non-negative.')
+        for key in ('trans_extra', 'cnn_extra'):
+            extra_cfg = cfg[key]
+            if extra_cfg['depth'] < 0:
+                raise ValueError(
+                    f'stage_archs[{idx}].{key}.depth must be non-negative.')
+            if extra_cfg['type'] not in ('dwconv', 'mbconv', 'convnext'):
+                raise ValueError(
+                    f"stage_archs[{idx}].{key}.type must be one of "
+                    "'dwconv', 'mbconv', or 'convnext'.")
     return normalized
 
 
@@ -154,16 +168,6 @@ class Block(nn.Module):
         else:
             self.pos_embed = lambda x: 0
         if topk > 0:
-            #hys
-            # self.attn= BiLevelRoutingAttention(dim=dim, num_heads=num_heads, n_win=n_win, qk_dim=qk_dim,
-            #                                     qk_scale=qk_scale, kv_per_win=kv_per_win,
-            #                                     kv_downsample_ratio=kv_downsample_ratio,
-            #                                     kv_downsample_kernel=kv_downsample_kernel,
-            #                                     kv_downsample_mode=kv_downsample_mode,
-            #                                     topk=topk, param_attention=param_attention, param_routing=param_routing,
-            #                                     diff_routing=diff_routing, soft_routing=soft_routing,
-            #                                     side_dwconv=side_dwconv,
-            #                                     auto_pad=auto_pad)
             self.PA = ToppAttention(dim=dim, num_heads=num_heads,n_win=n_win, qk_dim=qk_dim,
                                                 qk_scale=qk_scale, kv_per_win=kv_per_win,
                                                 kv_downsample_ratio=kv_downsample_ratio,
@@ -223,37 +227,15 @@ class Block(nn.Module):
         """
         x: NCHW tensor
         """
-        # VTFormerv1.22,只有Top-p
         x = x + self.pos_embed(x)
-        x = x.permute(0, 2, 3, 1) 
-        PA=self.PA(self.norm3(x),None)
+        x = x.permute(0, 2, 3, 1)
+        PA = self.PA(self.norm3(x), None)
         if self.pre_norm:
-                x = x + self.drop_path(PA)   # (N, H, W, C)          
-                x = x + self.drop_path(self.mlp2(self.norm4(x)))  # (N, H, W, C)
+            x = x + self.drop_path(PA)
+            x = x + self.drop_path(self.mlp2(self.norm4(x)))
         x = x.permute(0, 3, 1, 2)
         return x
-        # x = x.permute(0, 3, 1, 2)
 
-        
-        # VTFormerv3.1
-        x = x + self.pos_embed(x)
-        x = x.permute(0, 2, 3, 1) 
-        GA,A1=self.attn(self.norm1(x))
-
-        if self.pre_norm:
-                x = x + self.drop_path(GA)  # (N, H, W, C)
-                x = x + self.drop_path(self.mlp(self.norm2(x)))  # (N, H, W, C)
-        # x = x.permute(0, 3, 1, 2)
-
-        # #VTFormerv3.1
-        # x = x + self.pos_embed(x)
-        # x = x.permute(0, 2, 3, 1)
-        PA=self.PA(self.norm3(x),A1)
-        if self.pre_norm:
-                x = x + self.drop_path(PA)  # (N, H, W, C)          
-                x = x + self.drop_path(self.mlp2(self.norm4(x)))  # (N, H, W, C)
-        x = x.permute(0, 3, 1, 2)
-        return x
 class FeatureAlignmentModule(nn.Module):
     def __init__(self, dim, reduction=1, lambda_c=.5, lambda_s=.5):
         super(FeatureAlignmentModule, self).__init__()
@@ -284,11 +266,6 @@ class FeatureAlignmentModule(nn.Module):
         out_x1 = x1 + 0.5 * channel_weights[1] * x2 + 0.5 * spatial_weights[1] * x2
         out_x2 = x2 + 0.5* channel_weights[0] * x1 + 0.5 * spatial_weights[0] * x1
         return out_x1, out_x2
-from mmengine.model import BaseModule, ModuleList, Sequential   
-from mmcv.cnn.bricks import DropPath, build_activation_layer, build_norm_layer
-import torch
-import torch.nn as nn
-
 class DepthWiseConvModule(nn.Module):
     def __init__(self,
                  embed_dims,
@@ -319,7 +296,7 @@ class DepthWiseConvModule(nn.Module):
             groups=feedforward_channels, # 关键：Groups = Channels
             bias=False)
         self.bn2 = nn.BatchNorm2d(feedforward_channels) # 加上 BN
-        self.activate = nn.GELU() # 或者是 build_activation_layer(act_cfg)
+        self.activate = nn.GELU()
         # 4. 第二个点卷积 (1x1 Conv): 降维 (Projection)
         self.fc2 = nn.Conv2d(feedforward_channels, output_channels, kernel_size=1, bias=False)
         self.bn3 = nn.BatchNorm2d(output_channels) # 加上 BN
@@ -359,6 +336,89 @@ class DepthWiseConvModule(nn.Module):
         self.fc2, self.bn3 = _fuse_conv_bn(self.fc2, self.bn3)
         if self.downsample is not None:
             _fuse_sequential_conv_bn(self.downsample)
+
+
+class MBConvModule(nn.Module):
+    def __init__(self, channels, expansion=4, kernel_size=3, drop_rate=0.):
+        super().__init__()
+        hidden_channels = int(channels * expansion)
+        padding = kernel_size // 2
+        self.expand = nn.Conv2d(channels, hidden_channels, 1, bias=False)
+        self.bn1 = nn.BatchNorm2d(hidden_channels)
+        self.dwconv = nn.Conv2d(
+            hidden_channels, hidden_channels, kernel_size,
+            padding=padding, groups=hidden_channels, bias=False)
+        self.bn2 = nn.BatchNorm2d(hidden_channels)
+        self.project = nn.Conv2d(hidden_channels, channels, 1, bias=False)
+        self.bn3 = nn.BatchNorm2d(channels)
+        self.act = nn.GELU()
+        self.drop = nn.Dropout(drop_rate)
+
+    def forward(self, x):
+        identity = x
+        x = self.act(self.bn1(self.expand(x)))
+        x = self.act(self.bn2(self.dwconv(x)))
+        x = self.drop(self.bn3(self.project(x)))
+        return x + identity
+
+    def fuse_for_inference(self):
+        if self.training:
+            return
+        self.expand, self.bn1 = _fuse_conv_bn(self.expand, self.bn1)
+        self.dwconv, self.bn2 = _fuse_conv_bn(self.dwconv, self.bn2)
+        self.project, self.bn3 = _fuse_conv_bn(self.project, self.bn3)
+
+
+class ConvNeXtBlock(nn.Module):
+    def __init__(self, channels, expansion=4, kernel_size=7, layer_scale=1e-6):
+        super().__init__()
+        hidden_channels = int(channels * expansion)
+        self.dwconv = nn.Conv2d(
+            channels, channels, kernel_size, padding=kernel_size // 2,
+            groups=channels)
+        self.norm = nn.LayerNorm(channels, eps=1e-6)
+        self.pwconv1 = nn.Linear(channels, hidden_channels)
+        self.act = nn.GELU()
+        self.pwconv2 = nn.Linear(hidden_channels, channels)
+        self.gamma = nn.Parameter(
+            layer_scale * torch.ones(channels), requires_grad=True
+        ) if layer_scale > 0 else None
+
+    def forward(self, x):
+        identity = x
+        x = self.dwconv(x)
+        x = x.permute(0, 2, 3, 1)
+        x = self.norm(x)
+        x = self.pwconv1(x)
+        x = self.act(x)
+        x = self.pwconv2(x)
+        if self.gamma is not None:
+            x = self.gamma * x
+        x = x.permute(0, 3, 1, 2)
+        return identity + x
+
+
+def _make_extra_block(channels, cfg):
+    block_type = cfg['type']
+    expansion = cfg.get('expansion', 4)
+    kernel_size = cfg.get('kernel_size', 7 if block_type == 'convnext' else 3)
+    if block_type == 'dwconv':
+        return DepthWiseConvModule(
+            channels, int(channels * expansion), channels,
+            kernel_size=kernel_size, stride=1)
+    if block_type == 'mbconv':
+        return MBConvModule(
+            channels, expansion=expansion, kernel_size=kernel_size)
+    if block_type == 'convnext':
+        return ConvNeXtBlock(
+            channels, expansion=expansion, kernel_size=kernel_size,
+            layer_scale=cfg.get('layer_scale', 1e-6))
+    raise ValueError(f'Unsupported extra block type: {block_type}')
+
+
+def _make_extra_blocks(channels, cfg):
+    return [_make_extra_block(channels, cfg) for _ in range(cfg['depth'])]
+
 
 class ChannelWeights(nn.Module):
     def __init__(self, dim, reduction=1):
@@ -500,9 +560,6 @@ class VTFormer(nn.Module):
         self.stage_archs = _normalize_stage_archs(
             stage_archs, depth, transformer_branch_depth, cnn_branch_depth)
         self.depth = [cfg['blocks'] for cfg in self.stage_archs]
-        self.transformer_branch_depth = [
-            cfg['trans_dwconv'] for cfg in self.stage_archs]
-        self.cnn_branch_depth = [cfg['cnn_dwconv'] for cfg in self.stage_archs]
         self._inference_fused = False
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
@@ -524,11 +581,8 @@ class VTFormer(nn.Module):
             nn.Conv2d(embed_dim[0] // 2, embed_dim[0], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
             nn.BatchNorm2d(embed_dim[0]),
         ]
-        stem_layers.extend([
-            DepthWiseConvModule(
-                embed_dim[0], 4 * embed_dim[0], embed_dim[0], 3, 1, 1)
-            for _ in range(self.transformer_branch_depth[0])
-        ])
+        stem_layers.extend(
+            _make_extra_blocks(embed_dim[0], self.stage_archs[0]['trans_extra']))
         stem = nn.Sequential(*stem_layers)
         stem2_layers = [
             nn.Conv2d(in_chans, embed_dim[0] // 2, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
@@ -537,11 +591,8 @@ class VTFormer(nn.Module):
             nn.Conv2d(embed_dim[0] // 2, embed_dim[0], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
             nn.BatchNorm2d(embed_dim[0]),
         ]
-        stem2_layers.extend([
-            DepthWiseConvModule(
-                embed_dim[0], 4 * embed_dim[0], embed_dim[0], 3, 1, 1)
-            for _ in range(self.cnn_branch_depth[0])
-        ])
+        stem2_layers.extend(
+            _make_extra_blocks(embed_dim[0], self.stage_archs[0]['cnn_extra']))
         stem2 = nn.Sequential(*stem2_layers)
 
         if (pe is not None) and 0 in pe_stages:
@@ -566,32 +617,16 @@ class VTFormer(nn.Module):
                 nn.Conv2d(embed_dim[i], embed_dim[i + 1], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
                 nn.BatchNorm2d(embed_dim[i + 1])
             ]
-            downsample_layers.extend([
-                DepthWiseConvModule(
-                    embed_dim[i + 1], 4 * embed_dim[i + 1],
-                    embed_dim[i + 1], 3, 1, 1)
-                for _ in range(self.transformer_branch_depth[i + 1])
-            ])
+            downsample_layers.extend(_make_extra_blocks(
+                embed_dim[i + 1], self.stage_archs[i + 1]['trans_extra']))
             downsample_layer = nn.Sequential(*downsample_layers)
             layers = [
                 nn.Conv2d(embed_dim[i], embed_dim[i + 1], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
                 nn.BatchNorm2d(embed_dim[i + 1])
             ]
-            layers.extend([
-                DepthWiseConvModule(
-                    embed_dim[i + 1], 4 * embed_dim[i + 1],
-                    embed_dim[i + 1], 3, 1, 1)
-                for _ in range(self.cnn_branch_depth[i + 1])
-            ])
+            layers.extend(_make_extra_blocks(
+                embed_dim[i + 1], self.stage_archs[i + 1]['cnn_extra']))
             downsample_layer2 = nn.Sequential(*layers)
-            #VTFormer1.4 1   v1.5-3
-            # downsample_layer2 = nn.Sequential(
-            #     nn.Conv2d(embed_dim[i], embed_dim[i + 1], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
-            #     nn.BatchNorm2d(embed_dim[i + 1]),
-            #     DepthWiseConvModule(embed_dim[i + 1], 4*embed_dim[i + 1], embed_dim[i + 1],3, 1, 1),
-            #     DepthWiseConvModule(embed_dim[i + 1], 4*embed_dim[i + 1], embed_dim[i + 1],3, 1, 1),
-            #     # DepthWiseConvModule(embed_dim[i + 1], 4*embed_dim[i + 1], embed_dim[i + 1],3, 1, 1),
-            # )
             if (pe is not None) and i + 1 in pe_stages:
                 downsample_layer.append(get_pe_layer(emb_dim=embed_dim[i + 1], name=pe))
                 downsample_layer2.append(get_pe_layer(emb_dim=embed_dim[i + 1], name=pe))
@@ -698,7 +733,7 @@ class VTFormer(nn.Module):
         for layer in self.downsample_layers2:
             _fuse_sequential_conv_bn(layer)
         for module in self.modules():
-            if isinstance(module, DepthWiseConvModule):
+            if isinstance(module, (DepthWiseConvModule, MBConvModule)):
                 module.fuse_for_inference()
         self._inference_fused = True
 
