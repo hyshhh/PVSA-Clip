@@ -20,6 +20,7 @@ from .topp_flash_kernel import (can_run_topp_route_cuda,
 
 DEFAULT_ATTN_VIS_CONFIG = dict(enabled=False)
 _TOPP_FLASH_STAGE_LOGGED = set()
+_TOPP_FLASH_STAGE_PROFILED = set()
 
 
 def _normalize_topp_backend(backend: Optional[str]) -> Optional[str]:
@@ -531,7 +532,12 @@ class ToppAttention(nn.Module):
             assert H % self.n_win == 0 and W % self.n_win == 0  #
         ###################################################
         stage_debug = self.topp_flash_debug and not ret_attn_mask
-        stage_profile = stage_debug
+        profile_key = (
+            self.topp_flash_backend, tuple(x.shape), self.num_heads,
+            self.qk_dim, self.dim, self.n_win, self.router.topk)
+        stage_profile = stage_debug and profile_key not in _TOPP_FLASH_STAGE_PROFILED
+        if stage_profile:
+            _TOPP_FLASH_STAGE_PROFILED.add(profile_key)
         stage_times = {}
 
         def run_stage(name, fn):
@@ -604,9 +610,9 @@ class ToppAttention(nn.Module):
                             energy=self.router.energy,
                             scale=self.router.scale,
                             full_route=full_route,
-                            debug=stage_debug))
+                            debug=stage_profile))
                     r_mask = None
-                    if stage_debug:
+                    if stage_profile:
                         router_kernel_ms = consume_topp_kernel_timing(
                             'Router kernel')
                         if router_kernel_ms is not None:
@@ -642,8 +648,8 @@ class ToppAttention(nn.Module):
                     H=H,
                     W=W,
                     backend=self.topp_flash_backend,
-                    debug=stage_debug))
-            if stage_debug:
+                    debug=stage_profile))
+            if stage_profile:
                 flash_kernel_ms = consume_topp_kernel_timing('Flash kernel')
                 if flash_kernel_ms is not None:
                     stage_times['Flash kernel'] = flash_kernel_ms
@@ -654,7 +660,7 @@ class ToppAttention(nn.Module):
             log_path = f'topp_flash_{self.topp_flash_backend or "torch"}'
             if full_route:
                 log_path = f'{log_path}_full_last'
-            if stage_debug:
+            if stage_profile:
                 _log_topp_stage_debug(
                     log_path, x, q_pix, kv_pix, r_idx,
                     stage_times, self.num_heads, self.qk_dim, self.dim,
