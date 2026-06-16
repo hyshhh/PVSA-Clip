@@ -69,41 +69,6 @@ def topp_route_cuda(query: Tensor,
     return _maybe_time_debug(debug, debug_key, debug_path, query, run_route)
 
 
-def topp_flash_fused_attention(route_query: Tensor,
-                               q_pix: Tensor,
-                               kv_pix: Tensor,
-                               topk: int,
-                               p: float,
-                               temperature: float,
-                               energy: float,
-                               route_scale: float,
-                               attn_scale: float,
-                               num_heads: int,
-                               qk_dim: int,
-                               dim: int,
-                               n_win: int,
-                               H: int,
-                               W: int,
-                               debug: bool = False) -> Tensor:
-    """Inference-only fused route and attention CUDA path."""
-    debug_key = None
-    debug_path = 'cuda_fused_route'
-    if debug:
-        debug_key = _log_topp_fused_debug(
-            route_query, q_pix, kv_pix, topk, num_heads, qk_dim, dim,
-            n_win, H, W)
-
-    def run_fused():
-        extension = _load_cuda_extension()
-        return extension.fused_forward(
-            route_query.contiguous(), q_pix.contiguous(), kv_pix.contiguous(),
-            int(topk), float(p), float(temperature), float(energy),
-            float(route_scale), float(attn_scale), int(num_heads),
-            int(qk_dim), int(dim), int(n_win), int(H), int(W))
-
-    return _maybe_time_debug(debug, debug_key, debug_path, q_pix, run_fused)
-
-
 def can_run_topp_route_cuda(query: Tensor, topk: int) -> bool:
     if os.getenv('PVSA_TOPP_ROUTE_CUDA', '1') != '1':
         return False
@@ -113,52 +78,8 @@ def can_run_topp_route_cuda(query: Tensor, topk: int) -> bool:
         return False
     return (query.is_cuda and query.dtype == torch.float32 and
             query.dim() == 3 and query.size(1) == 49 and
+            query.size(2) in (64, 128, 256, 512) and
             0 < int(topk) <= 49)
-
-
-def can_run_topp_fused_cuda(route_query: Tensor,
-                            q_pix: Tensor,
-                            kv_pix: Tensor,
-                            topk: int,
-                            num_heads: int,
-                            qk_dim: int,
-                            dim: int,
-                            n_win: int,
-                            H: int,
-                            W: int) -> bool:
-    if os.getenv('PVSA_TOPP_FUSED_CUDA', '1') != '1':
-        return False
-    if not _can_build_cuda_extension():
-        return False
-    if route_query.requires_grad or q_pix.requires_grad or kv_pix.requires_grad:
-        return False
-    if not (route_query.is_cuda and q_pix.is_cuda and kv_pix.is_cuda):
-        return False
-    if route_query.dtype != torch.float32 or q_pix.dtype != torch.float32:
-        return False
-    if kv_pix.dtype != torch.float32:
-        return False
-    if route_query.dim() != 3 or q_pix.dim() != 4 or kv_pix.dim() != 4:
-        return False
-    if n_win != 7 or route_query.size(1) != 49 or q_pix.size(1) != 49:
-        return False
-    if kv_pix.size(1) != 49 or not (0 < int(topk) <= 49):
-        return False
-    if H % 7 != 0 or W % 7 != 0:
-        return False
-    if num_heads not in (2, 4, 8, 16):
-        return False
-    if qk_dim != dim or qk_dim % num_heads != 0:
-        return False
-    if qk_dim // num_heads != 32:
-        return False
-    if route_query.size(0) != q_pix.size(0) or kv_pix.size(0) != q_pix.size(0):
-        return False
-    if route_query.size(2) != qk_dim or q_pix.size(3) != qk_dim:
-        return False
-    if kv_pix.size(3) != qk_dim + dim:
-        return False
-    return q_pix.size(2) == (H // n_win) * (W // n_win)
 
 
 def warn_topp_route_cuda_fallback(reason: str) -> None:
@@ -347,8 +268,6 @@ def _log_topp_flash_debug(q_pix: Tensor, kv_pix: Tensor, r_weight: Tensor,
         path = 'torch_block'
     elif specialized:
         path = 'cuda_specialized'
-    elif can_run:
-        path = 'cuda_generic'
     else:
         path = 'fallback'
 
@@ -359,21 +278,6 @@ def _log_topp_flash_debug(q_pix: Tensor, kv_pix: Tensor, r_weight: Tensor,
     if key not in _CUDA_DEBUG_LOGGED:
         _CUDA_DEBUG_LOGGED.add(key)
     return path, key
-
-
-def _log_topp_fused_debug(route_query: Tensor, q_pix: Tensor, kv_pix: Tensor,
-                          topk: int, num_heads: int, qk_dim: int, dim: int,
-                          n_win: int, H: int, W: int) -> tuple:
-    can_build = _can_build_cuda_extension()
-    can_run = can_run_topp_fused_cuda(
-        route_query, q_pix, kv_pix, topk, num_heads, qk_dim, dim, n_win, H, W)
-    key = (
-        'cuda_fused_route', str(q_pix.dtype), tuple(route_query.shape),
-        tuple(q_pix.shape), tuple(kv_pix.shape), int(topk), num_heads,
-        qk_dim, dim, n_win, H, W)
-    if key not in _CUDA_DEBUG_LOGGED:
-        _CUDA_DEBUG_LOGGED.add(key)
-    return key
 
 
 def _log_topp_route_debug(query: Tensor, topk: int, p: float,
@@ -396,7 +300,7 @@ def _maybe_time_debug(debug: bool, debug_key: Optional[tuple],
     if not torch.cuda.is_available() or not timing_tensor.is_cuda:
         return runner()
     _CUDA_TIMING_LOGGED.add(debug_key)
-    if debug_path in ('cuda_specialized', 'cuda_generic', 'cuda_route'):
+    if debug_path in ('cuda_specialized', 'cuda_route'):
         _load_cuda_extension()
     repeat = 5
     warmup = 2
