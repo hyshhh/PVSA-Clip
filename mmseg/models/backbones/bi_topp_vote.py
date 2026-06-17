@@ -294,7 +294,8 @@ class DepthWiseConvModule(nn.Module):
                  stride=1,
                  padding=1,
                  drop_rate=0.,
-                 dilation=1):
+                 dilation=1,
+                 layer_scale=1e-6):
         super(DepthWiseConvModule, self).__init__()
         
         # 1. 自动计算 Padding，保证 stride=1 时尺寸不变
@@ -320,6 +321,9 @@ class DepthWiseConvModule(nn.Module):
         self.fc2 = nn.Conv2d(feedforward_channels, output_channels, kernel_size=1, bias=False)
         self.bn3 = nn.BatchNorm2d(output_channels) # 加上 BN
         self.drop = nn.Dropout(drop_rate)
+        self.gamma = nn.Parameter(
+            layer_scale * torch.ones(output_channels), requires_grad=True
+        ) if layer_scale > 0 else None
         # 处理残差连接时的维度/步长不匹配问题
         self.downsample = None
         if stride != 1 or embed_dims != output_channels:
@@ -340,8 +344,10 @@ class DepthWiseConvModule(nn.Module):
         out = self.activate(out) # 深度卷积后激活
         out = self.fc2(out)
         out = self.bn3(out)
-        # 最后通常不激活，直接做 Dropout 和 Add  
+        # 最后通常不激活，直接做 Dropout 和 Add
         out = self.drop(out)
+        if self.gamma is not None:
+            out = self.gamma.view(1, -1, 1, 1) * out
         # 残差连接
         if self.downsample is not None:
             identity = self.downsample(x)      
