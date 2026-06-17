@@ -267,9 +267,8 @@ class BiFormer_fusion(VTFormer):
                 self._save_feature_channel_as_image(bn_channel2, f'{save_dir}/mask2.png')
             channel3[i] = _run_with_optional_wall_time(
                 stage_profile, channel3[i], stage_times, 'mask_fusion',
-                lambda i=i: channel3[i] * (
-                    1 + self.mask_fusion_scale * (
-                        bn_channel1 + bn_channel2)))
+                lambda i=i: channel3[i] + self.mask_fusion_scale * (
+                    bn_channel1 * channel1[i] + bn_channel2 * channel2[i]))
             if stage_times:
                 _log_topp_branch_stage_debug(
                     f'mask{i}', tuple(mask_source1.shape),
