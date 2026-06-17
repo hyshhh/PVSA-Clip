@@ -596,9 +596,10 @@ class VTFormer(nn.Module):
         self.fusion_stages = self._normalize_stage_indices(
             fusion_stages, 'fusion_stages')
         self.mask_source = str(mask_source).strip().lower()
-        if self.mask_source not in ('branch_low', 'fused_low'):
+        if self.mask_source not in ('branch_low', 'branch_deep', 'fused_low'):
             raise ValueError(
-                "mask_source must be one of 'branch_low' or 'fused_low'.")
+                "mask_source must be one of 'branch_low', 'branch_deep' "
+                "or 'fused_low'.")
         self.route_pooling = route_pooling
         self.stage_archs = _normalize_stage_archs(
             stage_archs, depth, transformer_branch_depth, cnn_branch_depth,

@@ -104,8 +104,12 @@ class BiFormer_fusion(VTFormer):
             self.extra_norms.append(LayerNorm2d(self.embed_dim[i]))
             self.bn11.append(nn.BatchNorm2d(self.embed_dim[i]))
             self.bn12.append(nn.BatchNorm2d(self.embed_dim[i]))
-            self.conv12.append(nn.Conv2d(self.embed_dim[i],self.embed_dim[i],1,1,0))
-            self.conv11.append(nn.Conv2d(self.embed_dim[i],self.embed_dim[i],1,1,0))
+            mask_in_dim = (
+                self.embed_dim[i + 1]
+                if self.mask_source == 'branch_deep' and i + 1 < 4
+                else self.embed_dim[i])
+            self.conv12.append(nn.Conv2d(mask_in_dim,self.embed_dim[i],1,1,0))
+            self.conv11.append(nn.Conv2d(mask_in_dim,self.embed_dim[i],1,1,0))
             
             
         self.apply(self._init_weights)
@@ -248,6 +252,11 @@ class BiFormer_fusion(VTFormer):
             if self.mask_source == 'branch_low':
                 mask_source1 = channel1[i]
                 mask_source2 = channel2[i]
+            elif self.mask_source == 'branch_deep':
+                if i + 1 >= len(channel1):
+                    continue
+                mask_source1 = channel1[i + 1]
+                mask_source2 = channel2[i + 1]
             else:
                 mask_source1 = channel3[i]
                 mask_source2 = channel3[i]
@@ -266,6 +275,13 @@ class BiFormer_fusion(VTFormer):
             if feature_vis_enabled and i==0:
                 self._save_feature_channel_as_image(bn_channel1, f'{save_dir}/mask1.png')
                 self._save_feature_channel_as_image(bn_channel2, f'{save_dir}/mask2.png')
+            if bn_channel1.shape[-2:] != channel3[i].shape[-2:]:
+                bn_channel1 = F.interpolate(
+                    bn_channel1, size=channel3[i].shape[-2:],
+                    mode='bilinear', align_corners=False)
+                bn_channel2 = F.interpolate(
+                    bn_channel2, size=channel3[i].shape[-2:],
+                    mode='bilinear', align_corners=False)
             channel3[i] = _run_with_optional_wall_time(
                 stage_profile, channel3[i], stage_times, 'mask_fusion',
                 lambda i=i: channel3[i] + (
