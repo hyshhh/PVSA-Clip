@@ -122,6 +122,7 @@ class BiFormer_fusion(VTFormer):
             default_feature_vis_config.update(feature_vis_config)
         self.feature_vis_config = default_feature_vis_config
         self.mask_fusion_scale = float(mask_fusion_scale)
+        self.mask_residual_gates = nn.Parameter(torch.zeros(3))
         self._branch_inference_fused = False
         self._parallel_branch_streams = {}
 
@@ -267,7 +268,9 @@ class BiFormer_fusion(VTFormer):
                 self._save_feature_channel_as_image(bn_channel2, f'{save_dir}/mask2.png')
             channel3[i] = _run_with_optional_wall_time(
                 stage_profile, channel3[i], stage_times, 'mask_fusion',
-                lambda i=i: channel3[i] + self.mask_fusion_scale * (
+                lambda i=i: channel3[i] + (
+                    self.mask_fusion_scale
+                    * torch.tanh(self.mask_residual_gates[i])) * (
                     bn_channel1 * channel1[i] + bn_channel2 * channel2[i]))
             if stage_times:
                 _log_topp_branch_stage_debug(
