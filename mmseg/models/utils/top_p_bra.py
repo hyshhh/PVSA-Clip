@@ -269,6 +269,20 @@ class TopkRouting(nn.Module):
 
         #能量补偿
         topk_score = topk_score * self.energy
+        if self.debug_route:
+            score_detached = topk_score.detach().float()
+            valid_score = score_detached[valid_mask]
+            if valid_score.numel() > 0:
+                score_max = valid_score.max().item()
+                score_mean = valid_score.mean().item()
+            else:
+                score_max = 0.0
+                score_mean = 0.0
+            score_sum = score_detached.sum(dim=-1).mean().item()
+            print(f'[RouteScore] flag={self.route_flag} '
+                  f'after_energy_max={score_max:.6f} '
+                  f'after_energy_mean={score_mean:.6f} '
+                  f'after_energy_sum_mean={score_sum:.6f}')
 
         return topk_score, topk_index, valid_mask
 
