@@ -233,10 +233,15 @@ class BiFormer_fusion(VTFormer):
 
         for i in range(4):
             stage_times = {}
-            fused = _run_with_optional_wall_time(
-                stage_profile, channel1[i], stage_times, 'fusion_conv',
-                lambda i=i: self.fusion[i](
-                    torch.cat((channel1[i], channel2[i]), dim=1)))
+            if i in self.fusion_stages:
+                fused = _run_with_optional_wall_time(
+                    stage_profile, channel1[i], stage_times, 'fusion_conv',
+                    lambda i=i: self.fusion[i](
+                        torch.cat((channel1[i], channel2[i]), dim=1)))
+            else:
+                fused = _run_with_optional_wall_time(
+                    stage_profile, channel1[i], stage_times, 'fusion_add',
+                    lambda i=i: channel1[i] + channel2[i])
             channel3.append(fused)  # dim=1 表示按通道拼接
             if stage_times:
                 _log_topp_branch_stage_debug(

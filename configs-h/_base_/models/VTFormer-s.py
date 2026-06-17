@@ -40,8 +40,11 @@ model = dict(
         mlp_ratios=[3, 3, 3, 3],
         # ------------------------------
         n_win=7,
-        # 可选FAM融合层。默认四层都融合；例如只融合第一层可写成[0]。
-        fam_stages=[0, 1, 2, 3],
+        # 可选FAM融合层。例如只融合第一层可写成[0]；空列表表示不用FAM。
+        fam_stages=[],
+        # 可选1x1卷积融合层。某个stage不在fusion_stages里时，直接用逐元素相加融合。
+        # 如果某个stage同时不在fam_stages和fusion_stages里，就是两分支直接相加。
+        fusion_stages=[0, 1, 2, 3],
         # mask_source='branch_low'：当前低层Transformer/CNN分别生成mask；
         # mask_source='fused_low'：当前低层融合特征channel3生成mask。
         mask_source='branch_low',

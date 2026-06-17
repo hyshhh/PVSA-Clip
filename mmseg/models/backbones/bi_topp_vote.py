@@ -524,6 +524,18 @@ class SpatialWeights(nn.Module):
         return spatial_weights
 @MODELS.register_module()
 class VTFormer(nn.Module):
+    @staticmethod
+    def _normalize_stage_indices(stages, name):
+        stage_tuple = tuple(int(stage) for stage in stages)
+        invalid_stages = [
+            stage for stage in stage_tuple if stage < 0 or stage > 3
+        ]
+        if invalid_stages:
+            raise ValueError(
+                f'{name} values must be in [0, 3], got '
+                f'{invalid_stages}.')
+        return stage_tuple
+
     def __init__(self,depth=[3, 4, 8, 3], in_chans=3, num_classes=1000, embed_dim=[64, 128, 320, 512],
                  head_dim=64, qk_scale=None, representation_size=None,
                  drop_path_rate=0., drop_rate=0.,
@@ -561,6 +573,7 @@ class VTFormer(nn.Module):
                  stage_archs=None,
                  extra_block_type=None,
                  fam_stages=(0, 1, 2, 3),
+                 fusion_stages=(0, 1, 2, 3),
                  mask_source='branch_low',
                  transformer_branch_depth=None,
                  cnn_branch_depth=None,
@@ -578,14 +591,10 @@ class VTFormer(nn.Module):
         self.use_fast_attention = use_fast_attention
         self.debug_route = debug_route
         self.topp_flash_debug = topp_flash_debug
-        self.fam_stages = tuple(int(stage) for stage in fam_stages)
-        invalid_fam_stages = [
-            stage for stage in self.fam_stages if stage < 0 or stage > 3
-        ]
-        if invalid_fam_stages:
-            raise ValueError(
-                f'fam_stages values must be in [0, 3], got '
-                f'{invalid_fam_stages}.')
+        self.fam_stages = self._normalize_stage_indices(
+            fam_stages, 'fam_stages')
+        self.fusion_stages = self._normalize_stage_indices(
+            fusion_stages, 'fusion_stages')
         self.mask_source = str(mask_source).strip().lower()
         if self.mask_source not in ('branch_low', 'fused_low'):
             raise ValueError(
