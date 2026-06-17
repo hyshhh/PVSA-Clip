@@ -68,6 +68,16 @@ def main():
     cfg.launcher = args.launcher
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
+    if cfg.get('grad_spike_debug', False):
+        custom_hooks = list(cfg.get('custom_hooks', []))
+        custom_hooks.append(cfg.get(
+            'grad_spike_debug_cfg',
+            dict(
+                type='GradSpikeDebugHook',
+                threshold=10000,
+                topk=10,
+                interval=1)))
+        cfg.custom_hooks = custom_hooks
 
     # work_dir is determined in this priority: CLI > segment in file > filename
     if args.work_dir is not None:

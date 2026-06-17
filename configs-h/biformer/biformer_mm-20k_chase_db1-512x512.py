@@ -132,5 +132,3 @@ model = dict(
 default_hooks = dict(
     checkpoint=dict(type='CheckpointHook', by_epoch=True, interval=25)
 )
-if grad_spike_debug:
-    custom_hooks = [grad_spike_debug_cfg]
