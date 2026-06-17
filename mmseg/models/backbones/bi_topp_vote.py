@@ -262,6 +262,8 @@ class FeatureAlignmentModule(nn.Module):
         self.lambda_s = lambda_s
         self.channel_weights = ChannelWeights(dim=dim, reduction=reduction)
         self.spatial_weights = SpatialWeights(dim=dim, reduction=reduction)
+        self.channel_gate = nn.Parameter(torch.zeros(1))
+        self.spatial_gate = nn.Parameter(torch.zeros(1))
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -282,8 +284,10 @@ class FeatureAlignmentModule(nn.Module):
         fused = torch.cat((x1, x2), dim=1)
         channel_weights = self.channel_weights(x1, x2, fused)
         spatial_weights = self.spatial_weights(x1, x2, fused)
-        out_x1 = x1 + 0.5 * channel_weights[1] * x2 + 0.5 * spatial_weights[1] * x2
-        out_x2 = x2 + 0.5* channel_weights[0] * x1 + 0.5 * spatial_weights[0] * x1
+        channel_scale = self.lambda_c * torch.tanh(self.channel_gate)
+        spatial_scale = self.lambda_s * torch.tanh(self.spatial_gate)
+        out_x1 = x1 + channel_scale * channel_weights[1] * x2 + spatial_scale * spatial_weights[1] * x2
+        out_x2 = x2 + channel_scale * channel_weights[0] * x1 + spatial_scale * spatial_weights[0] * x1
         return out_x1, out_x2
 class DepthWiseConvModule(nn.Module):
     def __init__(self,
