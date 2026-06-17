@@ -256,7 +256,7 @@ class Block(nn.Module):
         return x
 
 class FeatureAlignmentModule(nn.Module):
-    def __init__(self, dim, reduction=1, lambda_c=.5, lambda_s=.5):
+    def __init__(self, dim, reduction=4, lambda_c=.5, lambda_s=.5):
         super(FeatureAlignmentModule, self).__init__()
         self.lambda_c = lambda_c
         self.lambda_s = lambda_s
@@ -281,13 +281,14 @@ class FeatureAlignmentModule(nn.Module):
                 m.bias.data.zero_()
     
     def forward(self, x1, x2):
-        fused = torch.cat((x1, x2), dim=1)
-        channel_weights = self.channel_weights(x1, x2, fused)
-        spatial_weights = self.spatial_weights(x1, x2, fused)
+        channel_weights = self.channel_weights(x1, x2)
+        spatial_weights = self.spatial_weights(x1, x2)
         channel_scale = self.lambda_c * torch.tanh(self.channel_gate)
         spatial_scale = self.lambda_s * torch.tanh(self.spatial_gate)
-        out_x1 = x1 + channel_scale * channel_weights[1] * x2 + spatial_scale * spatial_weights[1] * x2
-        out_x2 = x2 + channel_scale * channel_weights[0] * x1 + spatial_scale * spatial_weights[0] * x1
+        mix12 = channel_scale * channel_weights[1] + spatial_scale * spatial_weights[1]
+        mix21 = channel_scale * channel_weights[0] + spatial_scale * spatial_weights[0]
+        out_x1 = x1 + mix12.clamp(-1.0, 1.0) * (x2 - x1)
+        out_x2 = x2 + mix21.clamp(-1.0, 1.0) * (x1 - x2)
         return out_x1, out_x2
 class DepthWiseConvModule(nn.Module):
     def __init__(self,
@@ -461,67 +462,44 @@ def _make_extra_blocks(channels, cfg):
 
 
 class ChannelWeights(nn.Module):
-    def __init__(self, dim, reduction=1):
+    def __init__(self, dim, reduction=4):
         super(ChannelWeights, self).__init__()
-        self.dim = dim
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)#自适应平均池化，(B, 96, 256, 256) → (B, 96, 1, 1)
+        channels = dim // 2
+        hidden = max(channels // reduction, 16)
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
         self.max_pool = nn.AdaptiveMaxPool2d(1)
-        self.mlp_avg = nn.Sequential(
-                    nn.Linear(self.dim, self.dim),#如果我的输入向量是96，但是全连接层在
-                    nn.ReLU(inplace=True),
-                    nn.Linear(self.dim, 2))
-        self.mlp_max = nn.Sequential(
-                    nn.Linear(self.dim, self.dim),
-                    nn.ReLU(inplace=True),
-                    nn.Linear(self.dim, 2))
         self.mlp = nn.Sequential(
-                    nn.Linear(self.dim, self.dim),
-                    nn.ReLU(inplace=True),
-                    nn.Linear(self.dim, self.dim),
-                    nn.Sigmoid())
+            nn.Conv2d(2 * channels, hidden, kernel_size=1, bias=True),
+            nn.GELU(),
+            nn.Conv2d(hidden, 2 * channels, kernel_size=1, bias=True),
+            nn.Sigmoid())
 
-    def forward(self, x1, x2, fused=None):
-        B, C, H, W = x1.shape
-        # print("!!!!!!!!!!!!")
-        # print(B, C, H, W)#(1,12,256,256)
-        x = fused if fused is not None else torch.cat((x1, x2), dim=1)
-        # print("a")
-        # print(x.shape)
-
-        # Avg. Adaptive normalization
-        avg = self.avg_pool(x).view(B, 2 * C)
-        # print("b")
-        # print("avg shape:", avg.shape)
-        avg_attn = self.mlp_avg(avg).softmax(dim=-1)
-        avg_x1, avg_x2 = (avg_attn.view(B, 2, 1) * avg.view(B, 2, C)).chunk(2, dim=1)
-        avg_x = (avg_x1 + avg_x2).view(B, C)
-
-        # Max. Adaptive normalization
-        max = self.max_pool(x).view(B, 2 * C)
-        max_attn = self.mlp_max(max).softmax(dim=-1)
-        max_x1, max_x2 = (max_attn.view(B, 2, 1) * max.view(B, 2, C)).chunk(2, dim=1)
-        max_x = (max_x1 + max_x2).view(B, C)
-
-        y = torch.cat((avg_x, max_x), dim=1)
-        y = self.mlp(y).view(B, self.dim, 1)
-        channel_weights = y.reshape(B, 2, C, 1, 1).permute(1, 0, 2, 3, 4)
-        return channel_weights
+    def forward(self, x1, x2):
+        descriptor = torch.cat((x1 + x2, torch.abs(x1 - x2)), dim=1)
+        pooled = self.avg_pool(descriptor) + self.max_pool(descriptor)
+        weights = self.mlp(pooled)
+        return weights.chunk(2, dim=1)
 
 class SpatialWeights(nn.Module):
-    def __init__(self, dim, reduction=1):
+    def __init__(self, dim, reduction=4):
         super(SpatialWeights, self).__init__()
-        self.dim = dim
+        channels = dim // 2
+        hidden = max(channels // reduction, 16)
         self.mlp = nn.Sequential(
-                    nn.Conv2d(self.dim, self.dim // reduction, kernel_size=1),
-                    nn.ReLU(inplace=True),
-                    nn.Conv2d(self.dim // reduction, 2, kernel_size=1), 
-                    nn.Sigmoid())
+            nn.Conv2d(4, hidden, kernel_size=1, bias=True),
+            nn.GELU(),
+            nn.Conv2d(hidden, 2, kernel_size=1, bias=True),
+            nn.Sigmoid())
 
-    def forward(self, x1, x2, fused=None):
-        B, _, H, W = x1.shape
-        x = fused if fused is not None else torch.cat((x1, x2), dim=1)
-        spatial_weights = self.mlp(x).reshape(B, 2, 1, H, W).permute(1, 0, 2, 3, 4)
-        return spatial_weights
+    def forward(self, x1, x2):
+        mean_map = torch.cat(
+            (x1.mean(dim=1, keepdim=True), x2.mean(dim=1, keepdim=True)),
+            dim=1)
+        max_map = torch.cat(
+            (x1.amax(dim=1, keepdim=True), x2.amax(dim=1, keepdim=True)),
+            dim=1)
+        weights = self.mlp(torch.cat((mean_map, max_map), dim=1))
+        return weights.chunk(2, dim=1)
 @MODELS.register_module()
 class VTFormer(nn.Module):
     @staticmethod

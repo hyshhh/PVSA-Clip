@@ -239,7 +239,7 @@ class BiFormer_fusion(VTFormer):
             fused = _run_with_optional_wall_time(
                 stage_profile, channel1[i], stage_times, 'fusion_base',
                 lambda i=i: channel1[i] + channel2[i])
-            channel3.append(fused)  # dim=1 表示按通道拼接
+            channel3.append(fused)
             if stage_times:
                 _log_topp_branch_stage_debug(
                     f'fusion{i}', tuple(channel1[i].shape),
