@@ -256,21 +256,23 @@ class Block(nn.Module):
         return x
 
 class FeatureAlignmentModule(nn.Module):
-    def __init__(self, dim, reduction=4, lambda_c=.1, lambda_s=.1,
-                 gate_scale=1e-3):
+    def __init__(self, dim, reduction=4, lambda_c=.5, lambda_s=.5,
+                 residual_scale=0.1, max_residual_scale=0.25):
         super(FeatureAlignmentModule, self).__init__()
         channels = dim // 2
         self.lambda_c = lambda_c
         self.lambda_s = lambda_s
-        self.gate_scale = gate_scale
+        self.max_residual_scale = float(max_residual_scale)
+        init_ratio = float(residual_scale) / max(self.max_residual_scale, 1e-6)
+        init_ratio = min(max(init_ratio, 1e-4), 1 - 1e-4)
+        self.residual_logit = nn.Parameter(
+            torch.logit(torch.tensor(init_ratio, dtype=torch.float32)))
         self.norm1 = nn.GroupNorm(1, channels)
         self.norm2 = nn.GroupNorm(1, channels)
         self.align12 = nn.Conv2d(channels, channels, kernel_size=1, bias=True)
         self.align21 = nn.Conv2d(channels, channels, kernel_size=1, bias=True)
         self.channel_weights = ChannelWeights(dim=dim, reduction=reduction)
         self.spatial_weights = SpatialWeights(dim=dim, reduction=reduction)
-        self.channel_gate = nn.Parameter(torch.zeros(1))
-        self.spatial_gate = nn.Parameter(torch.zeros(1))
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -294,14 +296,14 @@ class FeatureAlignmentModule(nn.Module):
         x1_to_2 = self.align21(x1n)
         channel_weights = self.channel_weights(x1n, x2n)
         spatial_weights = self.spatial_weights(x1n, x2n)
-        channel_scale = (
-            self.lambda_c * torch.tanh(self.channel_gate) * self.gate_scale)
-        spatial_scale = (
-            self.lambda_s * torch.tanh(self.spatial_gate) * self.gate_scale)
-        mix12 = channel_scale * channel_weights[1] + spatial_scale * spatial_weights[1]
-        mix21 = channel_scale * channel_weights[0] + spatial_scale * spatial_weights[0]
+        residual_scale = (
+            self.max_residual_scale * torch.sigmoid(self.residual_logit))
+        mix12 = self.lambda_c * channel_weights[1] + self.lambda_s * spatial_weights[1]
+        mix21 = self.lambda_c * channel_weights[0] + self.lambda_s * spatial_weights[0]
         out_x1 = x1 + mix12.clamp(-1.0, 1.0) * (x2_to_1 - x1n)
         out_x2 = x2 + mix21.clamp(-1.0, 1.0) * (x1_to_2 - x2n)
+        out_x1 = x1 + residual_scale * (out_x1 - x1)
+        out_x2 = x2 + residual_scale * (out_x2 - x2)
         return out_x1, out_x2
 class DepthWiseConvModule(nn.Module):
     def __init__(self,
@@ -564,8 +566,9 @@ class VTFormer(nn.Module):
                  stage_archs=None,
                  extra_block_type=None,
                  fam_stages=(0, 1, 2, 3),
-                 fam_lambda=0.1,
-                 fam_gate_scale=1e-3,
+                 fam_lambda=0.5,
+                 fam_residual_scale=0.1,
+                 fam_max_residual_scale=0.25,
                  fusion_stages=(0, 1, 2, 3),
                  mask_source='branch_low',
                  transformer_branch_depth=None,
@@ -587,7 +590,8 @@ class VTFormer(nn.Module):
         self.fam_stages = self._normalize_stage_indices(
             fam_stages, 'fam_stages')
         self.fam_lambda = float(fam_lambda)
-        self.fam_gate_scale = float(fam_gate_scale)
+        self.fam_residual_scale = float(fam_residual_scale)
+        self.fam_max_residual_scale = float(fam_max_residual_scale)
         self.fusion_stages = self._normalize_stage_indices(
             fusion_stages, 'fusion_stages')
         self.mask_source = str(mask_source).strip().lower()
@@ -645,7 +649,9 @@ class VTFormer(nn.Module):
 
         self.FAM.append(FeatureAlignmentModule(
             dim=2*embed_dim[0], lambda_c=self.fam_lambda,
-            lambda_s=self.fam_lambda, gate_scale=self.fam_gate_scale))
+            lambda_s=self.fam_lambda,
+            residual_scale=self.fam_residual_scale,
+            max_residual_scale=self.fam_max_residual_scale))
         self.norm = nn.LayerNorm(normalized_shape=1)  # 根据实际维度调整
         # 定义Sigmoid激活
         self.sigmoid = nn.Sigmoid()
@@ -674,7 +680,9 @@ class VTFormer(nn.Module):
             self.downsample_layers2.append(downsample_layer2)
             self.FAM.append(FeatureAlignmentModule(
                 dim=2*embed_dim[i + 1], lambda_c=self.fam_lambda,
-                lambda_s=self.fam_lambda, gate_scale=self.fam_gate_scale))
+                lambda_s=self.fam_lambda,
+                residual_scale=self.fam_residual_scale,
+                max_residual_scale=self.fam_max_residual_scale))
 
         ##########################################################################
 
