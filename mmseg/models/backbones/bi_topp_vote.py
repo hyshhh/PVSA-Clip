@@ -383,11 +383,30 @@ class DepthWiseConvModule(nn.Module):
             _fuse_sequential_conv_bn(self.downsample)
 
 
+class SqueezeExcite(nn.Module):
+    def __init__(self, channels, se_ratio=0.25):
+        super().__init__()
+        squeeze_channels = max(1, int(channels * se_ratio))
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc1 = nn.Conv2d(channels, squeeze_channels, 1)
+        self.act = nn.SiLU(inplace=True)
+        self.fc2 = nn.Conv2d(squeeze_channels, channels, 1)
+        self.gate = nn.Sigmoid()
+
+    def forward(self, x):
+        scale = self.avg_pool(x)
+        scale = self.fc1(scale)
+        scale = self.act(scale)
+        scale = self.fc2(scale)
+        return x * self.gate(scale)
+
+
 class MBConvModule(nn.Module):
     def __init__(self,
                  channels,
                  expansion=4,
                  kernel_size=3,
+                 se_ratio=0.25,
                  drop_rate=0.,
                  layer_scale=1e-6):
         super().__init__()
@@ -399,9 +418,11 @@ class MBConvModule(nn.Module):
             hidden_channels, hidden_channels, kernel_size,
             padding=padding, groups=hidden_channels, bias=False)
         self.bn2 = nn.BatchNorm2d(hidden_channels)
+        self.se = SqueezeExcite(
+            hidden_channels, se_ratio) if se_ratio and se_ratio > 0 else nn.Identity()
         self.project = nn.Conv2d(hidden_channels, channels, 1, bias=False)
         self.bn3 = nn.BatchNorm2d(channels)
-        self.act = nn.GELU()
+        self.act = nn.SiLU(inplace=True)
         self.drop = nn.Dropout(drop_rate)
         self.gamma = nn.Parameter(
             layer_scale * torch.ones(channels), requires_grad=True
@@ -411,6 +432,7 @@ class MBConvModule(nn.Module):
         identity = x
         x = self.act(self.bn1(self.expand(x)))
         x = self.act(self.bn2(self.dwconv(x)))
+        x = self.se(x)
         x = self.drop(self.bn3(self.project(x)))
         if self.gamma is not None:
             x = self.gamma.view(1, -1, 1, 1) * x
@@ -464,6 +486,7 @@ def _make_extra_block(channels, cfg):
     if block_type == 'mbconv':
         return MBConvModule(
             channels, expansion=expansion, kernel_size=kernel_size,
+            se_ratio=cfg.get('se_ratio', 0.25),
             layer_scale=cfg.get('layer_scale', 1e-6))
     if block_type == 'convnext':
         return ConvNeXtBlock(
