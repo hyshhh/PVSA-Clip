@@ -41,8 +41,7 @@ model = dict(
         # ------------------------------
         n_win=7,
         # 可选FAM融合层。例如只融合第一层可写成[0]；空列表表示不用FAM。
-        # fam_stages=[0,1,2,3], #1
-        fam_stages=[], #0
+        fam_stages=[0, 1, 2, 3],
         # 路由窗口特征池化方式。训练默认用avg，避免max响应偶发放大路由梯度。
         route_pooling='avg',
         kv_downsample_mode='identity',
