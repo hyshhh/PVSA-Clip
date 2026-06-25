@@ -71,8 +71,6 @@ class BiFormer_fusion(VTFormer):
                  topp_flash_debug=False,
                  use_pruned_kv_gather=False,
                  feature_vis_config=None,
-                 mask_fusion_scale=0.5,
-                 mask_source='branch_deep',
                  **kwargs):
         try:
             super().__init__(
@@ -96,37 +94,25 @@ class BiFormer_fusion(VTFormer):
                     '当前 VTFormer 不支持 Top-P CUDA 参数，已降级为普通注意力路径。')
             super().__init__(**kwargs)
         self.topp_flash_debug = topp_flash_debug
-        self.mask_source = mask_source
         self.extra_norms = nn.ModuleList()
-        self.bn11 = nn.ModuleList()
-        self.bn12 = nn.ModuleList()
+        self.bn = nn.ModuleList()
         self.conv12=nn.ModuleList()
         self.conv11=nn.ModuleList()
-        self.upsample2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
-        se_reduction = 4
-        self.se_pool = nn.ModuleList()
-        self.se_fc1 = nn.ModuleList()
-        self.se_fc2 = nn.ModuleList()
+        self.fusion = nn.ModuleList()
         for i in range(4):
             self.extra_norms.append(LayerNorm2d(self.embed_dim[i]))
-            self.bn11.append(nn.BatchNorm2d(self.embed_dim[i]))
-            self.bn12.append(nn.BatchNorm2d(self.embed_dim[i]))
-            # i+1 层的通道数作为输入（stage 3 用当前层）
-            mask_in_dim = self.embed_dim[i + 1] if i + 1 < 4 else self.embed_dim[i]
-            self.conv12.append(nn.Conv2d(mask_in_dim,self.embed_dim[i],1,1,0))
-            self.conv11.append(nn.Conv2d(mask_in_dim,self.embed_dim[i],1,1,0))
-            # SE: 全局池化 → 降维 → 升维 → 通道权重
-            C = self.embed_dim[i]
-            self.se_pool.append(nn.AdaptiveAvgPool2d(1))
-            self.se_fc1.append(nn.Conv2d(C, C // se_reduction, 1))
-            self.se_fc2.append(nn.Conv2d(C // se_reduction, C, 1))
+            self.bn.append(nn.BatchNorm2d(self.embed_dim[i]))
+            self.conv12.append(nn.Conv2d(2*self.embed_dim[i],self.embed_dim[i],1,1,0))
+            self.conv11.append(nn.Conv2d(2*self.embed_dim[i],self.embed_dim[i],1,1,0))
+            self.fusion.append(
+                nn.Conv2d(2*self.embed_dim[i], self.embed_dim[i], kernel_size=(1,1), stride=(1, 1), padding=(0, 0), bias=True))
             
             
         self.apply(self._init_weights)
         self.init_weights(pretrained=pretrained)
         nn.SyncBatchNorm.convert_sync_batchnorm(self)
+        self.upsample2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
         self.sigmoid = nn.Sigmoid()
-        self.relu = nn.ReLU(inplace=True)
         default_feature_vis_config = dict(
             enabled=False,
             save_dir='cam/features_imgs4',
@@ -135,9 +121,6 @@ class BiFormer_fusion(VTFormer):
         if feature_vis_config:
             default_feature_vis_config.update(feature_vis_config)
         self.feature_vis_config = default_feature_vis_config
-        self.mask_fusion_scale = float(mask_fusion_scale)
-        self.mask_scale = nn.Parameter(torch.tensor(0.5))
-        self.mask_residual_gates = nn.Parameter(torch.zeros(4))
         self._branch_inference_fused = False
         self._parallel_branch_streams = {}
 
@@ -164,14 +147,10 @@ class BiFormer_fusion(VTFormer):
                 or self._disable_inference_fusion):
             return
         for idx in range(len(self.conv11)):
-            bn11 = self.bn11[idx]
-            if isinstance(bn11, nn.modules.batchnorm._BatchNorm) and not bn11.training:
-                self.conv11[idx] = fuse_conv_bn_eval(self.conv11[idx], bn11)
-                self.bn11[idx] = nn.Identity()
-            bn12 = self.bn12[idx]
-            if isinstance(bn12, nn.modules.batchnorm._BatchNorm) and not bn12.training:
-                self.conv12[idx] = fuse_conv_bn_eval(self.conv12[idx], bn12)
-                self.bn12[idx] = nn.Identity()
+            bn = self.bn[idx]
+            if isinstance(bn, nn.modules.batchnorm._BatchNorm) and not bn.training:
+                self.conv11[idx] = fuse_conv_bn_eval(self.conv11[idx], bn)
+                self.bn[idx] = nn.Identity()
         if self.topp_flash_backend in ('cuda', 'cuda_forward'):
             _load_cuda_extension()
         self._branch_inference_fused = True
@@ -246,53 +225,39 @@ class BiFormer_fusion(VTFormer):
                     i, stage_input_shape, tuple(cnn_encoder_out.shape),
                     tuple(x.shape), stage_times)
 
+        # 基础融合：通道拼接 + 1x1 卷积
         for i in range(4):
             stage_times = {}
             fused = _run_with_optional_wall_time(
                 stage_profile, channel1[i], stage_times, 'fusion_base',
-                lambda i=i: channel1[i] + channel2[i])
+                lambda i=i: self.fusion[i](torch.cat((channel1[i], channel2[i]), dim=1)))
             channel3.append(fused)
             if stage_times:
                 _log_topp_branch_stage_debug(
                     f'fusion{i}', tuple(channel1[i].shape),
                     tuple(channel2[i].shape), tuple(fused.shape),
                     stage_times)
-        for i in range(4):
+        # Mask 融合：用深层特征生成掩码，调制当前层
+        for i in range(3):
             stage_times = {}
-            if i not in self.fusion_stages:
-                continue
-            # branch_deep: 用 i+1 层（stage 3 无更深层，退化为当前层）
-            # branch_low:  用当前层 i
-            if self.mask_source == 'branch_deep':
-                src_idx = i + 1 if i + 1 < 4 else i
-            else:
-                src_idx = i
             C1 = _run_with_optional_wall_time(
-                stage_profile, channel1[src_idx], stage_times, 'mask_conv1',
-                lambda i=i: self.conv11[i](channel1[src_idx]))
+                stage_profile, channel1[i + 1], stage_times, 'mask_conv1',
+                lambda i=i: self.conv11[i](channel1[i + 1]))
             C2 = _run_with_optional_wall_time(
-                stage_profile, channel2[src_idx], stage_times, 'mask_conv2',
-                lambda i=i: self.conv12[i](channel2[src_idx]))
+                stage_profile, channel1[i + 1], stage_times, 'mask_conv2',
+                lambda i=i: self.conv12[i](channel1[i + 1]))
             bn_channel1 = _run_with_optional_wall_time(
                 stage_profile, C1, stage_times, 'mask_bn1',
-                lambda i=i: self.sigmoid(self.bn11[i](C1)))
+                lambda i=i: self.sigmoid(self.bn[i](C1)))
             bn_channel2 = _run_with_optional_wall_time(
                 stage_profile, C2, stage_times, 'mask_bn2',
-                lambda i=i: self.sigmoid(self.bn11[i](C2)))
-            # SE: 两个 mask 拼接后全局池化 → 通道注意力权重
-            se_w = _run_with_optional_wall_time(
-                stage_profile, bn_channel1, stage_times, 'se',
-                lambda i=i: self.sigmoid(self.se_fc2[i](
-                    self.relu(self.se_fc1[i](
-                        self.se_pool[i](bn_channel1 + bn_channel2))))))
-            bn_channel1 = bn_channel1 * se_w
-            bn_channel2 = bn_channel2 * se_w
+                lambda i=i: self.sigmoid(self.bn[i](C2)))
             if feature_vis_enabled and i==0:
                 self._save_feature_channel_as_image(self.upsample2(bn_channel1), f'{save_dir}/mask1.png')
                 self._save_feature_channel_as_image(self.upsample2(bn_channel2), f'{save_dir}/mask2.png')
             channel3[i] = _run_with_optional_wall_time(
                 stage_profile, channel3[i], stage_times, 'mask_fusion',
-                lambda i=i: channel3[i] + self.mask_scale * (self.upsample2(bn_channel1) * channel3[i] + self.upsample2(bn_channel2) * channel3[i]))
+                lambda i=i: channel3[i] + self.upsample2(bn_channel1) * channel3[i] + self.upsample2(bn_channel2) * channel3[i])
 
         for i in range(4):
             if feature_vis_enabled:

@@ -256,39 +256,12 @@ class Block(nn.Module):
         return x
 
 class FeatureAlignmentModule(nn.Module):
-    def __init__(self, dim, reduction=4, lambda_c=.5, lambda_s=.5,
-                 residual_scale=0.1, max_residual_scale=0.25):
+    def __init__(self, dim, reduction=1, lambda_c=.5, lambda_s=.5):
         super(FeatureAlignmentModule, self).__init__()
-        channels = dim // 2
-        self.max_residual_scale = float(max_residual_scale)
-        init_ratio = float(residual_scale) / max(self.max_residual_scale, 1e-6)
-        init_ratio = min(max(init_ratio, 1e-4), 1 - 1e-4)
-        self.residual_logit = nn.Parameter(
-            torch.logit(torch.tensor(init_ratio, dtype=torch.float32)))
-        self.norm1 = nn.GroupNorm(1, channels)
-        self.norm2 = nn.GroupNorm(1, channels)
-        self.local = nn.Conv2d(
-            channels, channels, kernel_size=3, padding=1,
-            groups=channels, bias=True)
-        self.gate = nn.Sequential(
-            nn.Conv2d(3 * channels, channels, kernel_size=1, bias=True),
-            nn.Sigmoid())
-        self.proj = nn.Conv2d(channels, channels, kernel_size=1, bias=True)
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        # Zero-start the guided residual path. FAM is an identity map at
-        # initialization and learns to inject CNN local cues gradually.
-        nn.init.kaiming_normal_(self.local.weight, mode='fan_out')
-        if self.local.bias is not None:
-            nn.init.zeros_(self.local.bias)
-        gate_conv = self.gate[0]
-        nn.init.zeros_(gate_conv.weight)
-        if gate_conv.bias is not None:
-            nn.init.zeros_(gate_conv.bias)
-        nn.init.zeros_(self.proj.weight)
-        if self.proj.bias is not None:
-            nn.init.zeros_(self.proj.bias)
+        self.lambda_c = lambda_c
+        self.lambda_s = lambda_s
+        self.channel_weights = ChannelWeights(dim=dim, reduction=reduction)
+        self.spatial_weights = SpatialWeights(dim=dim, reduction=reduction)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -306,14 +279,11 @@ class FeatureAlignmentModule(nn.Module):
                 m.bias.data.zero_()
     
     def forward(self, x1, x2):
-        x1n = torch.nan_to_num(self.norm1(x1), nan=0.0, posinf=0.0, neginf=0.0)
-        x2n = torch.nan_to_num(self.norm2(x2), nan=0.0, posinf=0.0, neginf=0.0)
-        residual_scale = (
-            self.max_residual_scale * torch.sigmoid(self.residual_logit))
-        gate = self.gate(torch.cat((x1n, x2n, torch.abs(x2n - x1n)), dim=1))
-        delta = self.proj(self.local(x2n - x1n))
-        out_x1 = x1 + residual_scale * gate * torch.tanh(delta)
-        return out_x1, x2
+        channel_weights = self.channel_weights(x1, x2)
+        spatial_weights = self.spatial_weights(x1, x2)
+        out_x1 = x1 + 0.5 * channel_weights[1] * x2 + 0.5 * spatial_weights[1] * x2
+        out_x2 = x2 + 0.5 * channel_weights[0] * x1 + 0.5 * spatial_weights[0] * x1
+        return out_x1, out_x2
 class DepthWiseConvModule(nn.Module):
     def __init__(self,
                  embed_dims,
@@ -510,44 +480,61 @@ def _make_extra_blocks(channels, cfg):
 
 
 class ChannelWeights(nn.Module):
-    def __init__(self, dim, reduction=4):
+    def __init__(self, dim, reduction=1):
         super(ChannelWeights, self).__init__()
-        channels = dim // 2
-        hidden = max(channels // reduction, 16)
+        self.dim = dim
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         self.max_pool = nn.AdaptiveMaxPool2d(1)
+        self.mlp_avg = nn.Sequential(
+                    nn.Linear(self.dim, self.dim),
+                    nn.ReLU(inplace=True),
+                    nn.Linear(self.dim, 2))
+        self.mlp_max = nn.Sequential(
+                    nn.Linear(self.dim, self.dim),
+                    nn.ReLU(inplace=True),
+                    nn.Linear(self.dim, 2))
         self.mlp = nn.Sequential(
-            nn.Conv2d(2 * channels, hidden, kernel_size=1, bias=True),
-            nn.GELU(),
-            nn.Conv2d(hidden, 2 * channels, kernel_size=1, bias=True),
-            nn.Sigmoid())
+                    nn.Linear(self.dim, self.dim),
+                    nn.ReLU(inplace=True),
+                    nn.Linear(self.dim, self.dim),
+                    nn.Sigmoid())
 
     def forward(self, x1, x2):
-        descriptor = torch.cat((x1 + x2, torch.abs(x1 - x2)), dim=1)
-        pooled = self.avg_pool(descriptor) + self.max_pool(descriptor)
-        weights = self.mlp(pooled)
-        return weights.chunk(2, dim=1)
+        B, C, H, W = x1.shape
+        x = torch.cat((x1, x2), dim=1)
+
+        # Avg. Adaptive normalization
+        avg = self.avg_pool(x).view(B, 2 * C)
+        avg_attn = self.mlp_avg(avg).softmax(dim=-1)
+        avg_x1, avg_x2 = (avg_attn.view(B, 2, 1) * avg.view(B, 2, C)).chunk(2, dim=1)
+        avg_x = (avg_x1 + avg_x2).view(B, C)
+
+        # Max. Adaptive normalization
+        max = self.max_pool(x).view(B, 2 * C)
+        max_attn = self.mlp_max(max).softmax(dim=-1)
+        max_x1, max_x2 = (max_attn.view(B, 2, 1) * max.view(B, 2, C)).chunk(2, dim=1)
+        max_x = (max_x1 + max_x2).view(B, C)
+
+        y = torch.cat((avg_x, max_x), dim=1)
+        y = self.mlp(y).view(B, self.dim, 1)
+        channel_weights = y.reshape(B, 2, C, 1, 1).permute(1, 0, 2, 3, 4)
+        return channel_weights
 
 class SpatialWeights(nn.Module):
-    def __init__(self, dim, reduction=4):
+    def __init__(self, dim, reduction=1):
         super(SpatialWeights, self).__init__()
-        channels = dim // 2
-        hidden = max(channels // reduction, 16)
+        self.dim = dim
         self.mlp = nn.Sequential(
-            nn.Conv2d(4, hidden, kernel_size=1, bias=True),
-            nn.GELU(),
-            nn.Conv2d(hidden, 2, kernel_size=1, bias=True),
-            nn.Sigmoid())
+                    nn.Conv2d(self.dim, self.dim // reduction, kernel_size=1),
+                    nn.ReLU(inplace=True),
+                    nn.Conv2d(self.dim // reduction, 2, kernel_size=1),
+                    nn.Sigmoid())
 
     def forward(self, x1, x2):
-        mean_map = torch.cat(
-            (x1.mean(dim=1, keepdim=True), x2.mean(dim=1, keepdim=True)),
-            dim=1)
-        max_map = torch.cat(
-            (x1.amax(dim=1, keepdim=True), x2.amax(dim=1, keepdim=True)),
-            dim=1)
-        weights = self.mlp(torch.cat((mean_map, max_map), dim=1))
-        return weights.chunk(2, dim=1)
+        B, _, H, W = x1.shape
+        x = torch.cat((x1, x2), dim=1)
+        spatial_weights = self.mlp(x).reshape(B, 2, 1, H, W).permute(1, 0, 2, 3, 4)
+        return spatial_weights
 @MODELS.register_module()
 class VTFormer(nn.Module):
     @staticmethod
@@ -599,11 +586,6 @@ class VTFormer(nn.Module):
                  stage_archs=None,
                  extra_block_type=None,
                  fam_stages=(0, 1, 2, 3),
-                 fam_lambda=0.5,
-                 fam_residual_scale=0.1,
-                 fam_max_residual_scale=0.25,
-                 fusion_stages=(0, 1, 2, 3),
-                 mask_source='branch_low',
                  transformer_branch_depth=None,
                  cnn_branch_depth=None,
                  route_pooling='avgmax',
@@ -622,16 +604,6 @@ class VTFormer(nn.Module):
         self.topp_flash_debug = topp_flash_debug
         self.fam_stages = self._normalize_stage_indices(
             fam_stages, 'fam_stages')
-        self.fam_lambda = float(fam_lambda)
-        self.fam_residual_scale = float(fam_residual_scale)
-        self.fam_max_residual_scale = float(fam_max_residual_scale)
-        self.fusion_stages = self._normalize_stage_indices(
-            fusion_stages, 'fusion_stages')
-        self.mask_source = str(mask_source).strip().lower()
-        if self.mask_source not in ('branch_low', 'branch_deep', 'fused_low'):
-            raise ValueError(
-                "mask_source must be one of 'branch_low', 'branch_deep' "
-                "or 'fused_low'.")
         self.route_pooling = route_pooling
         self.stage_archs = _normalize_stage_archs(
             stage_archs, depth, transformer_branch_depth, cnn_branch_depth,
@@ -680,11 +652,7 @@ class VTFormer(nn.Module):
         self.downsample_layers.append(stem)
         self.downsample_layers2.append(stem2)
 
-        self.FAM.append(FeatureAlignmentModule(
-            dim=2*embed_dim[0], lambda_c=self.fam_lambda,
-            lambda_s=self.fam_lambda,
-            residual_scale=self.fam_residual_scale,
-            max_residual_scale=self.fam_max_residual_scale))
+        self.FAM.append(FeatureAlignmentModule(dim=2*embed_dim[0], reduction=1))
         self.norm = nn.LayerNorm(normalized_shape=1)  # 根据实际维度调整
         # 定义Sigmoid激活
         self.sigmoid = nn.Sigmoid()
@@ -711,11 +679,7 @@ class VTFormer(nn.Module):
                 downsample_layer2 = checkpoint_wrapper(downsample_layer2)
             self.downsample_layers.append(downsample_layer)
             self.downsample_layers2.append(downsample_layer2)
-            self.FAM.append(FeatureAlignmentModule(
-                dim=2*embed_dim[i + 1], lambda_c=self.fam_lambda,
-                lambda_s=self.fam_lambda,
-                residual_scale=self.fam_residual_scale,
-                max_residual_scale=self.fam_max_residual_scale))
+            self.FAM.append(FeatureAlignmentModule(dim=2*embed_dim[i + 1], reduction=1))
 
         ##########################################################################
 
