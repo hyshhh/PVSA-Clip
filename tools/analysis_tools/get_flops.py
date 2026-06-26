@@ -74,6 +74,7 @@ def inference(args: argparse.Namespace, logger: MMLogger) -> dict:
     model = revert_sync_batchnorm(model)
     result['ori_shape'] = input_shape[-2:]
     result['pad_shape'] = input_shape[-2:]
+    result['img_shape'] = input_shape[-2:]
     data_batch = {
         'inputs': [torch.rand(input_shape)],
         'data_samples': [SegDataSample(metainfo=result)]
