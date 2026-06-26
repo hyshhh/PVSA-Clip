@@ -49,7 +49,7 @@ model = dict(
         # 四层网络的 Top-P 路由标志位。每个标志位会到
         # topp_route_configs 中查出真实 maxk、P 阈值、温度和能量补偿。
         # 当前默认值等价于重构前 bi_topp_vote.py 中硬编码的 [16, 12, 8, 6]。
-        topks=[16, 12, 8, 6],
+        topks=[16, 12, 8, -2],
         # Top-P v3 路由参数表：
         # maxk 表示 torch.topk 的最大候选窗口数；
         # p 表示累计概率裁剪阈值；
@@ -57,8 +57,8 @@ model = dict(
         # energy 表示裁剪后的能量补偿系数。
         # 测试不同 maxk/p 时，直接修改这里的值，不要用 --cfg-options（无法覆盖整数键）
         topp_route_configs={
-            16: dict(maxk=25, p=0.2, temperature=0.0175, energy=1.0),
-            12: dict(maxk=18, p=0.4, temperature=0.025, energy=1.0),
+            16: dict(maxk=25, p=0.2, temperature=0.0175, energy=4.0),
+            12: dict(maxk=18, p=0.4, temperature=0.025, energy=1.5),
             8: dict(maxk=36, p=0.6, temperature=0.05, energy=0.75),
             6: dict(maxk=49, p=0.8, temperature=0.15, energy=0.4),
         },
@@ -70,7 +70,7 @@ model = dict(
         qk_dims=[64, 128, 256, 512],
         head_dim=32,
         # 使用软路由权重抑制被选窗口的整体幅度；配合layer scale稳定训练。
-        param_routing=False, diff_routing=False, soft_routing=False,
+        param_routing=False, diff_routing=False, soft_routing=True,
         # 路由 mask：对 padding 位置填 -inf，防止无效 KV 参与注意力计算
         use_route_mask=False,
         # 数值保护：softmax 前做 nan_to_num + clamp，防止梯度爆炸
