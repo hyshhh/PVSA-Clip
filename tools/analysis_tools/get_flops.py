@@ -86,14 +86,20 @@ def inference(args: argparse.Namespace, logger: MMLogger) -> dict:
         # TODO: Support MaskFormer and Mask2Former
         raise NotImplementedError('MaskFormer and Mask2Former are not '
                                   'supported yet.')
-    outputs = get_model_complexity_info(
-        model,
-        input_shape=None,
-        inputs=data['inputs'],
-        show_table=False,
-        show_arch=False)
-    result['flops'] = _format_size(outputs['flops'])
-    result['params'] = _format_size(outputs['params'])
+    try:
+        outputs = get_model_complexity_info(
+            model,
+            input_shape=None,
+            inputs=data['inputs'],
+            show_table=False,
+            show_arch=False)
+        result['flops'] = _format_size(outputs['flops'])
+        result['params'] = _format_size(outputs['params'])
+    except (KeyError, RuntimeError):
+        # fvcore 对 nn.Identity 的别名处理有 bug，手动计算参数量
+        total_params = sum(p.numel() for p in model.parameters())
+        result['flops'] = 'N/A (fvcore Identity bug)'
+        result['params'] = _format_size(total_params)
     result['compute_type'] = 'direct: randomly generate a picture'
     return result
 
