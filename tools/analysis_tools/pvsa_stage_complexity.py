@@ -115,14 +115,17 @@ def main():
 
     def _make_hook(name):
         def hook_fn(module, inp, out):
+            flops = 0
             if isinstance(module, torch.nn.Linear):
-                flops_dict[name] = inp[0].numel() * out.numel() // inp[0].shape[0]
+                flops = inp[0].numel() * out.numel() // inp[0].shape[0]
             elif isinstance(module, torch.nn.Conv2d):
                 out_h, out_w = out.shape[2], out.shape[3]
-                flops_dict[name] = module.in_channels * module.out_channels * \
+                flops = module.in_channels * module.out_channels * \
                     module.kernel_size[0] * module.kernel_size[1] * out_h * out_w // module.groups
             elif isinstance(module, torch.nn.BatchNorm2d):
-                flops_dict[name] = inp[0].numel() * 2
+                flops = inp[0].numel() * 2
+            if flops > 0:
+                flops_dict[name] = flops
         return hook_fn
 
     for name, module in backbone.named_modules():
@@ -134,6 +137,15 @@ def main():
     for h in hooks:
         h.remove()
 
+    def _sum_flops_by_prefix(prefixes):
+        total = 0.0
+        for name, flops in flops_dict.items():
+            for prefix in prefixes:
+                if name == prefix or name.startswith(prefix + '.'):
+                    total += flops
+                    break
+        return total
+
     print('stage | cnn | transformer | FAM | vote_fusion | out_norm')
     for stage in range(4):
         cells = []
@@ -141,9 +153,7 @@ def main():
         for group in ('cnn', 'transformer', 'FAM', 'vote_fusion',
                       'out_norm'):
             prefixes = prefixes_by_group[group]
-            group_flops = sum(float(flops_dict.get(p, 0.0)) for p in prefixes
-                              if p in flops_dict or any(
-                                  p2.startswith(p + '.') for p2 in flops_dict))
+            group_flops = _sum_flops_by_prefix(prefixes)
             group_params = _count_params(backbone, prefixes)
             cells.append(
                 f'{_format_flops(group_flops)}/{_format_params(group_params)}')
