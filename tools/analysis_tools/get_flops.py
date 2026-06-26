@@ -86,20 +86,38 @@ def inference(args: argparse.Namespace, logger: MMLogger) -> dict:
         # TODO: Support MaskFormer and Mask2Former
         raise NotImplementedError('MaskFormer and Mask2Former are not '
                                   'supported yet.')
-    try:
-        outputs = get_model_complexity_info(
-            model,
-            input_shape=None,
-            inputs=data['inputs'],
-            show_table=False,
-            show_arch=False)
-        result['flops'] = _format_size(outputs['flops'])
-        result['params'] = _format_size(outputs['params'])
-    except (KeyError, RuntimeError):
-        # fvcore 对 nn.Identity 的别名处理有 bug，手动计算参数量
-        total_params = sum(p.numel() for p in model.parameters())
-        result['flops'] = 'N/A (fvcore Identity bug)'
-        result['params'] = _format_size(total_params)
+    # fvcore 对 nn.Identity 的别名处理有 bug，用 forward hook 手动统计
+    flops_dict = {}
+    hooks = []
+
+    def _make_hook(name):
+        def hook_fn(module, inp, out):
+            flops = 0
+            if isinstance(module, torch.nn.Linear):
+                flops = 2 * inp[0].shape[0] * module.in_features * module.out_features
+            elif isinstance(module, torch.nn.Conv2d):
+                out_h, out_w = out.shape[2], out.shape[3]
+                flops = 2 * module.in_channels * module.out_channels * \
+                    module.kernel_size[0] * module.kernel_size[1] * out_h * out_w // module.groups
+            elif isinstance(module, torch.nn.BatchNorm2d):
+                flops = inp[0].numel() * 2
+            if flops > 0:
+                flops_dict[name] = flops
+        return hook_fn
+
+    for name, module in model.named_modules():
+        hooks.append(module.register_forward_hook(_make_hook(name)))
+
+    with torch.no_grad():
+        model(data['inputs'], data['data_samples'], mode='predict')
+
+    for h in hooks:
+        h.remove()
+
+    total_flops = sum(flops_dict.values())
+    total_params = sum(p.numel() for p in model.parameters())
+    result['flops'] = _format_size(total_flops)
+    result['params'] = _format_size(total_params)
     result['compute_type'] = 'direct: randomly generate a picture'
     return result
 
