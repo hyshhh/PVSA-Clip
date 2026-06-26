@@ -52,7 +52,7 @@ TopP 推理只保留两个开关：
 
 推理模板：
 ```bash
-export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-V2.3:$PYTHONPATH
+export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-v2.4:$PYTHONPATH
 export CC=/usr/bin/gcc-11
 export CXX=/usr/bin/g++-11
 CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
@@ -66,7 +66,7 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
 
 最后一层默认使用 49 窗口全连接路由，不再需要额外开关。
 ```bash
-export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-V2.3:$PYTHONPATH
+export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-v2.4:$PYTHONPATH
 export CC=/usr/bin/gcc-11
 export CXX=/usr/bin/g++-11
 CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \

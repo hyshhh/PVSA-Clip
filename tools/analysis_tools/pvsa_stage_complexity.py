@@ -111,7 +111,16 @@ def main():
     flops = FlopCountAnalysis(backbone, dummy)
     flops.unsupported_ops_warnings(False)
     flops.uncalled_modules_warnings(False)
-    by_module = flops.by_module()
+    # fvcore 对 nn.Identity 的别名处理有 bug，捕获后用 by_operator 降级
+    try:
+        by_module = flops.by_module()
+    except (KeyError, RuntimeError):
+        by_module = {}
+        by_op = flops.by_operator()
+        print('Warning: fvcore by_module() failed, using by_operator() instead')
+        print('Operator-level FLOPs:')
+        for op, val in by_op.items():
+            print(f'  {op}: {val:,}')
 
     print('stage | cnn | transformer | FAM | vote_fusion | out_norm')
     for stage in range(4):
