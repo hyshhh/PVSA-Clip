@@ -49,7 +49,7 @@ model = dict(
         # 四层网络的 Top-P 路由标志位。每个标志位会到
         # topp_route_configs 中查出真实 maxk、P 阈值、温度和能量补偿。
         # 当前默认值等价于重构前 bi_topp_vote.py 中硬编码的 [16, 12, 8, 6]。
-        topks=[16, 12, 8, -2],
+        topks=[16, 12, 8, 6],
         # Top-P v3 路由参数表：
         # maxk 表示 torch.topk 的最大候选窗口数；
         # p 表示累计概率裁剪阈值；

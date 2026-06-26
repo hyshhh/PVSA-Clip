@@ -58,7 +58,6 @@ train_cfg = dict(
     max_epochs=200,      # 总训练轮数
     val_interval=10      # 每训练 1 个 epoch 验证一次
 )
-randomness = dict(seed=3407, deterministic=False)
 #配置2，camvid
 # param_scheduler = [
 #     dict(
