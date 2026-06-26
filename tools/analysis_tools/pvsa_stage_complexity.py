@@ -117,11 +117,12 @@ def main():
         def hook_fn(module, inp, out):
             flops = 0
             if isinstance(module, torch.nn.Linear):
-                # FLOPs = batch * in_features * out_features
-                flops = inp[0].shape[0] * module.in_features * module.out_features
+                # FLOPs = 2 * batch * in_features * out_features (multiply + add)
+                flops = 2 * inp[0].shape[0] * module.in_features * module.out_features
             elif isinstance(module, torch.nn.Conv2d):
                 out_h, out_w = out.shape[2], out.shape[3]
-                flops = module.in_channels * module.out_channels * \
+                # FLOPs = 2 * MAC (multiply-accumulate)
+                flops = 2 * module.in_channels * module.out_channels * \
                     module.kernel_size[0] * module.kernel_size[1] * out_h * out_w // module.groups
             elif isinstance(module, torch.nn.BatchNorm2d):
                 flops = inp[0].numel() * 2
