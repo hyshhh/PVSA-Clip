@@ -129,5 +129,5 @@ model = dict(
     test_cfg=dict(mode='whole')
 )
 default_hooks = dict(
-    checkpoint=dict(type='CheckpointHook', by_epoch=True, interval=25)
+    checkpoint=dict(type='CheckpointHook', by_epoch=True, interval=10)
 )
