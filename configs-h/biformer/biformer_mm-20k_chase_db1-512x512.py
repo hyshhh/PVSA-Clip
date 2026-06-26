@@ -16,7 +16,7 @@ _base_ = [
 # --------------------------
 # 注意: 此 crop_size 和 gqy.py 中的 RandomCrop/Resize 统一为224，
 # 这样 n_win=7 时各stage特征尺寸可以整除窗口数。
-crop_size = (224, 224)
+crop_size = (256, 256)
 data_preprocessor = dict(
     type='SegDataPreProcessor',
     mean=[123.675, 116.28, 103.53],
