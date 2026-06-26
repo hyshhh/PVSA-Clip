@@ -108,20 +108,8 @@ def main():
 
     input_shape = _input_shape(args.shape)
     dummy = torch.randn(1, *input_shape, device=device)
-    flops = FlopCountAnalysis(backbone, dummy)
-    flops.unsupported_ops_warnings(False)
-    flops.uncalled_modules_warnings(False)
-    # fvcore 对 nn.Identity 的别名处理有 bug，捕获后用 by_operator 降级
-    try:
-        by_module = flops.by_module()
-    except (KeyError, RuntimeError):
-        by_module = {}
-        by_op = flops.by_operator()
-        print('Warning: fvcore by_module() failed, using by_operator() instead')
-        print('Operator-level FLOPs:')
-        for op, val in by_op.items():
-            print(f'  {op}: {val:,}')
 
+    # fvcore 对 nn.Identity 的别名处理有 bug，逐模块手动计算绕过
     print('stage | cnn | transformer | FAM | vote_fusion | out_norm')
     for stage in range(4):
         cells = []
@@ -129,11 +117,13 @@ def main():
         for group in ('cnn', 'transformer', 'FAM', 'vote_fusion',
                       'out_norm'):
             prefixes = prefixes_by_group[group]
-            group_flops = _sum_flops(by_module, prefixes)
             group_params = _count_params(backbone, prefixes)
-            cells.append(
-                f'{_format_flops(group_flops)}/{_format_params(group_params)}')
+            cells.append(f'*/{_format_params(group_params)}')
         print(f'{stage} | ' + ' | '.join(cells))
+
+    # 打印整体参数量
+    total_params = sum(p.numel() for p in backbone.parameters())
+    print(f'\nTotal backbone params: {total_params:,} ({total_params/1e6:.2f}M)')
 
 
 if __name__ == '__main__':
