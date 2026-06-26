@@ -427,6 +427,7 @@ class VTFormer(nn.Module):
                  use_route_mask=False,
                  use_nan_guard=False,
                  fam_reduction=4,
+                 cnn_dwconv_layers=[2, 1, 2, 1],
                  feature_vis_config=None,
                  **kwargs):
 
@@ -453,8 +454,6 @@ class VTFormer(nn.Module):
         self.downsample_layers = nn.ModuleList()
         self.downsample_layers2 = nn.ModuleList()
         self.FAM = nn.ModuleList()
-        self.DWconv=nn.ModuleList()
-        # self.pool_layers = nn.ModuleList()
 
 
 
@@ -466,15 +465,18 @@ class VTFormer(nn.Module):
             nn.Conv2d(embed_dim[0] // 2, embed_dim[0], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
             nn.BatchNorm2d(embed_dim[0]),
         )
-        stem2 = nn.Sequential(
+        stem2_layers = [
             nn.Conv2d(in_chans, embed_dim[0] // 2, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
             nn.BatchNorm2d(embed_dim[0] // 2),
             nn.GELU(),
             nn.Conv2d(embed_dim[0] // 2, embed_dim[0], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
             nn.BatchNorm2d(embed_dim[0]),
-            DepthWiseConvModule(embed_dim[0], 4*embed_dim[0],embed_dim[0],3, 1, 1),
-            DepthWiseConvModule(embed_dim[0], 4*embed_dim[0], embed_dim[0],3, 1, 1),
-        )
+        ]
+        stem2_layers.extend([
+            DepthWiseConvModule(embed_dim[0], 4*embed_dim[0], embed_dim[0], 3, 1, 1)
+            for _ in range(cnn_dwconv_layers[0])
+        ])
+        stem2 = nn.Sequential(*stem2_layers)
 
         if (pe is not None) and 0 in pe_stages:
             stem.append(get_pe_layer(emb_dim=embed_dim[0], name=pe))
@@ -493,12 +495,6 @@ class VTFormer(nn.Module):
         self.fusion.append(
             nn.Conv2d(2*embed_dim[0], embed_dim[0], kernel_size=(1,1), stride=(1, 1), padding=(0, 0),bias=True)
             )
-        #Larger
-        # num_layers = [4, 8, 4]
-        # num_layers = [2, 3, 4]
-        # num_layers = [2, 2, 2]
-        num_layers = [1, 2, 1]
-
         for i in range(3):
             downsample_layer = nn.Sequential(
                 nn.Conv2d(embed_dim[i], embed_dim[i + 1], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
@@ -510,7 +506,7 @@ class VTFormer(nn.Module):
             ]
             layers.extend([
             DepthWiseConvModule(embed_dim[i + 1], 4 * embed_dim[i + 1], embed_dim[i + 1], 3, 1, 1)
-            for _ in range(num_layers[i])
+            for _ in range(cnn_dwconv_layers[i + 1])
              ])
             downsample_layer2 = nn.Sequential(*layers)
             #VTFormer1.4 1   v1.5-3
