@@ -1,20 +1,13 @@
 import math
 from collections import OrderedDict
-from functools import partial
-from typing import Optional, Union
 
 import torch
 import torch.nn as nn
 from torch.nn.utils.fusion import fuse_conv_bn_eval
 
-from einops.layers.torch import Rearrange
 from fairscale.nn.checkpoint import checkpoint_wrapper
-from timm.models import register_model
-from timm.models.layers import DropPath, to_2tuple, trunc_normal_
-from timm.models.vision_transformer import _cfg
-from ..utils.common import Attention, AttentionLePE, DWConv
-# from ..utils.bra_legacy import BiLevelRoutingAttention
-from ..utils.bra_legacy_hys_v4 import BiLevelRoutingAttention
+from timm.models.layers import DropPath, trunc_normal_
+from ..utils.common import DWConv
 from ..utils.top_p_bra import ToppAttention
 from mmseg.registry import MODELS
 
@@ -61,20 +54,8 @@ def _fuse_sequential_conv_bn(module):
 def get_pe_layer(emb_dim, pe_dim=None, name='none'):
     if name == 'none':
         return nn.Identity()
-    # if name == 'sum':
-    #     return Summer(PositionalEncodingPermute2D(emb_dim))
-    # elif name == 'npe.sin':
-    #     return NeuralPE(emb_dim=emb_dim, pe_dim=pe_dim, mode='sin')
-    # elif name == 'npe.coord':
-    #     return NeuralPE(emb_dim=emb_dim, pe_dim=pe_dim, mode='coord')
-    # elif name == 'hpe.conv':
-    #     return HybridPE(emb_dim=emb_dim, pe_dim=pe_dim, mode='conv', res_shortcut=True)
-    # elif name == 'hpe.dsconv':
-    #     return HybridPE(emb_dim=emb_dim, pe_dim=pe_dim, mode='dsconv', res_shortcut=True)
-    # elif name == 'hpe.pointconv':
-    #     return HybridPE(emb_dim=emb_dim, pe_dim=pe_dim, mode='pointconv', res_shortcut=True)
     else:
-        raise ValueError(f'PE name {name} is not surpported!')
+        raise ValueError(f'PE name {name} is not supported!')
 
 class Block(nn.Module):
     def __init__(self, dim, drop_path=0., layer_scale_init_value=-1,
@@ -92,108 +73,57 @@ class Block(nn.Module):
                  debug_route=False,
                  topp_flash_debug=False,
                  use_route_mask=False,
-                 use_nan_guard=False):
+                 use_nan_guard=False,
+                 use_ttrm=False,
+                 soft_kv_weight=0.5):
         super().__init__()
         qk_dim = qk_dim or dim
-
-        # modules
         self.W = W
-        # 如果在注意力前加入卷积核：
+
         if before_attn_dwconv > 0:
             self.pos_embed = nn.Conv2d(dim, dim, kernel_size=before_attn_dwconv, padding=1, groups=dim)
         else:
             self.pos_embed = lambda x: 0
-        if topk > 0:
-            self.PA = ToppAttention(dim=dim, num_heads=num_heads, n_win=n_win, qk_dim=qk_dim,
-                                    qk_scale=qk_scale, kv_per_win=kv_per_win,
-                                    kv_downsample_ratio=kv_downsample_ratio,
-                                    kv_downsample_kernel=kv_downsample_kernel,
-                                    kv_downsample_mode=kv_downsample_mode,
-                                    topk=topk, param_attention=param_attention, param_routing=param_routing,
-                                    diff_routing=diff_routing, soft_routing=soft_routing,
-                                    side_dwconv=side_dwconv,
-                                    auto_pad=auto_pad, W=self.W,
-                                    topp_flash_block_windows=topp_flash_block_windows,
-                                    topp_flash_backend=topp_flash_backend,
-                                    use_pruned_kv_gather=use_pruned_kv_gather,
-                                    pruned_kv_num_groups=pruned_kv_num_groups,
-                                    topp_route_configs=topp_route_configs,
-                                    attn_vis_config=attn_vis_config,
-                                    use_fast_attention=use_fast_attention,
-                                    debug_route=debug_route,
-                                    topp_flash_debug=topp_flash_debug,
-                                    use_route_mask=use_route_mask,
-                                    use_nan_guard=use_nan_guard)
-        elif topk == -1:
-            self.attn = Attention(dim=dim)
-        elif topk == -2:
-            self.attn = AttentionLePE(dim=dim, side_dwconv=side_dwconv)
-        elif topk == 0:
-            self.attn = nn.Sequential(Rearrange('n h w c -> n c h w'),  # compatiability
-                                      nn.Conv2d(dim, dim, 1),  # pseudo qkv linear
-                                      nn.Conv2d(dim, dim, 5, padding=2, groups=dim),  # pseudo attention
-                                      nn.Conv2d(dim, dim, 1),  # pseudo out linear
-                                      Rearrange('n c h w -> n h w c')
-                                      )
-        self.norm1 = nn.LayerNorm(dim, eps=1e-6)  # important to avoid attention collapsing
-        self.norm2 = nn.LayerNorm(dim, eps=1e-6)
+
+        self.PA = ToppAttention(dim=dim, num_heads=num_heads, n_win=n_win, qk_dim=qk_dim,
+                                qk_scale=qk_scale, kv_per_win=kv_per_win,
+                                kv_downsample_ratio=kv_downsample_ratio,
+                                kv_downsample_kernel=kv_downsample_kernel,
+                                kv_downsample_mode=kv_downsample_mode,
+                                topk=topk, param_attention=param_attention, param_routing=param_routing,
+                                diff_routing=diff_routing, soft_routing=soft_routing,
+                                side_dwconv=side_dwconv,
+                                auto_pad=auto_pad, W=self.W,
+                                topp_flash_block_windows=topp_flash_block_windows,
+                                topp_flash_backend=topp_flash_backend,
+                                use_pruned_kv_gather=use_pruned_kv_gather,
+                                pruned_kv_num_groups=pruned_kv_num_groups,
+                                topp_route_configs=topp_route_configs,
+                                attn_vis_config=attn_vis_config,
+                                use_fast_attention=use_fast_attention,
+                                debug_route=debug_route,
+                                topp_flash_debug=topp_flash_debug,
+                                use_route_mask=use_route_mask,
+                                use_nan_guard=use_nan_guard,
+                                use_ttrm=use_ttrm,
+                                soft_kv_weight=soft_kv_weight)
+
         self.norm3 = nn.LayerNorm(dim, eps=1e-6)
         self.norm4 = nn.LayerNorm(dim, eps=1e-6)
-        # self.mlp = nn.Sequential(nn.Linear(dim, int(mlp_ratio * dim)),
-        #                          DWConv(int(mlp_ratio * dim)) if mlp_dwconv else nn.Identity(),
-        #                          nn.GELU(),
-        #                          nn.Linear(int(mlp_ratio * dim), dim)
-        #                          )
         self.mlp2 = nn.Sequential(nn.Linear(dim, int(mlp_ratio * dim)),
                                  DWConv(int(mlp_ratio * dim)) if mlp_dwconv else nn.Identity(),
                                  nn.GELU(),
-                                 nn.Linear(int(mlp_ratio * dim), dim)
-                                 )
+                                 nn.Linear(int(mlp_ratio * dim), dim))
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
-
-        # tricks: layer scale & pre_norm/post_norm
-        if layer_scale_init_value > 0:
-            self.use_layer_scale = True
-            self.gamma1 = nn.Parameter(layer_scale_init_value * torch.ones((dim)), requires_grad=True)
-            self.gamma2 = nn.Parameter(layer_scale_init_value * torch.ones((dim)), requires_grad=True)
-        else:
-            self.use_layer_scale = False
         self.pre_norm = pre_norm
-        
 
-    def forward(self, x):
-        """
-        x: NCHW tensor
-        """
-        # VTFormerv1.22,只有Top-p
+    def forward(self, x, category_prototypes=None):
         x = x + self.pos_embed(x)
-        x = x.permute(0, 2, 3, 1) 
-        PA=self.PA(self.norm3(x),None)
+        x = x.permute(0, 2, 3, 1)
+        PA = self.PA(self.norm3(x), None, category_prototypes=category_prototypes)
         if self.pre_norm:
-                x = x + self.drop_path(PA)   # (N, H, W, C)          
-                x = x + self.drop_path(self.mlp2(self.norm4(x)))  # (N, H, W, C)
-        x = x.permute(0, 3, 1, 2)
-        return x
-        # x = x.permute(0, 3, 1, 2)
-
-        
-        # VTFormerv3.1
-        x = x + self.pos_embed(x)
-        x = x.permute(0, 2, 3, 1) 
-        GA,A1=self.attn(self.norm1(x))
-
-        if self.pre_norm:
-                x = x + self.drop_path(GA)  # (N, H, W, C)
-                x = x + self.drop_path(self.mlp(self.norm2(x)))  # (N, H, W, C)
-        # x = x.permute(0, 3, 1, 2)
-
-        # #VTFormerv3.1
-        # x = x + self.pos_embed(x)
-        # x = x.permute(0, 2, 3, 1)
-        PA=self.PA(self.norm3(x),A1)
-        if self.pre_norm:
-                x = x + self.drop_path(PA)  # (N, H, W, C)          
-                x = x + self.drop_path(self.mlp2(self.norm4(x)))  # (N, H, W, C)
+            x = x + self.drop_path(PA)
+            x = x + self.drop_path(self.mlp2(self.norm4(x)))
         x = x.permute(0, 3, 1, 2)
         return x
 class FeatureAlignmentModule(nn.Module):
@@ -225,10 +155,6 @@ class FeatureAlignmentModule(nn.Module):
         out_x1 = x1 + 0.5 * channel_weights[1] * x2 + 0.5 * spatial_weights[1] * x2
         out_x2 = x2 + 0.5* channel_weights[0] * x1 + 0.5 * spatial_weights[0] * x1
         return out_x1, out_x2
-from mmengine.model import BaseModule, ModuleList, Sequential   
-from mmcv.cnn.bricks import DropPath, build_activation_layer, build_norm_layer
-import torch
-import torch.nn as nn
 
 class DepthWiseConvModule(nn.Module):
     def __init__(self,
@@ -323,16 +249,9 @@ class ChannelWeights(nn.Module):
 
     def forward(self, x1, x2):
         B, C, H, W = x1.shape
-        # print("!!!!!!!!!!!!")
-        # print(B, C, H, W)#(1,12,256,256)
         x = torch.cat((x1, x2), dim=1)
-        # print("a")
-        # print(x.shape)
 
-        # Avg. Adaptive normalization
         avg = self.avg_pool(x).view(B, 2 * C)
-        # print("b")
-        # print("avg shape:", avg.shape)
         avg_attn = self.mlp_avg(avg).softmax(dim=-1)
         avg_x1, avg_x2 = (avg_attn.view(B, 2, 1) * avg.view(B, 2, C)).chunk(2, dim=1)
         avg_x = (avg_x1 + avg_x2).view(B, C)
@@ -363,29 +282,6 @@ class SpatialWeights(nn.Module):
         x = torch.cat((x1, x2), dim=1)
         spatial_weights = self.mlp(x).reshape(B, 2, 1, H, W).permute(1, 0, 2, 3, 4)
         return spatial_weights
-class Stem224(nn.Module):
-    def __init__(self, in_chans=3, embed_dim=128):
-        super().__init__()
-        self.conv1 = DepthWiseConvModule(
-            in_chans, embed_dim // 2, embed_dim // 2, kernel_size=3, stride=2, padding=1)
-        self.bn1 = nn.BatchNorm2d(embed_dim // 2)
-        self.act1 = nn.GELU()
-
-        self.conv2 = DepthWiseConvModule(
-            embed_dim // 2, embed_dim // 2, embed_dim, kernel_size=3, stride=2, padding=1)
-        self.bn2 = nn.BatchNorm2d(embed_dim)
-        self.act2 = nn.GELU()
-
-        self.shortcut = nn.Sequential(
-            nn.Conv2d(in_chans, embed_dim, 1, stride=4),  # 下采样 + 对齐通道
-            nn.BatchNorm2d(embed_dim)
-        )
-
-    def forward(self, x):
-        out = self.act1(self.bn1(self.conv1(x)))
-        out = self.act2(self.bn2(self.conv2(out)))
-        out += self.shortcut(x)
-        return out
 @MODELS.register_module()
 class VTFormer(nn.Module):
     def __init__(self, depth=[3, 4, 8, 3], in_chans=3, num_classes=1000, embed_dim=[64, 128, 320, 512],
@@ -429,10 +325,15 @@ class VTFormer(nn.Module):
                  fam_reduction=4,
                  cnn_dwconv_layers=[2, 1, 2, 1],
                  feature_vis_config=None,
+                 use_ttrm=False,
+                 ttrm_stages=[0, 1, 2, 3],
+                 remove_cnn_branch=False,
+                 soft_kv_weight=0.5,
                  **kwargs):
 
         super().__init__()
         self.W = W
+        self.remove_cnn_branch = remove_cnn_branch
         self.topp_flash_backend = _normalize_topp_backend(topp_flash_backend)
         self.topp_flash_block_windows = topp_flash_block_windows
         self.topp_flash_debug = topp_flash_debug
@@ -452,8 +353,12 @@ class VTFormer(nn.Module):
         self.norm_eval = norm_eval
         ############ downsample layers (patch embeddings) ######################
         self.downsample_layers = nn.ModuleList()
-        self.downsample_layers2 = nn.ModuleList()
-        self.FAM = nn.ModuleList()
+        if not remove_cnn_branch:
+            self.downsample_layers2 = nn.ModuleList()
+            self.FAM = nn.ModuleList()
+        else:
+            self.downsample_layers2 = None
+            self.FAM = None
 
 
 
@@ -465,73 +370,71 @@ class VTFormer(nn.Module):
             nn.Conv2d(embed_dim[0] // 2, embed_dim[0], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
             nn.BatchNorm2d(embed_dim[0]),
         )
-        stem2_layers = [
-            nn.Conv2d(in_chans, embed_dim[0] // 2, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
-            nn.BatchNorm2d(embed_dim[0] // 2),
-            nn.GELU(),
-            nn.Conv2d(embed_dim[0] // 2, embed_dim[0], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
-            nn.BatchNorm2d(embed_dim[0]),
-        ]
-        stem2_layers.extend([
-            DepthWiseConvModule(embed_dim[0], 4*embed_dim[0], embed_dim[0], 3, 1, 1)
-            for _ in range(cnn_dwconv_layers[0])
-        ])
-        stem2 = nn.Sequential(*stem2_layers)
 
         if (pe is not None) and 0 in pe_stages:
             stem.append(get_pe_layer(emb_dim=embed_dim[0], name=pe))
-            stem2.append(get_pe_layer(emb_dim=embed_dim[0], name=pe))
         if use_checkpoint_stages:
             stem = checkpoint_wrapper(stem)
-            stem2 = checkpoint_wrapper(stem2)
         self.downsample_layers.append(stem)
-        self.downsample_layers2.append(stem2)
 
-        self.FAM.append(FeatureAlignmentModule(dim=2*embed_dim[0], reduction=fam_reduction))
-        self.fusion = nn.ModuleList()
-        self.norm = nn.LayerNorm(normalized_shape=1)  # 根据实际维度调整
-        # 定义Sigmoid激活
-        self.sigmoid = nn.Sigmoid()
-        self.fusion.append(
-            nn.Conv2d(2*embed_dim[0], embed_dim[0], kernel_size=(1,1), stride=(1, 1), padding=(0, 0),bias=True)
+        if not remove_cnn_branch:
+            stem2_layers = [
+                nn.Conv2d(in_chans, embed_dim[0] // 2, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
+                nn.BatchNorm2d(embed_dim[0] // 2),
+                nn.GELU(),
+                nn.Conv2d(embed_dim[0] // 2, embed_dim[0], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
+                nn.BatchNorm2d(embed_dim[0]),
+            ]
+            stem2_layers.extend([
+                DepthWiseConvModule(embed_dim[0], 4*embed_dim[0], embed_dim[0], 3, 1, 1)
+                for _ in range(cnn_dwconv_layers[0])
+            ])
+            stem2 = nn.Sequential(*stem2_layers)
+            if (pe is not None) and 0 in pe_stages:
+                stem2.append(get_pe_layer(emb_dim=embed_dim[0], name=pe))
+            if use_checkpoint_stages:
+                stem2 = checkpoint_wrapper(stem2)
+            self.downsample_layers2.append(stem2)
+            self.FAM.append(FeatureAlignmentModule(dim=2*embed_dim[0], reduction=fam_reduction))
+            self.fusion = nn.ModuleList()
+            self.sigmoid = nn.Sigmoid()
+            self.fusion.append(
+                nn.Conv2d(2*embed_dim[0], embed_dim[0], kernel_size=(1,1), stride=(1, 1), padding=(0, 0),bias=True)
             )
+        else:
+            self.fusion = nn.ModuleList()
+            self.sigmoid = nn.Sigmoid()
+
         for i in range(3):
             downsample_layer = nn.Sequential(
                 nn.Conv2d(embed_dim[i], embed_dim[i + 1], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
                 nn.BatchNorm2d(embed_dim[i + 1])
             )
-            layers = [
-                nn.Conv2d(embed_dim[i], embed_dim[i + 1], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
-                nn.BatchNorm2d(embed_dim[i + 1])
-            ]
-            layers.extend([
-            DepthWiseConvModule(embed_dim[i + 1], 4 * embed_dim[i + 1], embed_dim[i + 1], 3, 1, 1)
-            for _ in range(cnn_dwconv_layers[i + 1])
-             ])
-            downsample_layer2 = nn.Sequential(*layers)
-            #VTFormer1.4 1   v1.5-3
-            # downsample_layer2 = nn.Sequential(
-            #     nn.Conv2d(embed_dim[i], embed_dim[i + 1], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
-            #     nn.BatchNorm2d(embed_dim[i + 1]),
-            #     DepthWiseConvModule(embed_dim[i + 1], 4*embed_dim[i + 1], embed_dim[i + 1],3, 1, 1),
-            #     DepthWiseConvModule(embed_dim[i + 1], 4*embed_dim[i + 1], embed_dim[i + 1],3, 1, 1),
-            #     # DepthWiseConvModule(embed_dim[i + 1], 4*embed_dim[i + 1], embed_dim[i + 1],3, 1, 1),
-            # )
             if (pe is not None) and i + 1 in pe_stages:
                 downsample_layer.append(get_pe_layer(emb_dim=embed_dim[i + 1], name=pe))
-                downsample_layer2.append(get_pe_layer(emb_dim=embed_dim[i + 1], name=pe))
-                # pool1.append(get_pe_layer(emb_dim=embed_dim[i + 1], name=pe))
             if use_checkpoint_stages:
                 downsample_layer = checkpoint_wrapper(downsample_layer)
-                downsample_layer2 = checkpoint_wrapper(downsample_layer2)
-                # pool1= checkpoint_wrapper(pool1)
             self.downsample_layers.append(downsample_layer)
-            self.downsample_layers2.append(downsample_layer2)
-            # self.pool_layers.append(pool1)
-            self.fusion.append(
-            nn.Conv2d(2*embed_dim[i + 1], embed_dim[i + 1], kernel_size=(1,1), stride=(1, 1), padding=(0, 0),bias=True)
-            )
-            self.FAM.append(FeatureAlignmentModule(dim=2*embed_dim[i + 1], reduction=fam_reduction))
+
+            if not remove_cnn_branch:
+                layers = [
+                    nn.Conv2d(embed_dim[i], embed_dim[i + 1], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
+                    nn.BatchNorm2d(embed_dim[i + 1])
+                ]
+                layers.extend([
+                    DepthWiseConvModule(embed_dim[i + 1], 4 * embed_dim[i + 1], embed_dim[i + 1], 3, 1, 1)
+                    for _ in range(cnn_dwconv_layers[i + 1])
+                ])
+                downsample_layer2 = nn.Sequential(*layers)
+                if (pe is not None) and i + 1 in pe_stages:
+                    downsample_layer2.append(get_pe_layer(emb_dim=embed_dim[i + 1], name=pe))
+                if use_checkpoint_stages:
+                    downsample_layer2 = checkpoint_wrapper(downsample_layer2)
+                self.downsample_layers2.append(downsample_layer2)
+                self.fusion.append(
+                    nn.Conv2d(2*embed_dim[i + 1], embed_dim[i + 1], kernel_size=(1,1), stride=(1, 1), padding=(0, 0),bias=True)
+                )
+                self.FAM.append(FeatureAlignmentModule(dim=2*embed_dim[i + 1], reduction=fam_reduction))
 
         ##########################################################################
 
@@ -539,7 +442,8 @@ class VTFormer(nn.Module):
         nheads = [dim // head_dim for dim in qk_dims]
         dp_rates = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depth))]
         cur = 0
-        topks=[16,12,8,6]
+        self.use_ttrm = use_ttrm
+        self.ttrm_stages = ttrm_stages
         for i in range(4):
             stage = nn.Sequential(
                 *[Block(dim=embed_dim[i], drop_path=dp_rates[cur + j],
@@ -574,7 +478,9 @@ class VTFormer(nn.Module):
                         debug_route=self.debug_route,
                         topp_flash_debug=self.topp_flash_debug,
                         use_route_mask=self.use_route_mask,
-                        use_nan_guard=self.use_nan_guard) for j in range(depth[i])],
+                        use_nan_guard=use_nan_guard,
+                        use_ttrm=(use_ttrm and i in ttrm_stages),
+                        soft_kv_weight=soft_kv_weight) for j in range(depth[i])],
             )
             if i in use_checkpoint_stages:
                 stage = checkpoint_wrapper(stage)
@@ -583,17 +489,15 @@ class VTFormer(nn.Module):
 
         ##########################################################################
         self.norm = nn.BatchNorm2d(embed_dim[-1])
-        # Representation layer
         if representation_size:
             self.num_features = representation_size
             self.pre_logits = nn.Sequential(OrderedDict([
-                ('fc', nn.Linear(embed_dim, representation_size)),
+                ('fc', nn.Linear(embed_dim[-1], representation_size)),
                 ('act', nn.Tanh())
             ]))
         else:
             self.pre_logits = nn.Identity()
 
-        # Classifier head
         self.head = nn.Linear(embed_dim[-1], num_classes) if num_classes > 0 else nn.Identity()
         self.apply(self._init_weights)
 
@@ -623,17 +527,20 @@ class VTFormer(nn.Module):
             return
         for layer in self.downsample_layers:
             _fuse_sequential_conv_bn(layer)
-        for layer in self.downsample_layers2:
-            _fuse_sequential_conv_bn(layer)
+        if self.downsample_layers2 is not None:
+            for layer in self.downsample_layers2:
+                _fuse_sequential_conv_bn(layer)
         for module in self.modules():
             if isinstance(module, DepthWiseConvModule):
                 module.fuse_for_inference()
         self._inference_fused = True
 
-    def forward_features(self, x):
+    def forward_features(self, x, category_prototypes=None):
         for i in range(4):
             x = self.downsample_layers[i](x)  # res = (56, 28, 14, 7), wins = (64, 16, 4, 1)
-            x = self.stages[i](x)
+            # Iterate through blocks manually to pass category_prototypes
+            for block in self.stages[i]:
+                x = block(x, category_prototypes=category_prototypes)
         x = self.norm(x)
         x = self.pre_logits(x)
         return x

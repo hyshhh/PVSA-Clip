@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from .decode_head import BaseDecodeHead
 from .segformer_head import SegformerHead
+from .clip_seg_head import CLIPSegHead
 
-__all__ = ['BaseDecodeHead', 'SegformerHead']
+__all__ = ['BaseDecodeHead', 'SegformerHead', 'CLIPSegHead']

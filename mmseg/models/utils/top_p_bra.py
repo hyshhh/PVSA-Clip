@@ -184,7 +184,8 @@ class TopkRouting(nn.Module):
                  route_configs=None,
                  attn_vis_config=None,
                  debug_route=False,
-                 use_nan_guard=False):
+                 use_nan_guard=False,
+                 use_ttrm=False):
         super().__init__()
         self.route_flag = topk
         self.qk_dim = qk_dim
@@ -199,6 +200,11 @@ class TopkRouting(nn.Module):
         self.flag = 0
         self.attn_vis_config = _normalize_attn_vis_config(attn_vis_config)
         self._attn_vis_saved = False
+
+        # TTRM: Text-guided Top-P Routing Module
+        self.use_ttrm = use_ttrm
+        if use_ttrm:
+            self.ttrm_alpha = nn.Parameter(torch.tensor(0.1))
 
         # V1.1 hardcoded route parameters (unchanged)
         # top-p-v2/3_2025_12_25
@@ -239,7 +245,7 @@ class TopkRouting(nn.Module):
         self.silu = True
 
     # top-p-v3_2025_12_25
-    def forward(self, query: Tensor, key: Tensor, GA):
+    def forward(self, query: Tensor, key: Tensor, GA, category_prototypes=None):
 
         if self.W == False or GA == None:
             if not self.diff_routing:
@@ -248,6 +254,18 @@ class TopkRouting(nn.Module):
             q = F.normalize(query, dim=-1)
             k = F.normalize(key, dim=-1)
             attn = (q * self.scale) @ k.transpose(-2, -1)   # (n, p2, p2)
+
+            # TTRM: inject text routing signal
+            if self.use_ttrm and category_prototypes is not None:
+                tc = F.normalize(category_prototypes, dim=-1)
+                attn_text = (q * self.scale) @ tc.transpose(-2, -1)
+                attn_text_mean = attn_text.mean(dim=-1, keepdim=True)
+                alpha = torch.sigmoid(self.ttrm_alpha)
+                attn = (1 - alpha) * attn + alpha * attn_text_mean
+            elif hasattr(self, '_frozen_alpha'):
+                # Deployment: use pre-baked alpha (no text input needed)
+                attn_text = (q * self.scale).mean(dim=-1, keepdim=True)
+                attn = (1 - self._frozen_alpha) * attn + self._frozen_alpha * attn_text
         else:
             attn = GA
             if self.debug_route:
@@ -381,10 +399,11 @@ class TopkRouting(nn.Module):
 
 
 class KVGather(nn.Module):
-    def __init__(self, mul_weight='none'):
+    def __init__(self, mul_weight='none', soft_weight=0.5):
         super().__init__()
         assert mul_weight in ['none', 'soft', 'hard']
         self.mul_weight = mul_weight
+        self.soft_weight = soft_weight
 
     def forward(self, r_idx: Tensor, r_weight: Tensor, kv: Tensor):
         """
@@ -402,7 +421,9 @@ class KVGather(nn.Module):
                                index=r_idx.view(n, p2, topk, 1, 1).expand(-1, -1, -1, w2, c_kv)
                                )
         if self.mul_weight == 'soft':
-            topk_kv = r_weight.view(n, p2, topk, 1, 1) * topk_kv
+            # Residual form: (1 + weight * r_weight) * kv
+            # soft_weight=0 → pure gather, soft_weight=1 → original soft routing
+            topk_kv = (1 + self.soft_weight * r_weight.view(n, p2, topk, 1, 1)) * topk_kv
         elif self.mul_weight == 'hard':
             raise NotImplementedError('differentiable hard routing TBA')
 
@@ -443,7 +464,9 @@ class ToppAttention(nn.Module):
                  debug_route=False,
                  topp_flash_debug=False,
                  use_route_mask=False,
-                 use_nan_guard=False):
+                 use_nan_guard=False,
+                 use_ttrm=False,
+                 soft_kv_weight=0.5):
         super().__init__()
         # local attention setting
         self.dim = dim
@@ -475,7 +498,6 @@ class ToppAttention(nn.Module):
         self.diff_routing = diff_routing
         self.soft_routing = soft_routing
         self.use_route_mask = use_route_mask
-        self.W = W
         # router
         assert not (self.param_routing and not self.diff_routing)
         self.router = TopkRouting(qk_dim=self.qk_dim,
@@ -486,14 +508,15 @@ class ToppAttention(nn.Module):
                                   route_configs=self.topp_route_configs,
                                   attn_vis_config=self.attn_vis_config,
                                   debug_route=debug_route,
-                                  use_nan_guard=use_nan_guard)
+                                  use_nan_guard=use_nan_guard,
+                                  use_ttrm=use_ttrm)
         if self.soft_routing:  # soft routing, always diffrentiable (if no detach)
             mul_weight = 'soft'
         elif self.diff_routing:  # hard differentiable routing
             mul_weight = 'hard'
         else:  # hard non-differentiable routing
             mul_weight = 'none'
-        self.kv_gather = KVGather(mul_weight=mul_weight)
+        self.kv_gather = KVGather(mul_weight=mul_weight, soft_weight=soft_kv_weight)
 
         # qkv mapping (shared by both global routing and local attention)
         self.param_attention = param_attention
@@ -546,9 +569,10 @@ class ToppAttention(nn.Module):
         k_route = 0.5 * (k.mean([2, 3]) + k.amax(dim=(2, 3)))
         return q_route, k_route
 
-    def forward(self, x, GA, ret_attn_mask=False):
+    def forward(self, x, GA, ret_attn_mask=False, category_prototypes=None):
         """
         x: NHWC tensor
+        category_prototypes: [K, D] tensor for TTRM routing (optional)
 
         Return:
             NHWC tensor
@@ -654,14 +678,14 @@ class ToppAttention(nn.Module):
                     warn_topp_route_cuda_fallback(str(exc))
                     r_weight, r_idx, r_mask = run_stage(
                         'router',
-                        lambda: self.router(q_win, k_win, GA))
+                        lambda: self.router(q_win, k_win, GA, category_prototypes=category_prototypes))
                     keep_len = r_mask.sum(dim=-1).contiguous().long()
             else:
                 warn_topp_route_cuda_fallback(
                     'shape, dtype, or runtime state rejected CUDA route kernel.')
                 r_weight, r_idx, r_mask = run_stage(
                     'router',
-                    lambda: self.router(q_win, k_win, GA))
+                    lambda: self.router(q_win, k_win, GA, category_prototypes=category_prototypes))
                 keep_len = r_mask.sum(dim=-1).contiguous().long()
 
             out = run_stage(
@@ -703,7 +727,7 @@ class ToppAttention(nn.Module):
         # ==================== Standard PyTorch path (V1.1 training) ====================
         r_weight, r_idx, r_mask = run_stage(
             'router',
-            lambda: self.router(q_win, k_win, GA))  # (n, p^2, topk) tensors
+            lambda: self.router(q_win, k_win, GA, category_prototypes=category_prototypes))  # (n, p^2, topk) tensors
 
         kv_pix_sel = self.kv_gather(r_idx=r_idx, r_weight=r_weight, kv=kv_pix)  # (n, p^2, topk, h_kv*w_kv, c_qk+c_v)
         k_pix_sel, v_pix_sel = kv_pix_sel.split([self.qk_dim, self.dim], dim=-1)

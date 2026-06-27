@@ -1,0 +1,208 @@
+# Copyright (c) OpenMMLab. All rights reserved.
+import logging
+import os
+from typing import List, Optional
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from mmengine.logging import print_log
+from torch import Tensor
+
+from mmseg.registry import MODELS
+from mmseg.utils import (ConfigType, OptConfigType, OptMultiConfig,
+                         OptSampleList, SampleList, add_prefix)
+from .encoder_decoder import EncoderDecoder
+from ..utils.text_encoder import TextEncoder
+
+
+@MODELS.register_module()
+class CLIPEncoderDecoder(EncoderDecoder):
+    """CLIP-enhanced Encoder-Decoder segmentor.
+
+    Extends EncoderDecoder with a TextEncoder that produces category
+    prototypes from a prompt bank. These prototypes are passed to the
+    backbone (TTRM routing + CPFM refinement) and decode head
+    (contrastive classification).
+
+    During training, CPFM refines text embeddings with visual context.
+    After training, enhanced prototypes are saved as .pt for deployment.
+    During inference, frozen prototypes are loaded and the TextEncoder
+    is removed (zero text overhead).
+
+    Args:
+        text_encoder (dict): Config for TextEncoder.
+        align_loss_weight (float): Weight for embedding alignment loss.
+    """
+
+    def __init__(self, text_encoder: dict, align_loss_weight=0.1, **kwargs):
+        super().__init__(**kwargs)
+        self.text_encoder_cfg = text_encoder
+        self.align_loss_weight = align_loss_weight
+
+        # Build TextEncoder
+        self.text_encoder = TextEncoder(
+            embed_dim=text_encoder.get('embed_dim', 512),
+            num_categories=text_encoder.get('num_categories', 3),
+            prompts_per_category=text_encoder.get('prompts_per_category', 10))
+
+        # Load prompt bank if path provided
+        prompt_bank_path = text_encoder.get('prompt_bank_path', None)
+        if prompt_bank_path and os.path.exists(prompt_bank_path):
+            self.text_encoder.load_prompt_bank(prompt_bank_path)
+
+        # Enhanced prototypes buffer (filled during training)
+        self.register_buffer(
+            'enhanced_prototypes',
+            torch.zeros(text_encoder.get('num_categories', 3),
+                        text_encoder.get('embed_dim', 512)))
+
+        # Frozen prototypes for inference (loaded from .pt)
+        self.register_buffer(
+            'frozen_prototypes',
+            torch.zeros(text_encoder.get('num_categories', 3),
+                        text_encoder.get('embed_dim', 512)))
+        self._prototypes_frozen = False
+
+    def freeze_prototypes(self, save_path=None):
+        """Freeze and save CPFM-enhanced prototypes for deployment.
+
+        Uses self.enhanced_prototypes (populated by extract_feat during
+        training) which contains the CPFM-refined text embeddings, NOT
+        the raw text_encoder() output.
+
+        Args:
+            save_path: Path to save .pt file. If None, uses default.
+        """
+        with torch.no_grad():
+            # Use CPFM-enhanced prototypes from training
+            self.frozen_prototypes.copy_(self.enhanced_prototypes)
+            self._prototypes_frozen = True
+
+        if save_path:
+            torch.save({
+                'prototypes': self.frozen_prototypes,
+                'embed_dim': self.text_encoder.embed_dim,
+                'num_categories': self.text_encoder.num_categories,
+            }, save_path)
+            print_log(
+                f'Saved frozen prototypes to {save_path}',
+                logger='current')
+
+    def extract_feat(self, inputs: Tensor):
+        """Extract features from images and produce text prototypes.
+
+        Args:
+            inputs: [B, 3, H, W] input images
+
+        Returns:
+            tuple of stage features (4 tensors)
+            category_prototypes: [K, D] text embeddings
+        """
+        # Get text prototypes
+        if self._prototypes_frozen:
+            category_prototypes = self.frozen_prototypes
+        else:
+            category_prototypes = self.text_encoder()
+
+        # Forward through backbone with text injection
+        backbone_out = self.backbone(inputs, category_prototypes=category_prototypes)
+
+        if isinstance(backbone_out, tuple) and len(backbone_out) == 2:
+            feats, enhanced_prototypes = backbone_out
+            if self.training:
+                self.enhanced_prototypes.copy_(enhanced_prototypes.detach())
+                # Use CPFM-enhanced prototypes for loss computation
+                category_prototypes = enhanced_prototypes
+        else:
+            feats = backbone_out
+
+        return feats, category_prototypes
+
+    def loss(self, inputs: Tensor, data_samples: SampleList) -> dict:
+        """Calculate losses from a batch of inputs and data samples.
+
+        Args:
+            inputs: [B, 3, H, W] input images
+            data_samples: list of SegDataSample
+
+        Returns:
+            dict[str, Tensor]: a dictionary of loss components
+        """
+        feats, category_prototypes = self.extract_feat(inputs)
+
+        losses = dict()
+        loss_decode = self._decode_head_forward_train(
+            feats, data_samples, category_prototypes=category_prototypes)
+        losses.update(loss_decode)
+
+        if self.with_auxiliary_head:
+            loss_aux = self._auxiliary_head_forward_train(
+                feats, data_samples)
+            losses.update(loss_aux)
+
+        if not self._prototypes_frozen:
+            # L_align: embedding regularization
+            original_prototypes = self.text_encoder()
+            cos_sim = F.cosine_similarity(
+                category_prototypes, original_prototypes, dim=-1)
+            losses['loss_align'] = self.align_loss_weight * (1 - cos_sim).mean()
+
+        return losses
+
+    def _decode_head_forward_train(self, inputs, data_samples,
+                                   category_prototypes=None, **kwargs):
+        """Run forward of decode head and compute loss."""
+        losses = dict()
+        # Set prototypes on head so loss() can access them
+        if hasattr(self.decode_head, 'set_category_prototypes'):
+            self.decode_head.set_category_prototypes(category_prototypes)
+        loss_decode = self.decode_head.loss(
+            inputs, data_samples, self.train_cfg, **kwargs)
+        losses.update(add_prefix(loss_decode, 'decode'))
+        return losses
+
+    def predict(self, inputs: Tensor,
+                data_samples: Optional[SampleList] = None) -> SampleList:
+        """Predict segmentation results.
+
+        Args:
+            inputs: [B, 3, H, W] input images
+            data_samples: optional list of SegDataSample
+
+        Returns:
+            list of SegDataSample with pred_sem_seg
+        """
+        if data_samples is not None:
+            batch_img_metas = [
+                data_sample.metainfo for data_sample in data_samples
+            ]
+        else:
+            batch_img_metas = [
+                dict(
+                    ori_shape=inputs.shape[2:],
+                    img_shape=inputs.shape[2:],
+                    pad_shape=inputs.shape[2:],
+                    padding_size=[0, 0, 0, 0])
+            ] * inputs.shape[0]
+
+        feats, category_prototypes = self.extract_feat(inputs)
+        seg_logits = self.inference(feats, batch_img_metas,
+                                    category_prototypes=category_prototypes)
+        return self.postprocess_result(seg_logits, data_samples)
+
+    def inference(self, feats, batch_img_metas,
+                  category_prototypes=None, rescale=True):
+        """Inference with augmented test time."""
+        seg_logits = self.decode_head.predict(
+            feats, batch_img_metas, self.test_cfg,
+            category_prototypes=category_prototypes)
+
+        return seg_logits
+
+    def _forward(self, inputs: Tensor,
+                 data_samples: Optional[SampleList] = None) -> Tensor:
+        """Network forward process."""
+        feats, category_prototypes = self.extract_feat(inputs)
+        return self.decode_head.forward(
+            feats, category_prototypes=category_prototypes)
