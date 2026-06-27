@@ -54,11 +54,21 @@ PROMPT_BANK = {
 }
 
 
-def load_clip_model(model_name='ViT-B/32', device='cpu'):
-    """Load CLIP model."""
+def load_clip_model(model_name='ViT-B/32', device='cpu', model_path=None):
+    """Load CLIP model.
+
+    Args:
+        model_name: CLIP model name (e.g. 'ViT-B/32')
+        device: device to load model on
+        model_path: local path to .pt file (skips download)
+    """
     try:
         import clip
-        model, _ = clip.load(model_name, device=device)
+        if model_path and os.path.exists(model_path):
+            print(f'Loading CLIP from local path: {model_path}')
+            model, _ = clip.load(model_name, device=device, download_root=os.path.dirname(model_path))
+        else:
+            model, _ = clip.load(model_name, device=device)
         return model
     except ImportError:
         print('OpenAI CLIP not found. Trying transformers...')
@@ -110,6 +120,8 @@ def main():
                         help='Output .pt file path')
     parser.add_argument('--model', type=str, default='ViT-B/32',
                         help='CLIP model name')
+    parser.add_argument('--model-path', type=str, default=None,
+                        help='Local path to CLIP .pt file (skips download)')
     parser.add_argument('--device', type=str, default='cpu',
                         help='Device for encoding')
     parser.add_argument('--embed-dim', type=int, default=512,
@@ -129,7 +141,7 @@ def main():
     print(f'Total prompts: {len(all_prompts)}')
 
     # Load CLIP model
-    clip_model = load_clip_model(args.model, args.device)
+    clip_model = load_clip_model(args.model, args.device, model_path=args.model_path)
 
     # Encode prompts
     if clip_model is None:
