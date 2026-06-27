@@ -10,11 +10,19 @@ pip install openai-clip
 
 ## 生成 Prompt Bank
 
+先下载 CLIP 模型权重到项目目录（服务器网络不通时在本地下载后 scp 传过去）：
 ```bash
-python tools/generate_water_prompt_bank.py --output tools/prompt_bank_water.pt --model ViT-B/32
+wget -O tools/ViT-B-32.pt https://openaipublic.azureedge.net/clip/models/40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af/ViT-B-32.pt
+```
+
+然后用本地路径生成 prompt bank：
+```bash
+python tools/generate_water_prompt_bank.py --output tools/prompt_bank_water.pt --model ViT-B/32 --model-path tools/ViT-B-32.pt
 ```
 
 ## 训练
+
+> 必须先完成"生成 Prompt Bank"步骤，训练时需要加载 `tools/prompt_bank_water.pt`。
 
 CLIP 增强训练：
 ```bash
