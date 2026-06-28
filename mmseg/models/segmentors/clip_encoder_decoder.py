@@ -63,15 +63,16 @@ class CLIPEncoderDecoder(EncoderDecoder):
         self._prototypes_frozen = False
 
     def freeze_prototypes(self, save_path=None):
-        """Freeze and save CPFM-enhanced prototypes for deployment.
+        """Freeze and save original CLIP prototypes for deployment.
 
-        Enhanced prototypes mix CLIP semantics with dataset visual info.
+        Head always uses original CLIP embeddings. CPFM only affects
+        backbone feature learning during training.
 
         Args:
             save_path: Path to save .pt file. If None, uses default.
         """
         with torch.no_grad():
-            self.frozen_prototypes.copy_(self.enhanced_prototypes)
+            self.frozen_prototypes.copy_(self.text_encoder())
             self._prototypes_frozen = True
 
         if save_path:
@@ -92,7 +93,7 @@ class CLIPEncoderDecoder(EncoderDecoder):
 
         Returns:
             tuple of stage features (4 tensors)
-            category_prototypes: [K, D] CPFM-enhanced text embeddings
+            category_prototypes: [K, D] original CLIP text embeddings
         """
         if self._prototypes_frozen:
             category_prototypes = self.frozen_prototypes
@@ -105,11 +106,10 @@ class CLIPEncoderDecoder(EncoderDecoder):
             feats, enhanced_prototypes = backbone_out
             if self.training:
                 self.enhanced_prototypes.copy_(enhanced_prototypes.detach())
-            # Use CPFM-enhanced prototypes for head (mixes dataset visual info into CLIP)
-            category_prototypes = enhanced_prototypes
         else:
             feats = backbone_out
 
+        # Head always uses original prototypes
         return feats, category_prototypes
 
     def loss(self, inputs: Tensor, data_samples: SampleList) -> dict:
