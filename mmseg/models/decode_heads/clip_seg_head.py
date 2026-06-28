@@ -96,10 +96,11 @@ class CLIPSegHead(BaseDecodeHead):
             prototypes = self._inference_prototypes
 
         if prototypes is not None:
-            # L2 normalize for cosine similarity
-            out_norm = F.normalize(out, dim=1)  # [B, D, H, W]
-            w = F.normalize(prototypes, dim=-1).unsqueeze(0)  # [1, K, D]
-            seg_logits = torch.einsum("bchw,bkc->bkhw", out_norm, w)
+            # BN + dot product (same as YOLOE BNContrastiveHead)
+            # BN handles normalization, dot product with fixed prototypes
+            # This is fusible into a single Conv2d for deployment
+            w = prototypes.unsqueeze(0)  # [1, K, D]
+            seg_logits = torch.einsum("bchw,bkc->bkhw", out, w)
             seg_logits = seg_logits * self.logit_scale.exp() + self.bias
         else:
             seg_logits = self.cls_seg(out)
