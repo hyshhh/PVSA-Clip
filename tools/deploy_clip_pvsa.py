@@ -69,17 +69,12 @@ def main():
         model.decode_head.fuse_for_deployment(model.frozen_prototypes)
     print('Decode head fused into Conv2d')
 
-    # Step 3: Remove CPFM and text gating modules from backbone
+    # Step 3: Remove CPFM modules from backbone
     if hasattr(model.backbone, 'cpfm_enabled') and model.backbone.cpfm_enabled:
         model.backbone.cpfm_modules = None
         model.backbone.cpfm_agg = None
         model.backbone.cpfm_enabled = False
         print('CPFM modules removed')
-    if hasattr(model.backbone, 'use_gate_text') and model.backbone.use_gate_text:
-        model.backbone.text_proj = None
-        model.backbone.conv_text = None
-        model.backbone.use_gate_text = False
-        print('Text gating modules removed')
 
     # Step 4: Bake TTRM α into routing constant
     with torch.no_grad():

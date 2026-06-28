@@ -10,11 +10,8 @@ from mmengine.runner import load_checkpoint
 import torch.nn.functional as F
 @MODELS.register_module()
 class BiFormer_fusion(VTFormer):
-    def __init__(self, pretrained=None, cpfm_config=None,
-                 use_gate_text=True, gate_text_stages=[0, 1, 2], **kwargs):
+    def __init__(self, pretrained=None, cpfm_config=None, **kwargs):
         super().__init__(**kwargs)
-        self.use_gate_text = use_gate_text
-        self.gate_text_stages = gate_text_stages
         self.extra_norms = nn.ModuleList()
         self.bn = nn.ModuleList()
         self.conv11 = nn.ModuleList()
@@ -23,15 +20,6 @@ class BiFormer_fusion(VTFormer):
             self.bn.append(nn.BatchNorm2d(self.embed_dim[i]))
         for i in range(3):
             self.conv11.append(nn.Conv2d(self.embed_dim[i + 1], self.embed_dim[i], 1, 1, 0))
-
-        # Text-guided channel gating (training only, removed at inference)
-        self.text_proj = nn.ModuleDict()
-        self.conv_text = nn.ModuleDict()
-        if use_gate_text:
-            for i in gate_text_stages:
-                self.text_proj[str(i)] = nn.Linear(512, self.embed_dim[i])
-                self.conv_text[str(i)] = nn.Conv2d(
-                    self.embed_dim[i], self.embed_dim[i], 1, 1, 0)
 
         # CPFM modules (training only)
         self.cpfm_enabled = cpfm_config is not None
@@ -45,7 +33,6 @@ class BiFormer_fusion(VTFormer):
                     visual_dim=self.embed_dim[stage_idx],
                     num_heads=cpfm_config.get('num_heads', 8),
                     top_m=cpfm_config.get('top_m', 8))
-            # MLP to aggregate CPFM outputs from all specified stages
             self.cpfm_agg = nn.Sequential(
                 nn.Linear(embed_dim * len(self.cpfm_stages), embed_dim),
                 nn.GELU(),
@@ -56,8 +43,6 @@ class BiFormer_fusion(VTFormer):
         nn.SyncBatchNorm.convert_sync_batchnorm(self)
         self.upsample2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
         self.sigmoid = nn.Sigmoid()
-        
-
 
     def init_weights(self, pretrained=None):
         if isinstance(pretrained, str):
@@ -75,7 +60,6 @@ class BiFormer_fusion(VTFormer):
         else:
             raise TypeError(f'pretrained must be a str or None, but got {type(pretrained)}')
 
-
     def forward_features(self, x: torch.Tensor, category_prototypes=None):
         if not self.training:
             self.optimize_for_inference()
@@ -90,7 +74,6 @@ class BiFormer_fusion(VTFormer):
             for block in self.stages[i]:
                 x = block(x, category_prototypes=category_prototypes)
 
-            # CPFM: collect refined text embeddings
             if (self.cpfm_enabled and i in self.cpfm_stages
                     and category_prototypes is not None and self.training):
                 cpfm_out = self.cpfm_modules[str(i)](
@@ -99,26 +82,15 @@ class BiFormer_fusion(VTFormer):
 
             stage_features.append(x)
 
-        # Aggregate CPFM outputs
         if cpfm_outputs:
             category_prototypes = self.cpfm_agg(
                 torch.cat(cpfm_outputs, dim=-1))
 
-        # Cross-stage visual + text gating
         for i in range(3):
             gate_visual = self.sigmoid(
                 self.bn[i](self.conv11[i](stage_features[i + 1])))
             stage_features[i] = stage_features[i] + \
                 self.upsample2(gate_visual) * stage_features[i]
-
-            # Text-guided channel gate (training only)
-            if (self.use_gate_text and i in self.gate_text_stages
-                    and category_prototypes is not None and self.training):
-                tc_mean = category_prototypes.mean(dim=0)  # [D]
-                tc_proj = self.text_proj[str(i)](tc_mean)  # [embed_dim[i]]
-                gate_text = self.sigmoid(
-                    self.conv_text[str(i)](tc_proj.view(1, -1, 1, 1)))  # [1, C, 1, 1]
-                stage_features[i] = stage_features[i] + gate_text * stage_features[i]
 
         for i in range(4):
             out.append(self.extra_norms[i](stage_features[i]))
@@ -128,10 +100,8 @@ class BiFormer_fusion(VTFormer):
     def optimize_for_inference(self):
         if self.training:
             return
-        # Fallback guard: skip if parent already fused
         if getattr(self, '_inference_fused', False):
             return
-        # Fuse parent (VTFormer) conv-bn layers
         super().optimize_for_inference()
         for idx in range(len(self.conv11)):
             bn = self.bn[idx]
@@ -142,16 +112,6 @@ class BiFormer_fusion(VTFormer):
             _load_cuda_extension()
 
     def forward(self, x: torch.Tensor, category_prototypes=None):
-        """Forward pass.
-
-        Args:
-            x: [B, 3, H, W] input image
-            category_prototypes: [K, D] text category prototypes (optional)
-
-        Returns:
-            tuple of 4 stage features (during inference)
-            or (tuple of 4 stage features, enhanced_prototypes) (during training)
-        """
         return self.forward_features(x, category_prototypes=category_prototypes)
 
     def train(self, mode=True):

@@ -36,9 +36,6 @@ model = dict(
         # TTRM: Text-guided Top-P Routing Module
         use_ttrm=True,
         ttrm_stages=[0, 1, 2, 3],
-        # Gate text: channel-wise text-guided cross-stage gating
-        use_gate_text=True,
-        gate_text_stages=[0, 1, 2],
         # CPFM: Category-aware Prompt Fusion Module (training only)
         cpfm_config=dict(
             embed_dim=512,

@@ -101,24 +101,6 @@ soft_kv_weight 控制路由分数对 KV 的调制强度（0=纯 gather，0.5=半
 
 ---
 
-### 创新 4：跨阶段文本门控（gate_text）
-
-**设计动机：** 原版 PVSA-Net 在 backbone 跨阶段连接中使用空间门控（高层特征生成空间 mask），让低层特征知道"哪个位置重要"。本方案增加通道级文本门控，让低层特征同时知道"哪个语义通道该加强"。
-
-**作用位置：** Stage 0、Stage 1、Stage 2 的跨阶段连接
-
-**原理：** 本质上是一个语义引导的通道注意力（类似 SE-Net）。传统 SE 用全局平均池化生成通道权重，这里用 3 个类别的 CLIP prototype 平均值生成通道权重——和水域语义相关的通道放大，无关的通道压低。
-
-```
-原版空间门控：高层特征 → Conv → sigmoid → gate_visual [B, C, H, W]，管"哪个位置"
-新增通道门控：3 个 prototype 均值 → Linear → Conv → sigmoid → gate_text [1, C, 1, 1]，管"哪个通道"
-低层特征 += upsample(gate_visual) × 低层特征 + upsample(gate_text) × 低层特征
-```
-
-训练时参与梯度更新，推理时移除（backbone 已通过 L_cls 学会语义通道选择能力）。
-
----
-
 ## 训练策略与损失函数
 
 ### 端到端单阶段训练
@@ -165,6 +147,6 @@ loss = CrossEntropyLoss(logits, gt_labels)
 
 **Step 4：** TTRM α 融合 — α 烘焙为常数
 
-**Step 5：** CPFM + gate_text 移除 — 删除 CPFM、text_proj、conv_text 模块
+**Step 5：** CPFM 移除 — 删除 CPFM 模块
 
 **最终模型等价于原始 PVSA-Net + 一个 1x1 Conv 分类头，零文本计算开销。**
