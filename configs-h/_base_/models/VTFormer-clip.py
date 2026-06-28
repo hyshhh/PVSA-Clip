@@ -24,9 +24,11 @@ model = dict(
         pre_norm=True,
         auto_pad=True,
         remove_cnn_branch=True,
-        # TTRM
+        # TTRM: routing-level text injection (all stages)
         use_ttrm=True,
         ttrm_stages=[0, 1, 2, 3],
+        # Cross-attention: feature-level text injection (deep stages only)
+        cross_attn_stages=[2, 3],
         # CUDA inference backend
         topp_flash_backend=None,
     ),

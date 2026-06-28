@@ -75,7 +75,8 @@ class Block(nn.Module):
                  use_route_mask=False,
                  use_nan_guard=False,
                  use_ttrm=False,
-                 soft_kv_weight=0.5):
+                 soft_kv_weight=0.5,
+                 cross_attn_module=None):
         super().__init__()
         qk_dim = qk_dim or dim
         self.W = W
@@ -108,6 +109,9 @@ class Block(nn.Module):
                                 use_ttrm=use_ttrm,
                                 soft_kv_weight=soft_kv_weight)
 
+        # Cross-attention module (for stages 2-3, shared across blocks in same stage)
+        self.cross_attn = cross_attn_module
+
         self.norm3 = nn.LayerNorm(dim, eps=1e-6)
         self.norm4 = nn.LayerNorm(dim, eps=1e-6)
         self.mlp2 = nn.Sequential(nn.Linear(dim, int(mlp_ratio * dim)),
@@ -123,6 +127,9 @@ class Block(nn.Module):
         PA = self.PA(self.norm3(x), None, category_prototypes=category_prototypes)
         if self.pre_norm:
             x = x + self.drop_path(PA)
+            # Cross-attention: visual features attend to text prototypes
+            if self.cross_attn is not None and category_prototypes is not None:
+                x = self.cross_attn(x, category_prototypes)
             x = x + self.drop_path(self.mlp2(self.norm4(x)))
         x = x.permute(0, 3, 1, 2)
         return x
@@ -327,6 +334,7 @@ class VTFormer(nn.Module):
                  feature_vis_config=None,
                  use_ttrm=False,
                  ttrm_stages=[0, 1, 2, 3],
+                 cross_attn_stages=[2, 3],
                  remove_cnn_branch=False,
                  soft_kv_weight=0.5,
                  **kwargs):
@@ -438,13 +446,23 @@ class VTFormer(nn.Module):
 
         ##########################################################################
 
-        self.stages = nn.ModuleList()  # 4 feature resolution stages, each consisting of multiple residual blocks
+        self.stages = nn.ModuleList()
         nheads = [dim // head_dim for dim in qk_dims]
         dp_rates = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depth))]
         cur = 0
         self.use_ttrm = use_ttrm
         self.ttrm_stages = ttrm_stages
+        self.cross_attn_stages = cross_attn_stages
+
+        # Create cross-attention modules for specified stages (shared across blocks)
+        from ..utils.text_cross_attn import TextCrossAttention
+        cross_attn_modules = {}
+        for i in cross_attn_stages:
+            cross_attn_modules[i] = TextCrossAttention(
+                visual_dim=embed_dim[i], text_dim=512, num_heads=nheads[i])
+
         for i in range(4):
+            ca_module = cross_attn_modules.get(i, None)
             stage = nn.Sequential(
                 *[Block(dim=embed_dim[i], drop_path=dp_rates[cur + j],
                         layer_scale_init_value=layer_scale_init_value,
@@ -480,7 +498,8 @@ class VTFormer(nn.Module):
                         use_route_mask=self.use_route_mask,
                         use_nan_guard=use_nan_guard,
                         use_ttrm=(use_ttrm and i in ttrm_stages),
-                        soft_kv_weight=soft_kv_weight) for j in range(depth[i])],
+                        soft_kv_weight=soft_kv_weight,
+                        cross_attn_module=ca_module) for j in range(depth[i])],
             )
             if i in use_checkpoint_stages:
                 stage = checkpoint_wrapper(stage)
