@@ -131,11 +131,21 @@ class CLIPEncoderDecoder(EncoderDecoder):
                                    category_prototypes=None, **kwargs):
         """Run forward of decode head and compute loss."""
         losses = dict()
-        # Set prototypes on head so loss() can access them
         if hasattr(self.decode_head, 'set_category_prototypes'):
             self.decode_head.set_category_prototypes(category_prototypes)
-        loss_decode = self.decode_head.loss(
-            inputs, data_samples, self.train_cfg, **kwargs)
+
+        # Forward to get seg_logits (also stores _visual_features in head)
+        seg_logits = self.decode_head(inputs, category_prototypes=category_prototypes)
+
+        # Compute both L_seg and L_cls
+        if (hasattr(self.decode_head, 'loss_by_feat_with_cls')
+                and category_prototypes is not None):
+            loss_decode = self.decode_head.loss_by_feat_with_cls(
+                seg_logits, data_samples,
+                self.decode_head._visual_features, category_prototypes)
+        else:
+            loss_decode = self.decode_head.loss_by_feat(seg_logits, data_samples)
+
         losses.update(add_prefix(loss_decode, 'decode'))
         return losses
 

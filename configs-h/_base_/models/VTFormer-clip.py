@@ -52,6 +52,7 @@ model = dict(
         num_classes=3,
         norm_cfg=norm_cfg,
         align_corners=False,
+        cls_loss_weight=0.5,
         loss_decode=dict(
             type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0)),
     # CLIP Text Encoder config (for training)

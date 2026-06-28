@@ -22,16 +22,17 @@ class CLIPSegHead(BaseDecodeHead):
         interpolate_mode (str): Upsample mode. Default: 'bilinear'
     """
 
-    def __init__(self, embed_dim=512, interpolate_mode='bilinear', **kwargs):
+    def __init__(self, embed_dim=512, interpolate_mode='bilinear',
+                 cls_loss_weight=0.5, **kwargs):
         super().__init__(input_transform='multiple_select', **kwargs)
 
         self.embed_dim = embed_dim
         self.interpolate_mode = interpolate_mode
+        self.cls_loss_weight = cls_loss_weight
         num_inputs = len(self.in_channels)
 
         assert num_inputs == len(self.in_index)
 
-        # Multi-scale feature projection (same as SegformerHead)
         self.convs = nn.ModuleList()
         for i in range(num_inputs):
             self.convs.append(
@@ -49,7 +50,6 @@ class CLIPSegHead(BaseDecodeHead):
             kernel_size=1,
             norm_cfg=self.norm_cfg)
 
-        # BNContrastiveHead-style projection: channels -> embed_dim
         self.proj_norm = nn.BatchNorm2d(self.channels)
         self.proj = nn.Conv2d(self.channels, embed_dim, kernel_size=1)
 
@@ -119,17 +119,55 @@ class CLIPSegHead(BaseDecodeHead):
             prototypes = self._inference_prototypes
 
         if prototypes is not None:
-            # Contrastive classification (BNContrastiveHead style)
-            # prototypes: [K, D]
             w = prototypes.unsqueeze(0)  # [1, K, D]
-            # Cosine similarity: [B, K, H, W]
             seg_logits = torch.einsum("bchw,bkc->bkhw", out, w)
             seg_logits = seg_logits * self.logit_scale.exp() + self.bias
         else:
-            # Fallback: standard classification
             seg_logits = self.cls_seg(out)
 
+        # Store visual features for L_cls computation
+        self._visual_features = out
         return seg_logits
+
+    def loss_by_feat_with_cls(self, seg_logits, batch_data_samples,
+                               visual_features, prototypes):
+        """Compute both L_seg and L_cls losses.
+
+        Args:
+            seg_logits: [B, K, H, W] classification logits (scaled + biased)
+            batch_data_samples: GT labels
+            visual_features: [B, D, H, W] raw projected features (before scale/bias)
+            prototypes: [K, D] text prototypes
+
+        Returns:
+            dict with loss_seg and loss_cls
+        """
+        # L_seg: standard CrossEntropyLoss on classification logits
+        seg_label = self._stack_batch_gt(batch_data_samples)
+        loss_seg = self.loss_decode[0](seg_logits, seg_label,
+                                        ignore_index=self.ignore_index)
+
+        # L_cls: pixel-text cosine similarity loss
+        # Normalize features and prototypes
+        feat_norm = F.normalize(visual_features, dim=1)  # [B, D, H, W]
+        proto_norm = F.normalize(prototypes, dim=-1)  # [K, D]
+        # Raw cosine similarity: [B, K, H, W]
+        cosine_sim = torch.einsum("bchw,bkc->bkhw", feat_norm,
+                                   proto_norm.unsqueeze(0))
+        # CrossEntropyLoss on raw cosine similarity
+        loss_cls = F.cross_entropy(cosine_sim, seg_label,
+                                    ignore_index=self.ignore_index)
+
+        return dict(
+            loss_seg=loss_seg * self.cls_loss_weight,
+            loss_cls=loss_cls * (1 - self.cls_loss_weight))
+
+    def _stack_batch_gt(self, batch_data_samples):
+        """Stack GT semantic seg labels."""
+        gt_semantic_segs = [
+            data_sample.gt_sem_seg.data for data_sample in batch_data_samples
+        ]
+        return torch.stack(gt_semantic_segs, dim=0)
 
     def fuse_for_deployment(self, category_prototypes):
         """Fuse contrastive classification into Conv2d for deployment.
