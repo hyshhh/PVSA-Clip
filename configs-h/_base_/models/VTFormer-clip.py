@@ -9,6 +9,7 @@ model = dict(
         depth=[3, 4, 6, 3],
         mlp_ratios=[3, 3, 3, 3],
         n_win=7,
+        kv_downsample_mode='identity',
         topks=[16, 12, 8, 6],
         topp_route_configs={
             16: dict(maxk=25, p=0.2, temperature=0.0175, energy=4.0),
