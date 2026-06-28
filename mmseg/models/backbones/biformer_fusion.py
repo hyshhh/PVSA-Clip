@@ -4,13 +4,12 @@ import torch.nn as nn
 from torch.nn.utils.fusion import fuse_conv_bn_eval
 from .bi_topp_vote import VTFormer
 from ..utils.topp_flash_kernel import _load_cuda_extension
-from ..utils.cpfm import CPFM
 from timm.models.layers import LayerNorm2d
 from mmengine.runner import load_checkpoint
 import torch.nn.functional as F
 @MODELS.register_module()
 class BiFormer_fusion(VTFormer):
-    def __init__(self, pretrained=None, cpfm_config=None, **kwargs):
+    def __init__(self, pretrained=None, **kwargs):
         super().__init__(**kwargs)
         self.extra_norms = nn.ModuleList()
         self.bn = nn.ModuleList()
@@ -20,22 +19,6 @@ class BiFormer_fusion(VTFormer):
             self.bn.append(nn.BatchNorm2d(self.embed_dim[i]))
         for i in range(3):
             self.conv11.append(nn.Conv2d(self.embed_dim[i + 1], self.embed_dim[i], 1, 1, 0))
-
-        # CPFM modules (training only)
-        self.cpfm_enabled = cpfm_config is not None
-        self.cpfm_stages = cpfm_config.get('cpfm_stages', [2, 3]) if cpfm_config else []
-        if self.cpfm_enabled:
-            embed_dim = cpfm_config.get('embed_dim', 512)
-            self.cpfm_modules = nn.ModuleDict()
-            for stage_idx in self.cpfm_stages:
-                self.cpfm_modules[str(stage_idx)] = CPFM(
-                    embed_dim=embed_dim,
-                    visual_dim=self.embed_dim[stage_idx],
-                    num_heads=cpfm_config.get('num_heads', 8))
-            self.cpfm_agg = nn.Sequential(
-                nn.Linear(embed_dim * len(self.cpfm_stages), embed_dim),
-                nn.GELU(),
-                nn.Linear(embed_dim, embed_dim))
 
         self.apply(self._init_weights)
         self.init_weights(pretrained=pretrained)
@@ -65,25 +48,12 @@ class BiFormer_fusion(VTFormer):
 
         out = []
         stage_features = []
-        cpfm_outputs = []
 
         for i in range(4):
             x = self.downsample_layers[i](x)
-
             for block in self.stages[i]:
                 x = block(x, category_prototypes=category_prototypes)
-
-            if (self.cpfm_enabled and i in self.cpfm_stages
-                    and category_prototypes is not None and self.training):
-                cpfm_out = self.cpfm_modules[str(i)](
-                    category_prototypes, x)
-                cpfm_outputs.append(cpfm_out)
-
             stage_features.append(x)
-
-        if cpfm_outputs:
-            category_prototypes = self.cpfm_agg(
-                torch.cat(cpfm_outputs, dim=-1))
 
         for i in range(3):
             gate_visual = self.sigmoid(

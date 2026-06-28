@@ -82,32 +82,12 @@ soft_kv_weight 控制路由分数对 KV 的调制强度（0=纯 gather，0.5=半
 
 ---
 
-### 创新 3：Category-aware Prompt Fusion Module（CPFM）
-
-**设计动机：** CLIP 原始 text embedding 仅在纯文本空间编码，缺乏视觉上下文。CPFM 在训练阶段用 backbone 视觉特征作为 KV 来精炼 text embedding，使 category prototype 携带视觉先验。
-
-**作用位置：** Stage 3 和 Stage 4 的 ToppAttention 输出之后
-
-**核心机制（Text-as-Query Cross-Attention）：**
-- **Query = category prototype T_c** `[B, K, D]`
-- **Key / Value = backbone 视觉特征 F_v** `[B, H*W, C]`
-- Cross-Attention 输出视觉增强的 text embedding T_c'
-- **Gated residual + LayerNorm：** `T_enhanced = LayerNorm(T_c + sigmoid(gate) * T_c')`（gate 初始化 sigmoid(-5)≈0）
-- Stage 3 和 Stage 4 的 T_enhanced **concat 后经 MLP 聚合**为最终 category prototype
-
-**训练完成后：** 固化 T_enhanced 为 `.pt`，移除 CPFM，推理零开销。
-
-**参数量：** 每个 CPFM ~0.15M，Stage3+Stage4 共 ~0.3M。
-
----
-
 ## 训练策略与损失函数
 
 ### 端到端单阶段训练
 
 - **冻结：** CLIP Text Encoder
-- **训练：** Backbone + CPFM + TTRM(α) + SegHead 一次性端到端
-- 训练完成后固化 CPFM 输出为离线 embedding，移除 CPFM 模块
+- **训练：** Backbone + TTRM(α) + SegHead 一次性端到端
 
 ### 损失函数
 
@@ -120,7 +100,7 @@ L = L_seg（= L_cls）
 | **L_seg** | 像素分类是否正确 | 基础分割监督（CrossEntropyLoss） |
 | **L_cls** | 正确类别相对排序是否最高 | 让视觉特征和文字 prototype 对齐（与 L_seg 合一） |
 
-CPFM 的文本增强效果通过 L_cls 的任务损失隐式约束，无需显式对齐损失。
+
 
 **L_cls 原理：** 用冻结的文字 prototype 替代传统 `nn.Linear` 分类头。每个像素 512 维视觉特征与 3 个类别 prototype 逐一点积，再过 CrossEntropyLoss。只更新图像侧参数，文字 prototype 零梯度。
 
@@ -147,7 +127,5 @@ loss = CrossEntropyLoss(logits, gt_labels)
 **Step 3：** 分类头融合 — BN + einsum + scale + bias 融合进 1x1 Conv2d
 
 **Step 4：** TTRM α 融合 — α 烘焙为常数
-
-**Step 5：** CPFM 移除 — 删除 CPFM 模块
 
 **最终模型等价于原始 PVSA-Net + 一个 1x1 Conv 分类头，零文本计算开销。**

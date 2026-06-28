@@ -49,12 +49,6 @@ class CLIPEncoderDecoder(EncoderDecoder):
         if prompt_bank_path and os.path.exists(prompt_bank_path):
             self.text_encoder.load_prompt_bank(prompt_bank_path)
 
-        # Enhanced prototypes buffer (filled during training)
-        self.register_buffer(
-            'enhanced_prototypes',
-            torch.zeros(text_encoder.get('num_categories', 3),
-                        text_encoder.get('embed_dim', 512)))
-
         # Frozen prototypes for inference (loaded from .pt)
         self.register_buffer(
             'frozen_prototypes',
@@ -103,13 +97,10 @@ class CLIPEncoderDecoder(EncoderDecoder):
         backbone_out = self.backbone(inputs, category_prototypes=category_prototypes)
 
         if isinstance(backbone_out, tuple) and len(backbone_out) == 2:
-            feats, enhanced_prototypes = backbone_out
-            if self.training:
-                self.enhanced_prototypes.copy_(enhanced_prototypes.detach())
+            feats, _ = backbone_out
         else:
             feats = backbone_out
 
-        # Head always uses original prototypes
         return feats, category_prototypes
 
     def loss(self, inputs: Tensor, data_samples: SampleList) -> dict:

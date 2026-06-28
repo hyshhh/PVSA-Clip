@@ -35,11 +35,6 @@ model = dict(
         # TTRM: Text-guided Top-P Routing Module
         use_ttrm=True,
         ttrm_stages=[0, 1, 2, 3],
-        # CPFM: Category-aware Prompt Fusion Module (training only)
-        cpfm_config=dict(
-            embed_dim=512,
-            num_heads=8,
-            cpfm_stages=[2, 3]),
         # CUDA inference backend
         topp_flash_backend=None,
         topp_flash_block_windows=64,

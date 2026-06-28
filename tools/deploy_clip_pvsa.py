@@ -69,14 +69,7 @@ def main():
         model.decode_head.fuse_for_deployment(model.frozen_prototypes)
     print('Decode head fused into Conv2d')
 
-    # Step 3: Remove CPFM modules from backbone
-    if hasattr(model.backbone, 'cpfm_enabled') and model.backbone.cpfm_enabled:
-        model.backbone.cpfm_modules = None
-        model.backbone.cpfm_agg = None
-        model.backbone.cpfm_enabled = False
-        print('CPFM modules removed')
-
-    # Step 4: Bake TTRM α into routing constant
+    # Step 3: Bake TTRM α into routing constant
     with torch.no_grad():
         for stage in model.backbone.stages:
             for block in stage:
@@ -89,16 +82,31 @@ def main():
                         print(f'  TTRM α fused: {alpha_val:.4f}')
     print('TTRM α fused into routing constants')
 
-    # Step 5: Fuse RepRTA in text encoder
+    # Step 4: Fuse RepRTA in text encoder
     model.text_encoder.fuse()
     print('Text encoder RepRTA fused')
 
-    # Step 6: Save deployed model (save state_dict BEFORE removing modules)
+    # Step 5: Save deployed model
     deployed_state = {
         'state_dict': model.state_dict(),
         'frozen_prototypes': model.frozen_prototypes,
         'config': cfg.text,
     }
+    deployed_path = os.path.join(args.output, 'deployed_model.pth')
+    torch.save(deployed_state, deployed_path)
+    print(f'Deployed model saved to {deployed_path}')
+
+    # Verify: run a dummy forward pass
+    model.eval()
+    dummy_input = torch.randn(1, 3, 256, 256)
+    with torch.no_grad():
+        output = model(dummy_input)
+    print(f'Verification: output shape = {output.shape}')
+    print('Deployment complete!')
+
+
+if __name__ == '__main__':
+    main()
     deployed_path = os.path.join(args.output, 'deployed_model.pth')
     torch.save(deployed_state, deployed_path)
     print(f'Deployed model saved to {deployed_path}')
