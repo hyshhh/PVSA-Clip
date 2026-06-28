@@ -22,11 +22,9 @@ class CLIPEncoderDecoder(EncoderDecoder):
 
     Extends EncoderDecoder with a TextEncoder that produces category
     prototypes from a prompt bank. These prototypes are passed to the
-    backbone (TTRM routing + CPFM refinement) and decode head
+    backbone (TTRM routing + TextCrossAttention) and decode head
     (contrastive classification).
 
-    During training, CPFM refines text embeddings with visual context.
-    After training, enhanced prototypes are saved as .pt for deployment.
     During inference, frozen prototypes are loaded and the TextEncoder
     is removed (zero text overhead).
 
