@@ -17,10 +17,10 @@ class TextEncoder(nn.Module):
         self.num_categories = num_categories
         self.prompts_per_category = prompts_per_category
 
-        # Learnable attention pooling: query token for aggregating
-        # multiple prompts within each category
+        # Per-category learnable query for attention pooling
+        # Each category has its own query to learn category-specific prompt weights
         self.attn_pool_query = nn.Parameter(
-            torch.randn(1, 1, embed_dim) * 0.02)
+            torch.randn(num_categories, 1, embed_dim) * 0.02)
 
         # RepRTA-style refinement (SwiGLU FFN + residual)
         self.reprta_w12 = nn.Linear(embed_dim, 4 * embed_dim)
