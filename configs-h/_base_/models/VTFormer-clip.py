@@ -20,6 +20,7 @@ model = dict(
         before_attn_dwconv=3,
         qk_dims=[64, 128, 256, 512],
         head_dim=32,
+        soft_routing=False,
         pre_norm=True,
         auto_pad=True,
         remove_cnn_branch=True,
