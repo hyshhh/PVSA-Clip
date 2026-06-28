@@ -18,4 +18,4 @@ class GradMonitorHook(Hook):
                 total_norm += param.grad.data.norm(2).item() ** 2
         total_norm = total_norm ** 0.5
 
-        runner.message_hub.update_scalar('grad/total_norm', total_norm)
+        runner.logger.info(f'grad_norm={total_norm:.4f}')
