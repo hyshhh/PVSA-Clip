@@ -76,7 +76,7 @@ class BiFormer_fusion(VTFormer):
             if (self.cpfm_enabled and i in self.cpfm_stages
                     and category_prototypes is not None and self.training):
                 cpfm_out = self.cpfm_modules[str(i)](
-                    category_prototypes.unsqueeze(0), x).squeeze(0)
+                    category_prototypes, x)
                 cpfm_outputs.append(cpfm_out)
 
             stage_features.append(x)
