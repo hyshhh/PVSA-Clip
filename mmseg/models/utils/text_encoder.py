@@ -54,7 +54,7 @@ class TextEncoder(nn.Module):
                 torch.randn(C, 1, D) * 0.02)
             self.num_categories = C
         self.prompts_per_category = K
-        self.prompt_embeddings = nn.Parameter(embeddings, requires_grad=False)
+        self.register_buffer('prompt_embeddings', embeddings)
 
     def forward(self):
         """Forward pass to produce category prototypes.

@@ -206,10 +206,11 @@ class TopkRouting(nn.Module):
         # TTRM: Text-guided Top-P Routing Module
         self.use_ttrm = use_ttrm
         if use_ttrm:
-            self.ttrm_text_proj = nn.Linear(512, qk_dim)
-            self.ttrm_text_v_proj = nn.Linear(512, qk_dim)
+            text_dim = 512  # CLIP embedding dimension
+            self.ttrm_text_proj = nn.Linear(text_dim, qk_dim)
+            self.ttrm_text_v_proj = nn.Linear(text_dim, qk_dim)
             self.ttrm_out_proj = nn.Linear(qk_dim, qk_dim)
-            self.ttrm_norm = nn.LayerNorm(512)
+            self.ttrm_norm = nn.LayerNorm(text_dim)
             self.ttrm_gate = nn.Parameter(torch.tensor([-2.0]))
 
         # V1.1 hardcoded route parameters (unchanged)
@@ -267,24 +268,20 @@ class TopkRouting(nn.Module):
                              and self._frozen_tc_k is not None)
             if has_frozen_kv:
                 tc_k = self._frozen_tc_k
-                tc_v = self._frozen_tc_v
             elif self.use_ttrm and category_prototypes is not None:
                 tc = self.ttrm_norm(category_prototypes)
                 tc_k = F.normalize(self.ttrm_text_proj(tc), dim=-1)
-                tc_v = self.ttrm_text_v_proj(tc)
             else:
-                tc_k = tc_v = None
+                tc_k = None
 
             if tc_k is not None:
-                cross_query = query if self.soft_routing else query.detach()
-                cross_attn = (cross_query * self.scale) @ tc_k.transpose(-2, -1)
-                cross_attn = F.softmax(cross_attn, dim=-1)
-                text_info = cross_attn @ tc_v
-                text_info = self.ttrm_out_proj(text_info)
-
+                q_text = F.softmax((q * self.scale) @ tc_k.transpose(-2, -1),
+                                   dim=-1)
+                k_text = F.softmax((k * self.scale) @ tc_k.transpose(-2, -1),
+                                   dim=-1)
+                text_bias = q_text @ k_text.transpose(-2, -1)
                 gate = torch.sigmoid(self.ttrm_gate)
-                q_enriched = F.normalize(cross_query + gate * text_info, dim=-1)
-                attn = (q_enriched * self.scale) @ k.transpose(-2, -1)
+                attn = attn + gate * text_bias
             elif hasattr(self, '_frozen_alpha'):
                 attn = (1 - self._frozen_alpha) * attn + self._frozen_alpha * attn
         else:

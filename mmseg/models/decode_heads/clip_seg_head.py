@@ -51,9 +51,9 @@ class CLIPSegHead(BaseDecodeHead):
         self.proj_norm = nn.BatchNorm2d(self.channels)
         self.proj = nn.Conv2d(self.channels, embed_dim, kernel_size=1)
 
-        # Temperature and bias (from YOLOE BNContrastiveHead)
-        self.logit_scale = nn.Parameter(-1.0 * torch.ones([]))
-        self.bias = nn.Parameter(torch.tensor([-10.0]))
+        # Temperature and bias
+        self.logit_scale = nn.Parameter(torch.zeros([]))
+        self.bias = nn.Parameter(torch.zeros([]))
 
         # Fallback: standard classification for non-CLIP mode
         self.cls_seg = nn.Conv2d(embed_dim, self.num_classes, kernel_size=1)
