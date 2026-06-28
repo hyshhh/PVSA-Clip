@@ -25,7 +25,7 @@ model = dict(
         layer_scale_init_value=-1,
         qk_dims=[64, 128, 256, 512],
         head_dim=32,
-        param_routing=False, diff_routing=False, soft_routing=False,
+        param_routing=False, diff_routing=False, soft_routing=True,
         pre_norm=True,
         pe=None,
         auto_pad=True,
