@@ -24,15 +24,18 @@ model = dict(
         layer_scale_init_value=-1,
         qk_dims=[64, 128, 256, 512],
         head_dim=32,
-        param_routing=False, diff_routing=False, soft_routing=True,
+        param_routing=False, diff_routing=False,
+        # Soft routing: route scores modulate KV via (1 + soft_kv_weight * r_weight) * kv
+        # soft_routing=True enables differentiable weighted gather; False = hard index gather
+        soft_routing=True,
+        # soft_kv_weight: modulation strength (0 = pure gather, 0.5 = half-strength, 1 = full soft routing)
+        soft_kv_weight=0.5,
         pre_norm=True,
         pe=None,
         auto_pad=True,
         fam_reduction=4,
         # Remove CNN branch (pure Transformer path)
         remove_cnn_branch=True,
-        # Soft KV routing weight (0=pure gather, 1=original soft routing)
-        soft_kv_weight=0.5,
         # TTRM: Text-guided Top-P Routing Module
         use_ttrm=True,
         ttrm_stages=[0, 1, 2, 3],
