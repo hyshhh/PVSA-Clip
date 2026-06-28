@@ -55,8 +55,14 @@ class TextCrossAttention(nn.Module):
 
         # Project
         q = self.visual_q(v_tokens)  # [B, H*W, C]
-        k = self.text_proj_k(text_prototypes)  # [K, C]
-        v = self.text_proj_v(text_prototypes)  # [K, C]
+
+        # Use pre-computed K/V if available (deployment), otherwise compute
+        if hasattr(self, '_precomputed') and self._precomputed:
+            k = self._frozen_k  # [K, C]
+            v = self._frozen_v  # [K, C]
+        else:
+            k = self.text_proj_k(text_prototypes)  # [K, C]
+            v = self.text_proj_v(text_prototypes)  # [K, C]
 
         # Multi-head: [B, heads, N, head_dim]
         q = q.view(B, H * W, self.num_heads, self.head_dim).permute(0, 2, 1, 3)

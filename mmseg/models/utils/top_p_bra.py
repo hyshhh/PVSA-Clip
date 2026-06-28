@@ -261,20 +261,31 @@ class TopkRouting(nn.Module):
 
             # TTRM: cross-attention with text before routing
             if self.use_ttrm and category_prototypes is not None:
-                tc = self.ttrm_norm(category_prototypes)  # [K, D]
-                tc_k = F.normalize(self.ttrm_text_proj(tc), dim=-1)  # [K, qk_dim]
-                tc_v = self.ttrm_text_v_proj(tc)  # [K, qk_dim]
+                tc = self.ttrm_norm(category_prototypes)
+                tc_k = F.normalize(self.ttrm_text_proj(tc), dim=-1)
+                tc_v = self.ttrm_text_v_proj(tc)
 
-                # Cross-attention: visual Q attends to text K/V
-                cross_attn = (query.detach() * self.scale) @ tc_k.transpose(-2, -1)  # [n, p2, K]
+                cross_attn = (query.detach() * self.scale) @ tc_k.transpose(-2, -1)
                 cross_attn = F.softmax(cross_attn, dim=-1)
-                text_info = cross_attn @ tc_v  # [n, p2, qk_dim]
+                text_info = cross_attn @ tc_v
                 text_info = self.ttrm_out_proj(text_info)
 
-                # Gated residual: enrich Q with text context
                 gate = torch.sigmoid(self.ttrm_gate)
                 q_enriched = F.normalize(query.detach() + gate * text_info, dim=-1)
+                attn = (q_enriched * self.scale) @ k.transpose(-2, -1)
 
+            # Deployment: use pre-computed text K/V
+            elif hasattr(self, '_ttrm_precomputed') and self._ttrm_precomputed:
+                tc_k = self._frozen_tc_k
+                tc_v = self._frozen_tc_v
+
+                cross_attn = (q * self.scale) @ tc_k.transpose(-2, -1)
+                cross_attn = F.softmax(cross_attn, dim=-1)
+                text_info = cross_attn @ tc_v
+                text_info = self.ttrm_out_proj(text_info)
+
+                gate = torch.sigmoid(self.ttrm_gate)
+                q_enriched = F.normalize(query + gate * text_info, dim=-1)
                 attn = (q_enriched * self.scale) @ k.transpose(-2, -1)
             elif hasattr(self, '_frozen_alpha'):
                 attn = (1 - self._frozen_alpha) * attn + self._frozen_alpha * attn
