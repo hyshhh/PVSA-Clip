@@ -125,7 +125,11 @@ def main():
 
     bb_flops_dict, bb_hooks = _register_flops_hooks(backbone)
     with torch.no_grad():
-        backbone(dummy)
+        # dummy prototypes for TTRM / cross-attention activation
+        num_classes = cfg.model.decode_head.get('num_classes', 3)
+        embed_dim = cfg.model.text_encoder.get('embed_dim', 512)
+        dummy_protos = torch.randn(num_classes, embed_dim, device=device)
+        backbone(dummy, category_prototypes=dummy_protos)
     for h in bb_hooks:
         h.remove()
 
