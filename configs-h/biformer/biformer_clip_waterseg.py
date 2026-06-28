@@ -82,5 +82,5 @@ model = dict(
 
 default_hooks = dict(
     checkpoint=dict(type='CheckpointHook', by_epoch=True, interval=10, save_best='mIoU'),
-    grad_monitor=dict(type='GradMonitorHook')
+    grad_monitor=dict(type='GradMonitorHook', interval=50)
 )

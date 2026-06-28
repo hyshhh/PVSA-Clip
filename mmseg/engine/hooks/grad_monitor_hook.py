@@ -5,9 +5,19 @@ from mmseg.registry import HOOKS
 
 @HOOKS.register_module()
 class GradMonitorHook(Hook):
-    """Monitor total gradient norm every iteration."""
+    """Monitor gradient norm after backward, before optimizer step.
 
-    def after_train_iter(self, runner, batch_idx, data_batch=None, outputs=None):
+    Args:
+        interval (int): Log every N iterations. Default: 50.
+    """
+
+    def __init__(self, interval=50):
+        self.interval = interval
+
+    def after_backward(self, runner, batch_idx, data_batch=None, outputs=None):
+        if (runner.iter + 1) % self.interval != 0:
+            return
+
         model = runner.model
         if hasattr(model, 'module'):
             model = model.module
