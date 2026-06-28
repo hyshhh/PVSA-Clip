@@ -106,18 +106,19 @@ Top-P 路由：
 ### 损失函数
 
 ```
-L = L_seg（= L_cls，同一个 CrossEntropyLoss）
+L = λ_seg * L_seg + (1 - λ_seg) * L_cls    （λ_seg = 0.5）
 ```
 
-CLIPSegHead 用冻结的文字 prototype 替代传统 `nn.Linear` 分类头，每个像素 512 维视觉特征与 3 个类别 prototype 逐一点积，再过 CrossEntropyLoss。只更新图像侧参数，文字 prototype 零梯度。
+| 损失 | 计算方式 | 作用 |
+|------|---------|------|
+| **L_seg** | CrossEntropyLoss(cosine × scale + bias, GT) | 分类精度：预测和真值是否匹配 |
+| **L_cls** | CrossEntropyLoss(cosine_raw, GT) | 像素-文本对齐：视觉特征和正确类别的 cosine 相似度是否最高 |
 
-```python
-x = BN(visual_features)
-logits = einsum("bchw,bkc->bkhw", x, prototypes) * scale + bias
-loss = CrossEntropyLoss(logits, gt_labels)
-```
+**L_seg**：经过 scale + bias 缩放后的 cosine logits 过 CrossEntropyLoss，是标准分类损失。
 
-L_cls 惩罚的是相对排序（正确类别是否最高），不是绝对对齐。只要正确类别的点积比其他类别高，loss 就低。
+**L_cls**：直接用 L2 归一化后的视觉特征和 text prototype 算原始 cosine similarity，过 CrossEntropyLoss。不经过 scale/bias，惩罚的是"像素和正确类别原型的相似度是否最高"。
+
+两者区别：L_seg 关心分类结果准不准，L_cls 关心特征和原型对齐得好不好。梯度方向不同，分开后模型同时学到"分得对"和"对得准"。
 
 ### Prompt Bank 增强策略
 
