@@ -2,9 +2,8 @@
 
 基于 MMSegmentation 的语义分割项目，支持三条路径：
 
-1. **CLIP 增强路径**：注入 CLIP 文本语义，支持开放词汇分割，部署时零额外开销。
+1. **CLIP 增强路径**：注入 CLIP 文本语义，部署时零额外开销。
 2. **Baseline 路径**：非 CLIP，soft routing，用于对比实验。
-3. **原始路径**：原始 PVSA-Net，用于训练和普通推理。
 
 ## 环境
 
@@ -36,27 +35,6 @@ Baseline 训练（非 CLIP，soft routing）：
 CUDA_VISIBLE_DEVICES=0 python tools/train.py \
   configs-h/biformer/biformer_baseline_waterseg.py \
   --work-dir work_dirs/baseline
-```
-
-原始 PVSA-Net 训练：
-```bash
-CUDA_VISIBLE_DEVICES=0 python tools/train.py \
-  configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
-  --cfg-options model.backbone.topp_flash_backend=None \
-  model.backbone.feature_vis_config.enabled=False \
-  model.backbone.attn_vis_config.enabled=False \
-  train_dataloader.batch_size=16 \
-  --work-dir work_dirs/pvsa_baseline
-```
-
-## 原始路径推理
-
-```bash
-export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA/PVSA-Clip:$PYTHONPATH
-CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
-  configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
-  checkpoint.pth \
-  --cfg-options model.backbone.topp_flash_backend=None
 ```
 
 ## CLIP 模型推理
@@ -138,13 +116,12 @@ export PVSA_TOPP_FLASH_ARCH="8.6"
 | `configs-h/_base_/models/VTFormer-clip.py` | CLIP 增强模型 |
 | `configs-h/biformer/biformer_baseline_waterseg.py` | Baseline 训练 |
 | `configs-h/biformer/biformer_clip_waterseg.py` | CLIP 训练 |
-| `configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py` | 原始 PVSA-Net |
 
 ## 注意事项
 
 - 自定义 CUDA 核路径只面向推理，不用于训练。
 - 真实速度测试时不要打开调试日志。
 - 如果需要调整 `energy`、`p`、`temperature`、`maxk`，请修改配置文件中的 `topp_route_configs`。
-- CLIP Text Encoder 训练时冻结，CPFM 推理时移除。
+- CLIP Text Encoder 训练时冻结，TextCrossAttention 推理时用预计算 K/V。
 - 部署后模型等价于原始 PVSA-Net + 1×1 Conv，零额外推理开销。
 - 本地不具备 CUDA 编译环境，CUDA 编译和性能验证以服务器结果为准。
