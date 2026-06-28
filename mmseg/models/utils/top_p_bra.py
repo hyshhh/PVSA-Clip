@@ -207,7 +207,7 @@ class TopkRouting(nn.Module):
             self.ttrm_text_proj = nn.Linear(512, qk_dim)
             self.ttrm_text_v_proj = nn.Linear(512, qk_dim)
             self.ttrm_out_proj = nn.Linear(qk_dim, qk_dim)
-            self.ttrm_norm = nn.LayerNorm(qk_dim)
+            self.ttrm_norm = nn.LayerNorm(512)
             self.ttrm_gate = nn.Parameter(torch.tensor([-2.0]))
 
         # V1.1 hardcoded route parameters (unchanged)
