@@ -167,7 +167,7 @@ class CLIPSegHead(BaseDecodeHead):
         gt_semantic_segs = [
             data_sample.gt_sem_seg.data for data_sample in batch_data_samples
         ]
-        return torch.stack(gt_semantic_segs, dim=0)
+        return torch.stack(gt_semantic_segs, dim=0).squeeze(1)
 
     def fuse_for_deployment(self, category_prototypes):
         """Fuse contrastive classification into Conv2d for deployment.
