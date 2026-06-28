@@ -1,46 +1,43 @@
-# PVSA 操作指南
+# PVSA-Clip 操作指南
 
-## 环境
+## 环境安装
 
 ```bash
 pip install -r requirements/mminstall.txt && pip install -r requirements/runtime.txt && pip install openai-clip
 ```
 
-## Prompt Bank（仅 CLIP 路径需要）
+## Prompt Bank（CLIP 路径必需）
 
 ```bash
-# 本地下载权重后传到服务器
+# 本地下载 CLIP 权重
 wget -O tools/ViT-B-32.pt https://openaipublic.azureedge.net/clip/models/40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af/ViT-B-32.pt
+
+# 生成水体 prompt bank
 python tools/generate_water_prompt_bank.py --output tools/prompt_bank_water.pt --model ViT-B/32 --model-path tools/ViT-B-32.pt
 ```
 
 ## 训练
 
-Baseline（非 CLIP）：
+**Baseline（非 CLIP）：**
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_baseline_waterseg.py --work-dir work_dirs/baseline
 ```
 
-CLIP 增强：
+**CLIP 增强：**
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_clip_waterseg.py --work-dir work_dirs/clip_waterseg
-```
-
-原始 PVSA-Net：
-```bash
-CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py --cfg-options model.backbone.topp_flash_backend=None model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False train_dataloader.batch_size=16 --work-dir work_dirs/pvsa_baseline
 ```
 
 ## 推理
 
 ```bash
-# Baseline
+# Baseline 推理
 CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py configs-h/biformer/biformer_baseline_waterseg.py work_dirs/baseline/best_mIoU_epoch.pth --cfg-options model.backbone.topp_flash_backend=None
 
-# CLIP
+# CLIP 推理
 CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py configs-h/biformer/biformer_clip_waterseg.py work_dirs/clip_waterseg/best_mIoU_epoch.pth --cfg-options model.backbone.topp_flash_backend=None
 
-# 保存分割结果
+# 保存分割可视化结果
 CUDA_VISIBLE_DEVICES=0 python tools/test.py configs-h/biformer/biformer_clip_waterseg.py checkpoint.pth --show-dir vis_results/
 ```
 
@@ -50,14 +47,14 @@ CUDA_VISIBLE_DEVICES=0 python tools/test.py configs-h/biformer/biformer_clip_wat
 python tools/deploy_clip_pvsa.py --config configs-h/biformer/biformer_clip_waterseg.py --checkpoint work_dirs/clip_waterseg/best_mIoU_epoch.pth --output work_dirs/deployed/
 ```
 
-## 复杂度统计
+## 复杂度分析
 
 ```bash
 python tools/analysis_tools/get_flops.py configs-h/biformer/biformer_clip_waterseg.py --shape 224 224
 python tools/analysis_tools/pvsa_stage_complexity.py configs-h/biformer/biformer_clip_waterseg.py --shape 224 224
 ```
 
-## CUDA 核推理
+## CUDA 核加速推理
 
 ```bash
 rm -rf ~/.cache/torch_extensions/py*/pvsa_topp_flash_cuda
@@ -66,21 +63,21 @@ export CC=/usr/bin/gcc-11 && export CXX=/usr/bin/g++-11
 CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py configs-h/biformer/biformer_clip_waterseg.py checkpoint.pth --cfg-options model.backbone.topp_flash_backend=cuda model.backbone.topp_flash_debug=True
 ```
 
-GPU 架构检测失败：`export PVSA_TOPP_FLASH_ARCH="8.6"`
+GPU 架构检测失败时手动指定：`export PVSA_TOPP_FLASH_ARCH="8.6"`
 
 ## 配置文件
 
 | 文件 | 说明 |
 |------|------|
-| `configs-h/_base_/models/VTFormer-s-baseline.py` | Baseline 模型 |
-| `configs-h/_base_/models/VTFormer-clip.py` | CLIP 增强模型 |
-| `configs-h/biformer/biformer_baseline_waterseg.py` | Baseline 训练 |
-| `configs-h/biformer/biformer_clip_waterseg.py` | CLIP 训练 |
-| `configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py` | 原始 PVSA-Net |
+| `configs-h/_base_/models/VTFormer-s-baseline.py` | Baseline 模型定义 |
+| `configs-h/_base_/models/VTFormer-clip.py` | CLIP 增强模型定义 |
+| `configs-h/biformer/biformer_baseline_waterseg.py` | Baseline 水体分割训练 |
+| `configs-h/biformer/biformer_clip_waterseg.py` | CLIP 水体分割训练 |
 
 ## 注意事项
 
 - CUDA 核路径只面向推理，不用于训练。
 - 调整 `energy`/`p`/`temperature`/`maxk` 修改配置中的 `topp_route_configs`。
-- CLIP Text Encoder 训练时冻结，CPFM 推理时移除。
+- CLIP Text Encoder 训练时冻结，部署推理时移除。
 - 部署后模型等价于原始 PVSA-Net + 1x1 Conv，零额外推理开销。
+- 服务器训练前确保在 `pvsa-v3.0` 分支：`git checkout pvsa-v3.0 && git pull`
