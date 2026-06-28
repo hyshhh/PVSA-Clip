@@ -185,12 +185,14 @@ class TopkRouting(nn.Module):
                  attn_vis_config=None,
                  debug_route=False,
                  use_nan_guard=False,
-                 use_ttrm=False):
+                 use_ttrm=False,
+                 soft_routing=False):
         super().__init__()
         self.route_flag = topk
         self.qk_dim = qk_dim
         self.scale = qk_scale or qk_dim ** -0.5
         self.diff_routing = diff_routing
+        self.soft_routing = soft_routing
         self.W = W
         self.debug_route = debug_route
         self.use_nan_guard = use_nan_guard
@@ -252,7 +254,7 @@ class TopkRouting(nn.Module):
     def forward(self, query: Tensor, key: Tensor, GA, category_prototypes=None):
 
         if self.W == False or GA == None:
-            if not self.diff_routing:
+            if not self.diff_routing and not self.soft_routing:
                 query = query.detach()
                 key = key.detach()
             q = F.normalize(query, dim=-1)
@@ -274,13 +276,14 @@ class TopkRouting(nn.Module):
                 tc_k = tc_v = None
 
             if tc_k is not None:
-                cross_attn = (query.detach() * self.scale) @ tc_k.transpose(-2, -1)
+                cross_query = query if self.soft_routing else query.detach()
+                cross_attn = (cross_query * self.scale) @ tc_k.transpose(-2, -1)
                 cross_attn = F.softmax(cross_attn, dim=-1)
                 text_info = cross_attn @ tc_v
                 text_info = self.ttrm_out_proj(text_info)
 
                 gate = torch.sigmoid(self.ttrm_gate)
-                q_enriched = F.normalize(query.detach() + gate * text_info, dim=-1)
+                q_enriched = F.normalize(cross_query + gate * text_info, dim=-1)
                 attn = (q_enriched * self.scale) @ k.transpose(-2, -1)
             elif hasattr(self, '_frozen_alpha'):
                 attn = (1 - self._frozen_alpha) * attn + self._frozen_alpha * attn
@@ -288,6 +291,17 @@ class TopkRouting(nn.Module):
             attn = GA
             if self.debug_route:
                 print('[Route] using external GA attention map.')
+
+        if self.soft_routing:
+            route_weight = F.softmax(attn, dim=-1)
+            if self.debug_route:
+                route_detached = route_weight.detach().float()
+                print(f'[RouteSoft] flag={self.route_flag} '
+                      f'max={route_detached.max().item():.6f} '
+                      f'mean={route_detached.mean().item():.6f} '
+                      f'entropy={-(route_detached * (route_detached + 1e-12).log()).sum(dim=-1).mean().item():.6f}')
+            return route_weight, None, None
+
         # 3. Top-k selection (no sorting for speed)
         topk_score, topk_index = torch.topk(
             attn, k=self.topk, dim=-1, sorted=True
@@ -527,7 +541,8 @@ class ToppAttention(nn.Module):
                                   attn_vis_config=self.attn_vis_config,
                                   debug_route=debug_route,
                                   use_nan_guard=use_nan_guard,
-                                  use_ttrm=use_ttrm)
+                                  use_ttrm=use_ttrm,
+                                  soft_routing=soft_routing)
         if self.soft_routing:  # soft routing, always diffrentiable (if no detach)
             mul_weight = 'soft'
         elif self.diff_routing:  # hard differentiable routing
@@ -654,7 +669,8 @@ class ToppAttention(nn.Module):
         ############ gather q dependent k/v #################
 
         # ==================== CUDA inference path ====================
-        if _use_topp_cuda_backend(self.topp_flash_backend) and not ret_attn_mask:
+        if (_use_topp_cuda_backend(self.topp_flash_backend)
+                and not ret_attn_mask and not self.soft_routing):
             if self.training:
                 raise RuntimeError(
                     'topp cuda backend is inference-only. '
@@ -747,7 +763,10 @@ class ToppAttention(nn.Module):
             'router',
             lambda: self.router(q_win, k_win, GA, category_prototypes=category_prototypes))  # (n, p^2, topk) tensors
 
-        kv_pix_sel = self.kv_gather(r_idx=r_idx, r_weight=r_weight, kv=kv_pix)  # (n, p^2, topk, h_kv*w_kv, c_qk+c_v)
+        if self.soft_routing:
+            kv_pix_sel = kv_pix[:, None, :, :, :] * r_weight[:, :, :, None, None]
+        else:
+            kv_pix_sel = self.kv_gather(r_idx=r_idx, r_weight=r_weight, kv=kv_pix)  # (n, p^2, topk, h_kv*w_kv, c_qk+c_v)
         k_pix_sel, v_pix_sel = kv_pix_sel.split([self.qk_dim, self.dim], dim=-1)
 
         ######### do attention as normal ####################
