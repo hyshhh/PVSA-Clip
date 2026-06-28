@@ -96,44 +96,42 @@ Top-P 路由：
 
 ---
 
-## 训练策略与损失函数
+### 创新 3：CLIPSegHead — 文本原型驱动的对比分类头
 
-### 端到端单阶段训练
+**设计动机：** 普通 SegformerHead 用 `nn.Conv2d(channels, num_classes)` 做分类，权重随机初始化，每个类别之间的关系完全由训练数据隐式学习。CLIPSegHead 用冻结的 CLIP text prototype 替代分类权重，将分类问题转化为"视觉特征和哪个文本原型最像"的对比问题，继承 CLIP 的跨模态语义先验。
 
-- **冻结：** CLIP Text Encoder（仅前向编码 prompt，不更新参数）
-- **训练：** Backbone + TTRM + SegHead 一次性端到端联合训练
+**与普通 SegformerHead 的对比：**
 
-### 损失函数
+| | SegformerHead | CLIPSegHead |
+|---|---|---|
+| 分类器 | `nn.Conv2d(256, 3)` 随机初始化 | cosine(visual_feat, text_prototypes) 冻结 |
+| 类别关系 | 训练后隐式学到 | 由 CLIP 语义空间预定义 |
+| 新增类别 | 重新训练分类头 | 只需添加 prompt embedding |
+| 梯度 | 流过分类权重 + backbone | 只流过 backbone（text 嵌入冻结） |
+| 推理 | 标准 Conv2d | 融合后等价 Conv2d |
 
+**前向计算：**
+```
+4 stage 特征 → 各 1×1 Conv(→256) → 上采样 → concat → [B, 1024, 64, 64]
+→ fusion_conv(1024→256) → BN → proj(256→512) → [B, 512, H, W]
+→ einsum("bchw,bkc->bkhw", feat, prototypes[3,512]) × scale + bias → [B, 3, H, W]
+```
+
+**损失函数（双损失）：**
 ```
 L = λ_seg * L_seg + (1 - λ_seg) * L_cls    （λ_seg = 0.5）
 ```
 
-| 损失 | 计算方式 | 作用 |
-|------|---------|------|
-| **L_seg** | CrossEntropyLoss(cosine × scale + bias, GT) | 分类精度：预测和真值是否匹配 |
-| **L_cls** | CrossEntropyLoss(cosine_raw, GT) | 像素-文本对齐：视觉特征和正确类别的 cosine 相似度是否最高 |
+| 损失 | 公式 | 作用 |
+|------|------|------|
+| **L_seg** | `CE(einsum(feat, proto) × scale + bias, GT)` | 分类精度：scale/bias 可学习，调整 cosine 到适合 CE 的范围 |
+| **L_cls** | `CE(L2_norm(feat) @ L2_norm(proto).T, GT)` | 像素-文本对齐：纯 cosine，无缩放参数，直接衡量特征和原型的对齐程度 |
 
-**L_seg 公式：**
-```
-f = BN(proj(feat))                              # [B, 512, H, W]
-s = einsum("bchw,bkc->bkhw", f, prototypes)     # cosine similarity [B, K, H, W]
-logits = s × exp(logit_scale) + bias             # scale + bias
-L_seg = CrossEntropyLoss(logits, gt_labels)
-```
-logit_scale 和 bias 是可学习参数，能把 cosine 相似度从 [-1,1] 缩放到适合 CE 的范围。梯度流过 scale、bias、proj、BN、backbone。
+两者本质相同（都让正确类别 cosine 最高），但梯度路径不同：L_seg 多了 scale/bias 的梯度，L_cls 更纯粹地约束特征-原型对齐。
 
-**L_cls 公式：**
-```
-f = BN(proj(feat))                              # [B, 512, H, W]
-f_norm = L2_normalize(f, dim=1)                 # [B, 512, H, W]
-p_norm = L2_normalize(prototypes, dim=-1)        # [K, 512]
-s_raw = einsum("bchw,bkc->bkhw", f_norm, p_norm) # 原始 cosine [-1,1]
-L_cls = CrossEntropyLoss(s_raw, gt_labels)
-```
-没有 scale/bias，直接用原始 cosine similarity。梯度只流过 proj、BN、backbone。
+**部署融合：** BN + proj + einsum + scale + bias 全部折叠进单个 `Conv2d(256, 3, 1×1)`，推理时等价于普通分类头。
 
-**两者本质相同：** 都是让正确类别的 cosine 最高。区别仅在于 L_seg 多了 scale/bias 的梯度。如果 L_cls 已经让正确类别相似度最高，L_seg 必然也正确。两个损失方向一致，是冗余的。
+---
 
 ### Prompt Bank 增强策略
 
