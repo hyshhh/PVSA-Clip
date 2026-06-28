@@ -140,19 +140,16 @@ def main():
     cross_attn_stages = set(getattr(backbone, 'cross_attn_stages', ()))
 
     print('=' * 80)
-    print('Backbone Stage Complexity')
+    print('Backbone Stage Complexity (CLIP path)')
     print('=' * 80)
-    print(f'{"stage":>5} | {"cnn":>16} | {"transformer":>16} | {"ttrm":>16} | '
-          f'{"cross_attn":>16} | {"FAM":>16} | {"vote_fusion":>16} | {"out_norm":>16}')
-    print('-' * 130)
+    print(f'{"stage":>5} | {"transformer":>16} | {"ttrm":>16} | '
+          f'{"cross_attn":>16} | {"vote_fusion":>16}')
+    print('-' * 80)
 
     for stage in range(4):
         prefixes = {
-            'cnn': [f'downsample_layers2.{stage}'],
             'transformer': [f'downsample_layers.{stage}', f'stages.{stage}'],
-            'FAM': [f'FAM.{stage}'] if stage in fam_stages else [],
             'vote_fusion': [],
-            'out_norm': [f'extra_norms.{stage}'],
         }
         if stage in fusion_stages:
             prefixes['vote_fusion'].extend([
@@ -160,14 +157,12 @@ def main():
                 f'bn11.{stage}', f'bn12.{stage}',
             ])
 
-        # TTRM: inside blocks, prefix is stages.{stage}.{block_idx}.PA.ttrm
         ttrm_prefixes = []
         if stage in ttrm_stages:
             depth = getattr(backbone, 'depth', [3, 4, 6, 3])[stage]
             for j in range(depth):
                 ttrm_prefixes.append(f'stages.{stage}.{j}.PA.ttrm')
 
-        # Cross-attention: stages.{stage}.{block_idx}.cross_attn
         ca_prefixes = []
         if stage in cross_attn_stages:
             depth = getattr(backbone, 'depth', [3, 4, 6, 3])[stage]
@@ -175,8 +170,7 @@ def main():
                 ca_prefixes.append(f'stages.{stage}.{j}.cross_attn')
 
         cells = []
-        for group in ('cnn', 'transformer', 'ttrm', 'cross_attn',
-                       'FAM', 'vote_fusion', 'out_norm'):
+        for group in ('transformer', 'ttrm', 'cross_attn', 'vote_fusion'):
             if group == 'ttrm':
                 p = ttrm_prefixes
             elif group == 'cross_attn':
@@ -206,11 +200,26 @@ def main():
     # ---- Decode Head analysis ----
     if hasattr(model, 'decode_head') and model.decode_head is not None:
         head = model.decode_head
+        head.eval()
+        # freeze prototypes for inference simulation
+        if hasattr(model, '_prototypes_frozen'):
+            model._prototypes_frozen = True
+            model.frozen_prototypes.copy_(dummy_protos)
+
+        head_flops_dict, head_hooks = _register_flops_hooks(head)
+        with torch.no_grad():
+            feat_maps, _ = backbone(dummy, category_prototypes=dummy_protos)
+            head(feat_maps, category_prototypes=dummy_protos)
+        for h in head_hooks:
+            h.remove()
+
         head_params = _count_params(head)
+        head_flops = sum(head_flops_dict.values())
         print('\n' + '=' * 80)
         print('Decode Head (CLIPSegHead)')
         print('=' * 80)
         print(f'  Params: {_format(head_params)}')
+        print(f'  FLOPs:  {head_flops / 1e6:.2f}M')
 
     # ---- Total ----
     total_params = sum(p.numel() for p in model.parameters())
