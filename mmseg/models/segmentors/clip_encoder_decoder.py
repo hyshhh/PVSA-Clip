@@ -32,13 +32,11 @@ class CLIPEncoderDecoder(EncoderDecoder):
 
     Args:
         text_encoder (dict): Config for TextEncoder.
-        align_loss_weight (float): Weight for embedding alignment loss.
     """
 
-    def __init__(self, text_encoder: dict, align_loss_weight=0.1, **kwargs):
+    def __init__(self, text_encoder: dict, **kwargs):
         super().__init__(**kwargs)
         self.text_encoder_cfg = text_encoder
-        self.align_loss_weight = align_loss_weight
 
         # Build TextEncoder
         self.text_encoder = TextEncoder(
@@ -140,13 +138,6 @@ class CLIPEncoderDecoder(EncoderDecoder):
             loss_aux = self._auxiliary_head_forward_train(
                 feats, data_samples)
             losses.update(loss_aux)
-
-        if not self._prototypes_frozen:
-            # L_align: embedding regularization
-            original_prototypes = self.text_encoder()
-            cos_sim = F.cosine_similarity(
-                category_prototypes, original_prototypes, dim=-1)
-            losses['loss_align'] = self.align_loss_weight * (1 - cos_sim).mean()
 
         return losses
 

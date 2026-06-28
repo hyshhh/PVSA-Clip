@@ -112,14 +112,15 @@ soft_kv_weight 控制路由分数对 KV 的调制强度（0=纯 gather，0.5=半
 ### 损失函数
 
 ```
-L = L_seg + L_cls + λ_align * L_align
+L = L_seg（= L_cls）
 ```
 
 | 损失 | 惩罚什么 | 作用 |
 |------|---------|------|
 | **L_seg** | 像素分类是否正确 | 基础分割监督（CrossEntropyLoss） |
-| **L_cls** | 正确类别相对排序是否最高 | 让视觉特征和文字 prototype 对齐 |
-| **L_align** | 增强后 prototype 是否偏离 CLIP 原始语义 | 防止 CPFM 跑偏（λ=0.1） |
+| **L_cls** | 正确类别相对排序是否最高 | 让视觉特征和文字 prototype 对齐（与 L_seg 合一） |
+
+CPFM 的文本增强效果通过 L_cls 的任务损失隐式约束，无需显式对齐损失。
 
 **L_cls 原理：** 用冻结的文字 prototype 替代传统 `nn.Linear` 分类头。每个像素 512 维视觉特征与 3 个类别 prototype 逐一点积，再过 CrossEntropyLoss。只更新图像侧参数，文字 prototype 零梯度。
 
