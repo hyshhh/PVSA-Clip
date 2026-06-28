@@ -292,15 +292,15 @@ class TopkRouting(nn.Module):
             if self.debug_route:
                 print('[Route] using external GA attention map.')
 
+        route_weight_full = None
         if self.soft_routing:
-            route_weight = F.softmax(attn, dim=-1)
+            route_weight_full = F.softmax(attn, dim=-1)
             if self.debug_route:
-                route_detached = route_weight.detach().float()
+                route_detached = route_weight_full.detach().float()
                 print(f'[RouteSoft] flag={self.route_flag} '
                       f'max={route_detached.max().item():.6f} '
                       f'mean={route_detached.mean().item():.6f} '
                       f'entropy={-(route_detached * (route_detached + 1e-12).log()).sum(dim=-1).mean().item():.6f}')
-            return route_weight, None, None
 
         # 3. Top-k selection (no sorting for speed)
         topk_score, topk_index = torch.topk(
@@ -346,6 +346,11 @@ class TopkRouting(nn.Module):
 
         # energy compensation
         topk_score = topk_score * max_len * self.energy
+
+        if route_weight_full is not None:
+            topk_score = torch.gather(route_weight_full, dim=-1,
+                                      index=topk_index)
+            topk_score = topk_score * valid_mask.to(topk_score.dtype)
 
         if self.debug_route:
             score_detached = topk_score.detach().float()
@@ -763,10 +768,7 @@ class ToppAttention(nn.Module):
             'router',
             lambda: self.router(q_win, k_win, GA, category_prototypes=category_prototypes))  # (n, p^2, topk) tensors
 
-        if self.soft_routing:
-            kv_pix_sel = kv_pix[:, None, :, :, :] * r_weight[:, :, :, None, None]
-        else:
-            kv_pix_sel = self.kv_gather(r_idx=r_idx, r_weight=r_weight, kv=kv_pix)  # (n, p^2, topk, h_kv*w_kv, c_qk+c_v)
+        kv_pix_sel = self.kv_gather(r_idx=r_idx, r_weight=r_weight, kv=kv_pix)  # (n, p^2, topk, h_kv*w_kv, c_qk+c_v)
         k_pix_sel, v_pix_sel = kv_pix_sel.split([self.qk_dim, self.dim], dim=-1)
 
         ######### do attention as normal ####################
