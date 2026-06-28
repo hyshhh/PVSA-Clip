@@ -92,13 +92,46 @@ Top-P 路由：
 
 **与 SAM3 的区别：** SAM3 在编码器/解码器每层都做视觉-文本交叉注意力（6层×2），计算量大。TTRM 只在路由器的窗口池化后做一次轻量交叉注意力，且 gate 初始值很小（≈0.12），训练初期以原始视觉 Q 为主，逐步注入文本信息。
 
-**部署融合：** TTRM 关闭，cross-attention 删除，走纯视觉路由，零额外开销。
-
-**注意：** TTRM 作用于全部 4 个阶段（路由级注入），cross-attention 仅作用于 Stage 2、3（特征级注入）。浅层用路由引导，深层直接改特征，渐进式文本注入。
+**部署融合：** TTRM 关闭，走纯视觉路由，零额外开销。
 
 ---
 
-### 创新 3：CLIPSegHead — 文本原型驱动的对比分类头
+### 创新 3：渐进式文本注入 — TTRM + TextCrossAttention
+
+**设计动机：** TTRM 只影响路由选择（哪些窗口被选中），不改变视觉特征本身。深层特征已经具备语义信息，可以直接和文本做交叉注意力来增强特征，让视觉特征本身携带"这是水"的语义。
+
+**渐进式注入策略：**
+
+| Stage | 注入方式 | 作用层面 | 理由 |
+|-------|---------|---------|------|
+| Stage 0-1（浅层） | TTRM | 路由级 | 浅层特征是纹理/边缘，语义弱，改路由就够了 |
+| Stage 2-3（深层） | TTRM + TextCrossAttention | 路由级 + 特征级 | 深层特征有语义，直接融合文本能对齐 |
+
+**TextCrossAttention 模块：**
+
+```
+Q = visual_features [B, H*W, C]     ← backbone 深层特征
+K = text_prototypes 投影 [K, C]      ← 3 个类别 prototype
+V = text_prototypes 投影 [K, C]
+
+cross_attn = softmax(Q @ K.T / sqrt(D))   # [B, H*W, K]
+text_info = cross_attn @ V                  # [B, H*W, C]
+
+gate = sigmoid(learnable), 初始 ≈ 0.12
+enhanced_visual = LayerNorm(visual + gate × text_info)
+```
+
+每个 Stage 的所有 Block 共享同一个 TextCrossAttention 模块（参数共享），插入在 ToppAttention 输出之后、MLP 之前。
+
+**与 SAM3 的区别：** SAM3 在编码器全部 6 层都做 cross-attention，计算量大。本方案只在 Stage 2、3 做（共 9 个 Block），且 gate 初始值很小（≈0.12），训练初期以原始视觉特征为主，逐步注入文本信息。
+
+**与 TTRM 的区别：** TTRM 在路由器内部做，影响"选哪些窗口"；TextCrossAttention 在 ToppAttention 之后做，直接修改视觉特征本身。两者互补。
+
+**部署融合：** TextCrossAttention 模块直接删除，走纯视觉前向，零额外开销。
+
+---
+
+### 创新 4：CLIPSegHead — 文本原型驱动的对比分类头
 
 **设计动机：** 普通 SegformerHead 用 `nn.Conv2d(channels, num_classes)` 做分类，权重随机初始化，每个类别之间的关系完全由训练数据隐式学习。CLIPSegHead 用冻结的 CLIP text prototype 替代分类权重，将分类问题转化为"视觉特征和哪个文本原型最像"的对比问题，继承 CLIP 的跨模态语义先验。
 
