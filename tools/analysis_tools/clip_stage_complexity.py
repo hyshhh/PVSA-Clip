@@ -206,28 +206,11 @@ def main():
     # ---- Decode Head analysis ----
     if hasattr(model, 'decode_head') and model.decode_head is not None:
         head = model.decode_head
-        head.eval()
-        head_flops_dict, head_hooks = _register_flops_hooks(head)
-
-        # Run forward to get FLOPs
-        with torch.no_grad():
-            feats = backbone(dummy)
-            if isinstance(feats, tuple) and len(feats) == 2 and isinstance(feats[0], tuple):
-                feat_maps, prototypes = feats
-                head(feat_maps, category_prototypes=prototypes)
-            else:
-                head(feats)
-
-        for h in head_hooks:
-            h.remove()
-
         head_params = _count_params(head)
-        head_flops = sum(head_flops_dict.values())
         print('\n' + '=' * 80)
         print('Decode Head (CLIPSegHead)')
         print('=' * 80)
         print(f'  Params: {_format(head_params)}')
-        print(f'  FLOPs:  {head_flops / 1e6:.2f}M')
 
     # ---- Total ----
     total_params = sum(p.numel() for p in model.parameters())
