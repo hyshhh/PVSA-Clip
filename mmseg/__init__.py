@@ -6,6 +6,7 @@ import mmengine
 from packaging.version import parse
 
 from .version import __version__, version_info
+from .engine import hooks  # noqa: F401 - ensure hooks are registered
 
 MMCV_MIN = '1.7.0rc4'
 MMCV_MAX = '2.2.0'
