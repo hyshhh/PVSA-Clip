@@ -33,7 +33,16 @@ attn = softmax(q @ k.T / sqrt(512))  # [1, 10] 注意力权重
 prototype = attn @ v                  # [512] 加权聚合结果
 ```
 
-可学习 query 自动学习每个 prompt 的重要性权重。例如 water 类中 "river" 和 "lake" 语义代表性强，权重高；"harbor" 兼具 water 和 land 语义，权重相对低。
+可学习 query 自动学习每个 prompt 的重要性权重。例如 water 类中 "river" 和 "lake" 语义代表性强，权重高；"wave" 兼具 water 和 land 语义，权重相对低。
+
+**训练增强（关键，防止 query 过拟合）：**
+
+每次训练前向，对 prompt 做两步增强后再送入 attention pooling：
+
+1. **随机采样 2-3 个 prompt**：从 10 个 prompt 中随机抽 2-3 个，迫使 query 学会对**任意子集**都能产出稳定的 prototype，不能依赖固定的 10 个 prompt 组合。效果类似 Dropout。
+2. **高斯噪声扰动（σ=0.01）**：对采样后的 prompt embedding 加微小噪声，防止 query 过拟合到某个 prompt 的精确向量值，学到的是"方向"而不是"坐标"。
+
+推理时使用全部 10 个 prompt，不加噪声，attention pooling 输出更稳定。
 
 **RepRTA 精炼：**
 ```
@@ -42,7 +51,7 @@ SwiGLU FFN：x12 = Linear(prototype) → chunk → SiLU(x1) × x2 → Linear →
 L2 归一化 → category_prototype [512]
 ```
 
-**训练增强：** 每次前向随机采样 2-3 个 prompt + 高斯噪声（σ=0.01），防止过拟合。
+RepRTA 权重零初始化，训练初期近似恒等映射，推理时设置 `_fused=True` 跳过计算。
 
 **从 Prototype 到卷积核：** 3 个类别 `[3, 512]` × head proj 权重 `[512, 256]` = Conv2d 权重 `[3, 256, 1, 1]`。推理时等价于固定 1×1 卷积。
 
@@ -50,35 +59,40 @@ L2 归一化 → category_prototype [512]
 
 ### 创新 2：Text-guided Top-P Routing Module（TTRM）
 
-**设计动机：** 原 PVSA-Net 的 Top-P Routing 仅基于视觉 token 相似度做路由，无法感知语义类别。TTRM 在路由器中注入文本亲和力信号，让语义相关的窗口优先被选中聚合。
+**设计动机：** 原 PVSA-Net 的 Top-P Routing 仅基于视觉 token 相似度做路由，无法感知语义类别。TTRM 在路由器中注入文本语义，让路由过程具备类别感知能力。
 
 **作用位置：** Backbone **全部 4 个阶段**的 ToppAttention 内部路由器
 
 **原理：** 输入图像被切成 7×7=49 个窗口，路由器决定"每个窗口应该和哪些其他窗口做注意力"。原版只看视觉特征像不像，不知道"这个窗口是水还是地"。
 
-**两层文本注入机制：**
+**核心机制 — 交叉注意力增强 Q：**
 
-**第一层 — 路由分数混合（选窗口）：**
+在路由计算之前，窗口池化后的视觉 Q 先与文本 prototypes 做一次轻量交叉注意力，将文本语义注入 Q 中，再用增强后的 Q 进行 Top-P 路由：
+
 ```
-attn_visual = q_norm @ k_norm.T / sqrt(D)     # [49, 49] 窗口间视觉相似度
-attn_text = q_norm @ T_c.T / sqrt(D)         # [49, 3] 每个窗口与 3 个类别的相似度
-attn_text_mean = attn_text.mean(dim=-1)        # [49] 平均文本亲和力标量
-attn = (1-α) * attn_visual + α * attn_text_mean # [49, 49] 广播到所有 key
+窗口池化后：
+  Q_visual = 视觉窗口特征 [49, qk_dim]
+  K_text = text_prototypes 投影 [3, qk_dim]     ← 3 个类别 prototype
+  V_text = text_prototypes 投影 [3, qk_dim]
+
+交叉注意力：
+  cross_attn = softmax(Q_visual @ K_text.T / sqrt(D))  # [49, 3]
+  text_info = cross_attn @ V_text                       # [49, qk_dim]
+
+残差注入：
+  Q_enriched = normalize(Q_visual + gate × text_info)   # [49, qk_dim]
+  gate = sigmoid(learnable), 初始 ≈ 0.12
+
+Top-P 路由：
+  attn = Q_enriched @ K_visual.T                         # [49, 49]
+  → Top-P 剪枝 → 选 top-k 窗口
 ```
 
-α = sigmoid(learnable_parameter)，初始值约 0.1。
+**效果：** 经过交叉注意力后，水域窗口的 Q 携带了"这是水"的语义信息，路由时水域窗口之间更容易被选中聚合。
 
-**第二层 — Soft KV 加权（调强度）：**
-```
-原版：kv_selected = gather(kv, route_indices)
-新版：kv_selected = (1 + soft_kv_weight * r_weight) * gather(kv, route_indices)
-```
+**与 SAM3 的区别：** SAM3 在编码器/解码器每层都做视觉-文本交叉注意力（6层×2），计算量大。TTRM 只在路由器的窗口池化后做一次轻量交叉注意力，且 gate 初始值很小（≈0.12），训练初期以原始视觉 Q 为主，逐步注入文本信息。
 
-soft_kv_weight 控制路由分数对 KV 的调制强度（0=纯 gather，0.5=半强度，1=原版 soft routing）。残差形式保证退化安全。
-
-**两层的区别：** 第一层影响"选哪些窗口"，第二层影响"选中的窗口多大程度参与注意力"。
-
-**部署融合：** α 烘焙为常数，soft_kv_weight 固定为配置值。两者都不增加推理开销。
+**部署融合：** TTRM 关闭，走纯视觉路由，零额外开销。
 
 ---
 
@@ -86,23 +100,16 @@ soft_kv_weight 控制路由分数对 KV 的调制强度（0=纯 gather，0.5=半
 
 ### 端到端单阶段训练
 
-- **冻结：** CLIP Text Encoder
-- **训练：** Backbone + TTRM(α) + SegHead 一次性端到端
+- **冻结：** CLIP Text Encoder（仅前向编码 prompt，不更新参数）
+- **训练：** Backbone + TTRM + SegHead 一次性端到端联合训练
 
 ### 损失函数
 
 ```
-L = L_seg（= L_cls）
+L = L_seg（= L_cls，同一个 CrossEntropyLoss）
 ```
 
-| 损失 | 惩罚什么 | 作用 |
-|------|---------|------|
-| **L_seg** | 像素分类是否正确 | 基础分割监督（CrossEntropyLoss） |
-| **L_cls** | 正确类别相对排序是否最高 | 让视觉特征和文字 prototype 对齐（与 L_seg 合一） |
-
-
-
-**L_cls 原理：** 用冻结的文字 prototype 替代传统 `nn.Linear` 分类头。每个像素 512 维视觉特征与 3 个类别 prototype 逐一点积，再过 CrossEntropyLoss。只更新图像侧参数，文字 prototype 零梯度。
+CLIPSegHead 用冻结的文字 prototype 替代传统 `nn.Linear` 分类头，每个像素 512 维视觉特征与 3 个类别 prototype 逐一点积，再过 CrossEntropyLoss。只更新图像侧参数，文字 prototype 零梯度。
 
 ```python
 x = BN(visual_features)
@@ -110,11 +117,13 @@ logits = einsum("bchw,bkc->bkhw", x, prototypes) * scale + bias
 loss = CrossEntropyLoss(logits, gt_labels)
 ```
 
+L_cls 惩罚的是相对排序（正确类别是否最高），不是绝对对齐。只要正确类别的点积比其他类别高，loss 就低。
+
 ### Prompt Bank 增强策略
 
-- 训练时每个类别**随机采样 2-3 个 prompt**（非全部使用）
-- 对 text embedding 施加**高斯噪声扰动**（σ=0.01）
-- 语义分割场景所有像素都有明确类别标签，无需负样本 prompt bank
+- 训练时每个类别**随机采样 2-3 个 prompt**（非全部使用），防止 attention pooling query 过拟合
+- 对 text embedding 施加**高斯噪声扰动**（σ=0.01），模拟 CLIP 编码器的不确定性
+- 语义分割场景所有像素都有明确类别标签（water/ship/land），无需负样本 prompt bank
 
 ---
 
@@ -126,6 +135,6 @@ loss = CrossEntropyLoss(logits, gt_labels)
 
 **Step 3：** 分类头融合 — BN + einsum + scale + bias 融合进 1x1 Conv2d
 
-**Step 4：** TTRM α 融合 — α 烘焙为常数
+**Step 4：** TTRM 关闭 — 走纯视觉路由
 
 **最终模型等价于原始 PVSA-Net + 一个 1x1 Conv 分类头，零文本计算开销。**
