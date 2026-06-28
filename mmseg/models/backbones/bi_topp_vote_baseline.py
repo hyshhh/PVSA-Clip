@@ -437,7 +437,7 @@ class Stem224(nn.Module):
         out = self.act2(self.bn2(self.conv2(out)))
         out += self.shortcut(x)
         return out
-@MODELS.register_module()
+@MODELS.register_module(name='VTFormer_baseline')
 class VTFormer(nn.Module):
     def __init__(self, depth=[3, 4, 8, 3], in_chans=3, num_classes=1000, embed_dim=[64, 128, 320, 512],
                  head_dim=64, qk_scale=None, representation_size=None,
