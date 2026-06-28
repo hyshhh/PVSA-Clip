@@ -144,8 +144,8 @@ class CLIPSegHead(BaseDecodeHead):
         """
         # L_seg: standard CrossEntropyLoss on classification logits
         seg_label = self._stack_batch_gt(batch_data_samples)
-        loss_seg = self.loss_decode[0](seg_logits, seg_label,
-                                        ignore_index=self.ignore_index)
+        loss_seg = self.loss_decode(seg_logits, seg_label,
+                                     ignore_index=self.ignore_index)
 
         # L_cls: pixel-text cosine similarity loss
         # Normalize features and prototypes
