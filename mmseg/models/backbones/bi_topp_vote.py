@@ -454,15 +454,11 @@ class VTFormer(nn.Module):
         self.ttrm_stages = ttrm_stages
         self.cross_attn_stages = cross_attn_stages
 
-        # Create cross-attention modules for specified stages (shared across blocks)
         from ..utils.text_cross_attn import TextCrossAttention
-        cross_attn_modules = {}
-        for i in cross_attn_stages:
-            cross_attn_modules[i] = TextCrossAttention(
-                visual_dim=embed_dim[i], text_dim=512, num_heads=nheads[i])
 
         for i in range(4):
-            ca_module = cross_attn_modules.get(i, None)
+            # Each block gets its own cross-attention instance (no sharing)
+            use_ca = i in cross_attn_stages
             stage = nn.Sequential(
                 *[Block(dim=embed_dim[i], drop_path=dp_rates[cur + j],
                         layer_scale_init_value=layer_scale_init_value,
@@ -499,7 +495,10 @@ class VTFormer(nn.Module):
                         use_nan_guard=use_nan_guard,
                         use_ttrm=(use_ttrm and i in ttrm_stages),
                         soft_kv_weight=soft_kv_weight,
-                        cross_attn_module=ca_module) for j in range(depth[i])],
+                        cross_attn_module=TextCrossAttention(
+                            visual_dim=embed_dim[i], text_dim=512,
+                            num_heads=nheads[i]) if use_ca else None
+                        ) for j in range(depth[i])],
             )
             if i in use_checkpoint_stages:
                 stage = checkpoint_wrapper(stage)
