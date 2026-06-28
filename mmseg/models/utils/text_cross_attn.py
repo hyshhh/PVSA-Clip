@@ -56,13 +56,14 @@ class TextCrossAttention(nn.Module):
         # Project
         q = self.visual_q(v_tokens)  # [B, H*W, C]
 
-        # Use pre-computed K/V if available (deployment), otherwise compute
-        if hasattr(self, '_precomputed') and self._precomputed:
-            k = self._frozen_k  # [K, C]
-            v = self._frozen_v  # [K, C]
+        # Priority: use pre-computed frozen K/V if available (deployment)
+        has_frozen = hasattr(self, '_frozen_k') and self._frozen_k is not None
+        if has_frozen:
+            k = self._frozen_k
+            v = self._frozen_v
         else:
-            k = self.text_proj_k(text_prototypes)  # [K, C]
-            v = self.text_proj_v(text_prototypes)  # [K, C]
+            k = self.text_proj_k(text_prototypes)
+            v = self.text_proj_v(text_prototypes)
 
         # Multi-head: [B, heads, N, head_dim]
         q = q.view(B, H * W, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
@@ -76,7 +77,9 @@ class TextCrossAttention(nn.Module):
 
         # Reshape back: [B, H*W, C]
         out = out.permute(0, 2, 1, 3).reshape(B, H * W, C)
-        out = self.out_proj(out)
+        # Skip out_proj if using frozen V (already merged during deployment)
+        if not has_frozen:
+            out = self.out_proj(out)
 
         # Gated residual
         gate = torch.sigmoid(self.gate)

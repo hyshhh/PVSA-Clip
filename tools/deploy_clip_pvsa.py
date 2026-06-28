@@ -92,7 +92,8 @@ def main():
                 if hasattr(block, 'cross_attn') and block.cross_attn is not None:
                     ca = block.cross_attn
                     k = ca.text_proj_k(prototypes)  # [K, C]
-                    v = ca.text_proj_v(prototypes)  # [K, C]
+                    # Merge out_proj into V: out_proj(v @ attn.T) = (out_proj(v)) @ attn.T
+                    v = ca.out_proj(ca.text_proj_v(prototypes))  # [K, C]
                     ca.register_buffer('_frozen_k', k)
                     ca.register_buffer('_frozen_v', v)
                     ca._precomputed = True
