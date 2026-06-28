@@ -204,8 +204,11 @@ class TopkRouting(nn.Module):
         # TTRM: Text-guided Top-P Routing Module
         self.use_ttrm = use_ttrm
         if use_ttrm:
-            self.ttrm_alpha = nn.Parameter(torch.tensor(0.1))
             self.ttrm_text_proj = nn.Linear(512, qk_dim)
+            self.ttrm_text_v_proj = nn.Linear(512, qk_dim)
+            self.ttrm_out_proj = nn.Linear(qk_dim, qk_dim)
+            self.ttrm_norm = nn.LayerNorm(qk_dim)
+            self.ttrm_gate = nn.Parameter(torch.tensor([-2.0]))
 
         # V1.1 hardcoded route parameters (unchanged)
         # top-p-v2/3_2025_12_25
@@ -256,17 +259,25 @@ class TopkRouting(nn.Module):
             k = F.normalize(key, dim=-1)
             attn = (q * self.scale) @ k.transpose(-2, -1)   # (n, p2, p2)
 
-            # TTRM: inject text routing signal
+            # TTRM: cross-attention with text before routing
             if self.use_ttrm and category_prototypes is not None:
-                tc = F.normalize(self.ttrm_text_proj(category_prototypes), dim=-1)
-                attn_text = (q * self.scale) @ tc.transpose(-2, -1)
-                attn_text_mean = attn_text.mean(dim=-1, keepdim=True)
-                alpha = torch.sigmoid(self.ttrm_alpha)
-                attn = (1 - alpha) * attn + alpha * attn_text_mean
+                tc = self.ttrm_norm(category_prototypes)  # [K, D]
+                tc_k = F.normalize(self.ttrm_text_proj(tc), dim=-1)  # [K, qk_dim]
+                tc_v = self.ttrm_text_v_proj(tc)  # [K, qk_dim]
+
+                # Cross-attention: visual Q attends to text K/V
+                cross_attn = (query.detach() * self.scale) @ tc_k.transpose(-2, -1)  # [n, p2, K]
+                cross_attn = F.softmax(cross_attn, dim=-1)
+                text_info = cross_attn @ tc_v  # [n, p2, qk_dim]
+                text_info = self.ttrm_out_proj(text_info)
+
+                # Gated residual: enrich Q with text context
+                gate = torch.sigmoid(self.ttrm_gate)
+                q_enriched = F.normalize(query.detach() + gate * text_info, dim=-1)
+
+                attn = (q_enriched * self.scale) @ k.transpose(-2, -1)
             elif hasattr(self, '_frozen_alpha'):
-                # Deployment: use pre-baked alpha (no text input needed)
-                attn_text = (q * self.scale).mean(dim=-1, keepdim=True)
-                attn = (1 - self._frozen_alpha) * attn + self._frozen_alpha * attn_text
+                attn = (1 - self._frozen_alpha) * attn + self._frozen_alpha * attn
         else:
             attn = GA
             if self.debug_route:
