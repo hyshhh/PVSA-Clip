@@ -205,6 +205,7 @@ class TopkRouting(nn.Module):
         self.use_ttrm = use_ttrm
         if use_ttrm:
             self.ttrm_alpha = nn.Parameter(torch.tensor(0.1))
+            self.ttrm_text_proj = nn.Linear(512, qk_dim)
 
         # V1.1 hardcoded route parameters (unchanged)
         # top-p-v2/3_2025_12_25
@@ -257,7 +258,7 @@ class TopkRouting(nn.Module):
 
             # TTRM: inject text routing signal
             if self.use_ttrm and category_prototypes is not None:
-                tc = F.normalize(category_prototypes, dim=-1)
+                tc = F.normalize(self.ttrm_text_proj(category_prototypes), dim=-1)
                 attn_text = (q * self.scale) @ tc.transpose(-2, -1)
                 attn_text_mean = attn_text.mean(dim=-1, keepdim=True)
                 alpha = torch.sigmoid(self.ttrm_alpha)
