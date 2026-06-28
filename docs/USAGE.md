@@ -51,10 +51,12 @@ python tools/deploy_clip_pvsa.py --config configs-h/biformer/biformer_clip_water
 
 ```bash
 # Baseline 路径
-python tools/analysis_tools/pvsa_stage_complexity.py configs-h/biformer/biformer_baseline_waterseg.py --shape 224 224
+python tools/analysis_tools/get_flops.py configs-h/biformer/biformer_baseline_waterseg.py --shape 256 256
+python tools/analysis_tools/pvsa_stage_complexity.py configs-h/biformer/biformer_baseline_waterseg.py --shape 256 256
 
 # CLIP 路径（含 TTRM / Cross-Attn / Text Encoder）
-python tools/analysis_tools/clip_stage_complexity.py configs-h/biformer/biformer_clip_waterseg.py --shape 224 224
+python tools/analysis_tools/get_flops.py configs-h/biformer/biformer_clip_waterseg.py --shape 256 256
+python tools/analysis_tools/clip_stage_complexity.py configs-h/biformer/biformer_clip_waterseg.py --shape 256 256
 ```
 
 ## CUDA 核加速推理
