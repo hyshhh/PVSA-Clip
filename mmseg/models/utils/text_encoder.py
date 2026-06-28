@@ -18,7 +18,6 @@ class TextEncoder(nn.Module):
         self.prompts_per_category = prompts_per_category
 
         # Per-category learnable query for attention pooling
-        # Each category has its own query to learn category-specific prompt weights
         self.attn_pool_query = nn.Parameter(
             torch.randn(num_categories, 1, embed_dim) * 0.02)
 
@@ -35,23 +34,27 @@ class TextEncoder(nn.Module):
             'prompt_embeddings',
             torch.zeros(num_categories, prompts_per_category, embed_dim))
 
-    def set_prompt_embeddings(self, embeddings):
-        """Set precomputed CLIP prompt embeddings.
-
-        Args:
-            embeddings: [num_categories, prompts_per_category, embed_dim]
-        """
-        assert embeddings.shape == self.prompt_embeddings.shape
-        self.prompt_embeddings.copy_(embeddings)
-
     def load_prompt_bank(self, path):
-        """Load prompt embeddings from .pt file."""
+        """Load prompt embeddings from .pt file.
+
+        Automatically adapts attn_pool_query to match the loaded
+        prompt bank's category count, so no manual config changes
+        needed when switching datasets.
+        """
         data = torch.load(path, map_location='cpu')
         if isinstance(data, dict):
             embeddings = data['embeddings']
         else:
             embeddings = data
-        self.set_prompt_embeddings(embeddings)
+
+        C, K, D = embeddings.shape
+        # Auto-resize query if category count differs
+        if C != self.attn_pool_query.shape[0]:
+            self.attn_pool_query = nn.Parameter(
+                torch.randn(C, 1, D) * 0.02)
+            self.num_categories = C
+        self.prompts_per_category = K
+        self.prompt_embeddings = nn.Parameter(embeddings, requires_grad=False)
 
     def forward(self):
         """Forward pass to produce category prototypes.
