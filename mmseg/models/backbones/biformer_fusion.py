@@ -31,8 +31,7 @@ class BiFormer_fusion(VTFormer):
                 self.cpfm_modules[str(stage_idx)] = CPFM(
                     embed_dim=embed_dim,
                     visual_dim=self.embed_dim[stage_idx],
-                    num_heads=cpfm_config.get('num_heads', 8),
-                    top_m=cpfm_config.get('top_m', 8))
+                    num_heads=cpfm_config.get('num_heads', 8))
             self.cpfm_agg = nn.Sequential(
                 nn.Linear(embed_dim * len(self.cpfm_stages), embed_dim),
                 nn.GELU(),
