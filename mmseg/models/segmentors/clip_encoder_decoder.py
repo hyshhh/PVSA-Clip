@@ -63,18 +63,17 @@ class CLIPEncoderDecoder(EncoderDecoder):
         self._prototypes_frozen = False
 
     def freeze_prototypes(self, save_path=None):
-        """Freeze and save CPFM-enhanced prototypes for deployment.
+        """Freeze and save original text prototypes for deployment.
 
-        Uses self.enhanced_prototypes (populated by extract_feat during
-        training) which contains the CPFM-refined text embeddings, NOT
-        the raw text_encoder() output.
+        Head always uses original CLIP embeddings (not CPFM-enhanced),
+        so frozen_prototypes = text_encoder() output.
 
         Args:
             save_path: Path to save .pt file. If None, uses default.
         """
         with torch.no_grad():
-            # Use CPFM-enhanced prototypes from training
-            self.frozen_prototypes.copy_(self.enhanced_prototypes)
+            # Use original text encoder output (head always uses this)
+            self.frozen_prototypes.copy_(self.text_encoder())
             self._prototypes_frozen = True
 
         if save_path:
@@ -95,23 +94,24 @@ class CLIPEncoderDecoder(EncoderDecoder):
 
         Returns:
             tuple of stage features (4 tensors)
-            category_prototypes: [K, D] text embeddings
+            category_prototypes: [K, D] original text embeddings (always)
         """
-        # Get text prototypes
+        # Get original text prototypes
         if self._prototypes_frozen:
             category_prototypes = self.frozen_prototypes
         else:
             category_prototypes = self.text_encoder()
 
         # Forward through backbone with text injection
+        # CPFM refines prototypes internally for backbone feature learning,
+        # but we always return the ORIGINAL prototypes to the head
         backbone_out = self.backbone(inputs, category_prototypes=category_prototypes)
 
         if isinstance(backbone_out, tuple) and len(backbone_out) == 2:
             feats, enhanced_prototypes = backbone_out
+            # Store enhanced prototypes for reference (not used by head)
             if self.training:
                 self.enhanced_prototypes.copy_(enhanced_prototypes.detach())
-                # Use CPFM-enhanced prototypes for loss computation
-                category_prototypes = enhanced_prototypes
         else:
             feats = backbone_out
 
