@@ -11,7 +11,6 @@ from mmengine.registry import init_default_scope
 
 from mmseg.models import BaseSegmentor
 from mmseg.registry import MODELS
-from mmseg.models.segmentors.clip_encoder_decoder import CLIPEncoderDecoder  # noqa: F401
 from mmseg.structures import SegDataSample
 
 try:
