@@ -23,17 +23,17 @@
 
 **设计动机：** CLIP embedding 冻结后，如何把每个类别 10 个 prompt 聚合成 1 个代表性向量？
 
-YOLOE 训练时每个类别随机采样 1 个 prompt 直接使用，无聚合过程。本方案引入可学习 attention pooling，每个类别 10 个 prompt 全部参与加权聚合，再经 SwiGLU FFN 精炼。
+YOLOE 训练时每个类别随机采样 1 个 prompt 直接使用，无聚合过程。本方案引入**per-category 可学习 attention pooling**，每个类别有独立的 query 向量，学习类别特定的 prompt 加权策略，再经 SwiGLU FFN 精炼。
 
 **Attention Pooling：**
 ```
-q = learnable_query[1, 512]           # 可学习查询向量
-k = v = prompt_embeddings[10, 512]    # 10 个 prompt 嵌入
-attn = softmax(q @ k.T / sqrt(512))  # [1, 10] 注意力权重
-prototype = attn @ v                  # [512] 加权聚合结果
+q = per_category_query[C, 1, 512]     # 每个类别独立的可学习查询向量
+k = v = prompt_embeddings[C, 10, 512]  # 10 个 prompt 嵌入
+attn = softmax(q @ k.T / sqrt(512))   # [C, 1, 10] 注意力权重
+prototype = attn @ v                   # [C, 512] 加权聚合结果
 ```
 
-可学习 query 自动学习每个 prompt 的重要性权重。例如 water 类中 "river" 和 "lake" 语义代表性强，权重高；"wave" 兼具 water 和 land 语义，权重相对低。
+每个类别有独立 query，water 的 query 学到"river、lake 权重高"，ship 的 query 学到"boat、vessel 权重高"，互不干扰。加载 prompt bank 时 query 数量自动适配类别数，换数据集无需改配置。
 
 **训练增强（关键，防止 query 过拟合）：**
 
@@ -121,7 +121,7 @@ gate = sigmoid(learnable), 初始 ≈ 0.12
 enhanced_visual = LayerNorm(visual + gate × text_info)
 ```
 
-每个 Stage 的所有 Block 共享同一个 TextCrossAttention 模块（参数共享），插入在 ToppAttention 输出之后、MLP 之前。
+每个 Block 拥有独立的 TextCrossAttention 实例（不共享），插入在 ToppAttention 输出之后、MLP 之前。通过配置 `cross_attn_stages=[2, 3]` 控制作用阶段。
 
 **与 SAM3 的区别：** SAM3 在编码器全部 6 层都做 cross-attention，计算量大。本方案只在 Stage 2、3 做（共 9 个 Block），且 gate 初始值很小（≈0.12），训练初期以原始视觉特征为主，逐步注入文本信息。
 
@@ -152,17 +152,7 @@ enhanced_visual = LayerNorm(visual + gate × text_info)
 → einsum("bchw,bkc->bkhw", feat, prototypes[3,512]) × scale + bias → [B, 3, H, W]
 ```
 
-**损失函数（双损失）：**
-```
-L = λ_seg * L_seg + (1 - λ_seg) * L_cls    （λ_seg = 0.5）
-```
-
-| 损失 | 公式 | 作用 |
-|------|------|------|
-| **L_seg** | `CE(einsum(feat, proto) × scale + bias, GT)` | 分类精度：scale/bias 可学习，调整 cosine 到适合 CE 的范围 |
-| **L_cls** | `CE(L2_norm(feat) @ L2_norm(proto).T, GT)` | 像素-文本对齐：纯 cosine，无缩放参数，直接衡量特征和原型的对齐程度 |
-
-两者本质相同（都让正确类别 cosine 最高），但梯度路径不同：L_seg 多了 scale/bias 的梯度，L_cls 更纯粹地约束特征-原型对齐。
+**损失函数：** 单一 CrossEntropyLoss，logits 来自 cosine similarity × scale + bias。
 
 **部署融合：** BN + proj + einsum + scale + bias 全部折叠进单个 `Conv2d(256, 3, 1×1)`，推理时等价于普通分类头。
 
@@ -184,6 +174,6 @@ L = λ_seg * L_seg + (1 - λ_seg) * L_cls    （λ_seg = 0.5）
 
 **Step 3：** 分类头融合 — BN + einsum + scale + bias 融合进 1x1 Conv2d
 
-**Step 4：** TTRM 关闭 — 走纯视觉路由
+**Step 4：** TTRM 关闭 + TextCrossAttention 删除 — 走纯视觉路由
 
 **最终模型等价于原始 PVSA-Net + 一个 1x1 Conv 分类头，零文本计算开销。**
