@@ -117,9 +117,8 @@ class BiFormer_fusion(VTFormer):
                 tc_mean = category_prototypes.mean(dim=0)  # [D]
                 tc_proj = self.text_proj[str(i)](tc_mean)  # [embed_dim[i]]
                 gate_text = self.sigmoid(
-                    self.conv_text[str(i)](tc_proj.view(1, -1, 1, 1)))
-                stage_features[i] = stage_features[i] + \
-                    self.upsample2(gate_text) * stage_features[i]
+                    self.conv_text[str(i)](tc_proj.view(1, -1, 1, 1)))  # [1, C, 1, 1]
+                stage_features[i] = stage_features[i] + gate_text * stage_features[i]
 
         for i in range(4):
             out.append(self.extra_norms[i](stage_features[i]))
