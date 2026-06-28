@@ -76,7 +76,7 @@ def main():
                 if hasattr(block, 'PA') and hasattr(block.PA, 'router'):
                     router = block.PA.router
                     if hasattr(router, 'use_ttrm') and router.use_ttrm:
-                        alpha_val = torch.sigmoid(router.ttrm_alpha).item()
+                        alpha_val = torch.sigmoid(router.ttrm_gate).item()
                         router._frozen_alpha = alpha_val
                         router.use_ttrm = False
                         print(f'  TTRM α fused: {alpha_val:.4f}')

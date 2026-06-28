@@ -96,8 +96,10 @@ class CLIPSegHead(BaseDecodeHead):
             prototypes = self._inference_prototypes
 
         if prototypes is not None:
-            w = prototypes.unsqueeze(0)  # [1, K, D]
-            seg_logits = torch.einsum("bchw,bkc->bkhw", out, w)
+            # L2 normalize for cosine similarity
+            out_norm = F.normalize(out, dim=1)  # [B, D, H, W]
+            w = F.normalize(prototypes, dim=-1).unsqueeze(0)  # [1, K, D]
+            seg_logits = torch.einsum("bchw,bkc->bkhw", out_norm, w)
             seg_logits = seg_logits * self.logit_scale.exp() + self.bias
         else:
             seg_logits = self.cls_seg(out)
@@ -105,41 +107,40 @@ class CLIPSegHead(BaseDecodeHead):
         return seg_logits
 
     def fuse_for_deployment(self, category_prototypes):
-        """Fuse contrastive classification into Conv2d for deployment."""
+        """Fuse BN + proj + cosine + scale + bias into single Conv2d."""
         with torch.no_grad():
-            w = category_prototypes
+            w = category_prototypes  # [K, D]
             scale = self.logit_scale.exp()
 
-            proj_weight = self.proj.weight.data
-            proj_bias = self.proj.bias.data
+            proj_weight = self.proj.weight.data  # [D, C, 1, 1]
+            proj_bias = self.proj.bias.data  # [D]
 
             bn = self.proj_norm
-            running_mean = bn.running_mean
-            running_var = bn.running_var
-            bn_weight = bn.weight.data
-            bn_bias = bn.bias.data
+            running_mean = bn.running_mean  # [C]
+            running_var = bn.running_var  # [C]
+            bn_weight = bn.weight.data  # [C]
+            bn_bias = bn.bias.data  # [C]
             eps = bn.eps
 
-            bn_scale = bn_weight / torch.sqrt(running_var + eps)
-            bn_shift = bn_bias - running_mean * bn_scale
+            # BN before Conv: y = Conv(BN(x))
+            # BN(x) = a*x + c where a=gamma/sigma, c=beta-gamma*mu/sigma
+            a = bn_weight / torch.sqrt(running_var + eps)  # [C]
+            c = bn_bias - running_mean * a  # [C]
 
-            fused_weight = proj_weight * bn_scale.view(-1, 1, 1, 1)
-            fused_bias = proj_bias * bn_scale + bn_shift
+            # Fused: y = (W*a)*x + (W*c + b)
+            # proj_weight: [D, C, 1, 1], a: [C]
+            fused_weight = proj_weight * a.view(1, -1, 1, 1)  # [D, C, 1, 1]
+            fused_bias = proj_bias + (proj_weight.squeeze(-1).squeeze(-1) @ c)  # [D]
 
-            contrastive_weight = torch.matmul(
-                w * scale,
-                fused_weight.squeeze(-1).squeeze(-1)
-            )
-
+            # Contrastive fusion: w @ fused_weight
+            fused_w_2d = fused_weight.squeeze(-1).squeeze(-1)  # [D, C]
+            contrastive_weight = torch.matmul(w * scale, fused_w_2d)  # [K, C]
             contrastive_bias = torch.matmul(
-                w * scale,
-                fused_bias.unsqueeze(-1)
-            ).squeeze(-1) + self.bias.data
+                w * scale, fused_bias.unsqueeze(-1)
+            ).squeeze(-1) + self.bias.data  # [K]
 
-            new_conv = nn.Conv2d(
-                self.channels, category_prototypes.shape[0], kernel_size=1)
-            new_conv.weight.data.copy_(
-                contrastive_weight.unsqueeze(-1).unsqueeze(-1))
+            new_conv = nn.Conv2d(self.channels, category_prototypes.shape[0], kernel_size=1)
+            new_conv.weight.data.copy_(contrastive_weight.unsqueeze(-1).unsqueeze(-1))
             new_conv.bias.data.copy_(contrastive_bias)
 
             self.cls_seg = new_conv

@@ -44,10 +44,16 @@ class CLIPEncoderDecoder(EncoderDecoder):
             num_categories=text_encoder.get('num_categories', 3),
             prompts_per_category=text_encoder.get('prompts_per_category', 10))
 
-        # Load prompt bank if path provided
+        # Load prompt bank
         prompt_bank_path = text_encoder.get('prompt_bank_path', None)
-        if prompt_bank_path and os.path.exists(prompt_bank_path):
-            self.text_encoder.load_prompt_bank(prompt_bank_path)
+        if prompt_bank_path:
+            if os.path.exists(prompt_bank_path):
+                self.text_encoder.load_prompt_bank(prompt_bank_path)
+            else:
+                raise FileNotFoundError(
+                    f'Prompt bank not found: {prompt_bank_path}. '
+                    f'Run: python tools/generate_water_prompt_bank.py '
+                    f'--output {prompt_bank_path}')
 
         # Frozen prototypes for inference (loaded from .pt)
         self.register_buffer(
