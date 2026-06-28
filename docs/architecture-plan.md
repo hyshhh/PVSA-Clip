@@ -114,11 +114,26 @@ L = λ_seg * L_seg + (1 - λ_seg) * L_cls    （λ_seg = 0.5）
 | **L_seg** | CrossEntropyLoss(cosine × scale + bias, GT) | 分类精度：预测和真值是否匹配 |
 | **L_cls** | CrossEntropyLoss(cosine_raw, GT) | 像素-文本对齐：视觉特征和正确类别的 cosine 相似度是否最高 |
 
-**L_seg**：经过 scale + bias 缩放后的 cosine logits 过 CrossEntropyLoss，是标准分类损失。
+**L_seg 公式：**
+```
+f = BN(proj(feat))                              # [B, 512, H, W]
+s = einsum("bchw,bkc->bkhw", f, prototypes)     # cosine similarity [B, K, H, W]
+logits = s × exp(logit_scale) + bias             # scale + bias
+L_seg = CrossEntropyLoss(logits, gt_labels)
+```
+logit_scale 和 bias 是可学习参数，能把 cosine 相似度从 [-1,1] 缩放到适合 CE 的范围。梯度流过 scale、bias、proj、BN、backbone。
 
-**L_cls**：直接用 L2 归一化后的视觉特征和 text prototype 算原始 cosine similarity，过 CrossEntropyLoss。不经过 scale/bias，惩罚的是"像素和正确类别原型的相似度是否最高"。
+**L_cls 公式：**
+```
+f = BN(proj(feat))                              # [B, 512, H, W]
+f_norm = L2_normalize(f, dim=1)                 # [B, 512, H, W]
+p_norm = L2_normalize(prototypes, dim=-1)        # [K, 512]
+s_raw = einsum("bchw,bkc->bkhw", f_norm, p_norm) # 原始 cosine [-1,1]
+L_cls = CrossEntropyLoss(s_raw, gt_labels)
+```
+没有 scale/bias，直接用原始 cosine similarity。梯度只流过 proj、BN、backbone。
 
-两者区别：L_seg 关心分类结果准不准，L_cls 关心特征和原型对齐得好不好。梯度方向不同，分开后模型同时学到"分得对"和"对得准"。
+**两者本质相同：** 都是让正确类别的 cosine 最高。区别仅在于 L_seg 多了 scale/bias 的梯度。如果 L_cls 已经让正确类别相似度最高，L_seg 必然也正确。两个损失方向一致，是冗余的。
 
 ### Prompt Bank 增强策略
 
