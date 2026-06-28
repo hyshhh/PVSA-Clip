@@ -63,17 +63,15 @@ class CLIPEncoderDecoder(EncoderDecoder):
         self._prototypes_frozen = False
 
     def freeze_prototypes(self, save_path=None):
-        """Freeze and save original text prototypes for deployment.
+        """Freeze and save CPFM-enhanced prototypes for deployment.
 
-        Head always uses original CLIP embeddings (not CPFM-enhanced),
-        so frozen_prototypes = text_encoder() output.
+        Enhanced prototypes mix CLIP semantics with dataset visual info.
 
         Args:
             save_path: Path to save .pt file. If None, uses default.
         """
         with torch.no_grad():
-            # Use original text encoder output (head always uses this)
-            self.frozen_prototypes.copy_(self.text_encoder())
+            self.frozen_prototypes.copy_(self.enhanced_prototypes)
             self._prototypes_frozen = True
 
         if save_path:
@@ -94,24 +92,21 @@ class CLIPEncoderDecoder(EncoderDecoder):
 
         Returns:
             tuple of stage features (4 tensors)
-            category_prototypes: [K, D] original text embeddings (always)
+            category_prototypes: [K, D] CPFM-enhanced text embeddings
         """
-        # Get original text prototypes
         if self._prototypes_frozen:
             category_prototypes = self.frozen_prototypes
         else:
             category_prototypes = self.text_encoder()
 
-        # Forward through backbone with text injection
-        # CPFM refines prototypes internally for backbone feature learning,
-        # but we always return the ORIGINAL prototypes to the head
         backbone_out = self.backbone(inputs, category_prototypes=category_prototypes)
 
         if isinstance(backbone_out, tuple) and len(backbone_out) == 2:
             feats, enhanced_prototypes = backbone_out
-            # Store enhanced prototypes for reference (not used by head)
             if self.training:
                 self.enhanced_prototypes.copy_(enhanced_prototypes.detach())
+            # Use CPFM-enhanced prototypes for head (mixes dataset visual info into CLIP)
+            category_prototypes = enhanced_prototypes
         else:
             feats = backbone_out
 
