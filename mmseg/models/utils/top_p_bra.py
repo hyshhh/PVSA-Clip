@@ -341,13 +341,15 @@ class TopkRouting(nn.Module):
         topk_score = topk_score * valid_mask.to(topk_score.dtype)
         topk_index = topk_index.masked_fill(~valid_mask, 0)
 
-        # energy compensation
-        topk_score = topk_score * max_len * self.energy
-
+        # soft routing: use full softmax weights, then apply energy
         if route_weight_full is not None:
             topk_score = torch.gather(route_weight_full, dim=-1,
                                       index=topk_index)
             topk_score = topk_score * valid_mask.to(topk_score.dtype)
+            topk_score = topk_score * max_len * self.energy
+        else:
+            # hard routing: energy compensation on temperature softmax scores
+            topk_score = topk_score * max_len * self.energy
 
         if self.debug_route:
             score_detached = topk_score.detach().float()
