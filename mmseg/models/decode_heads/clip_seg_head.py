@@ -22,13 +22,11 @@ class CLIPSegHead(BaseDecodeHead):
         interpolate_mode (str): Upsample mode. Default: 'bilinear'
     """
 
-    def __init__(self, embed_dim=512, interpolate_mode='bilinear',
-                 cls_loss_weight=0.5, **kwargs):
+    def __init__(self, embed_dim=512, interpolate_mode='bilinear', **kwargs):
         super().__init__(input_transform='multiple_select', **kwargs)
 
         self.embed_dim = embed_dim
         self.interpolate_mode = interpolate_mode
-        self.cls_loss_weight = cls_loss_weight
         num_inputs = len(self.in_channels)
 
         assert num_inputs == len(self.in_index)
@@ -69,32 +67,13 @@ class CLIPSegHead(BaseDecodeHead):
 
     def predict(self, inputs, batch_img_metas, test_cfg,
                 category_prototypes=None):
-        """Predict segmentation results.
-
-        Args:
-            inputs: list of stage features
-            batch_img_metas: list of image meta info
-            test_cfg: test config
-            category_prototypes: [K, D] text embeddings (optional)
-
-        Returns:
-            seg_logits: [B, num_classes, H, W]
-        """
+        """Predict segmentation results."""
         if category_prototypes is not None:
             self._inference_prototypes = category_prototypes
         return self(inputs)
 
     def forward(self, inputs, category_prototypes=None):
-        """Forward pass.
-
-        Args:
-            inputs: list of 4 stage feature maps from backbone
-            category_prototypes: [K, D] text embeddings for contrastive
-                                classification. If None, uses cls_seg fallback.
-
-        Returns:
-            seg_logits: [B, num_classes, H, W] segmentation logits
-        """
+        """Forward pass."""
         inputs = self._transform_inputs(inputs)
         outs = []
         for idx in range(len(inputs)):
@@ -109,11 +88,9 @@ class CLIPSegHead(BaseDecodeHead):
 
         out = self.fusion_conv(torch.cat(outs, dim=1))
 
-        # Project to embedding space
         out = self.proj_norm(out)
         out = self.proj(out)  # [B, embed_dim, H, W]
 
-        # Use provided prototypes, or stored inference prototypes, or fallback
         prototypes = category_prototypes
         if prototypes is None:
             prototypes = self._inference_prototypes
@@ -125,65 +102,17 @@ class CLIPSegHead(BaseDecodeHead):
         else:
             seg_logits = self.cls_seg(out)
 
-        # Store visual features for L_cls computation
-        self._visual_features = out
         return seg_logits
 
-    def loss_by_feat_with_cls(self, seg_logits, batch_data_samples,
-                               visual_features, prototypes):
-        """Compute both L_seg and L_cls losses.
-
-        Args:
-            seg_logits: [B, K, H, W] classification logits (scaled + biased)
-            batch_data_samples: GT labels
-            visual_features: [B, D, H, W] raw projected features (before scale/bias)
-            prototypes: [K, D] text prototypes
-
-        Returns:
-            dict with loss_seg and loss_cls
-        """
-        # L_seg: standard CrossEntropyLoss on classification logits
-        seg_label = self._stack_batch_gt(batch_data_samples)
-        loss_seg = self.loss_decode(seg_logits, seg_label,
-                                     ignore_index=self.ignore_index)
-
-        # L_cls: pixel-text cosine similarity loss
-        # Normalize features and prototypes
-        feat_norm = F.normalize(visual_features, dim=1)  # [B, D, H, W]
-        proto_norm = F.normalize(prototypes, dim=-1)  # [K, D]
-        # Raw cosine similarity: [B, K, H, W]
-        cosine_sim = torch.einsum("bchw,bkc->bkhw", feat_norm,
-                                   proto_norm.unsqueeze(0))
-        # CrossEntropyLoss on raw cosine similarity
-        loss_cls = F.cross_entropy(cosine_sim, seg_label,
-                                    ignore_index=self.ignore_index)
-
-        return dict(
-            loss_seg=loss_seg * self.cls_loss_weight,
-            loss_cls=loss_cls * (1 - self.cls_loss_weight))
-
-    def _stack_batch_gt(self, batch_data_samples):
-        """Stack GT semantic seg labels."""
-        gt_semantic_segs = [
-            data_sample.gt_sem_seg.data for data_sample in batch_data_samples
-        ]
-        return torch.stack(gt_semantic_segs, dim=0).squeeze(1)
-
     def fuse_for_deployment(self, category_prototypes):
-        """Fuse contrastive classification into Conv2d for deployment.
-
-        Args:
-            category_prototypes: [K, D] frozen text embeddings
-        """
+        """Fuse contrastive classification into Conv2d for deployment."""
         with torch.no_grad():
-            w = category_prototypes  # [K, D]
+            w = category_prototypes
             scale = self.logit_scale.exp()
 
-            # Fuse proj + contrastive into single Conv2d
-            proj_weight = self.proj.weight.data  # [embed_dim, channels, 1, 1]
-            proj_bias = self.proj.bias.data  # [embed_dim]
+            proj_weight = self.proj.weight.data
+            proj_bias = self.proj.bias.data
 
-            # BN fusion
             bn = self.proj_norm
             running_mean = bn.running_mean
             running_var = bn.running_var
@@ -191,27 +120,22 @@ class CLIPSegHead(BaseDecodeHead):
             bn_bias = bn.bias.data
             eps = bn.eps
 
-            # Fused BN scale and shift
             bn_scale = bn_weight / torch.sqrt(running_var + eps)
             bn_shift = bn_bias - running_mean * bn_scale
 
-            # Apply BN to proj weight and bias
             fused_weight = proj_weight * bn_scale.view(-1, 1, 1, 1)
             fused_bias = proj_bias * bn_scale + bn_shift
 
-            # Apply contrastive: w @ fused_weight
-            # w: [K, D], fused_weight: [D, C, 1, 1]
             contrastive_weight = torch.matmul(
-                w * scale,  # [K, D]
-                fused_weight.squeeze(-1).squeeze(-1)  # [D, C]
-            )  # [K, C]
+                w * scale,
+                fused_weight.squeeze(-1).squeeze(-1)
+            )
 
             contrastive_bias = torch.matmul(
-                w * scale,  # [K, D]
-                fused_bias.unsqueeze(-1)  # [D, 1]
-            ).squeeze(-1) + self.bias.data  # [K]
+                w * scale,
+                fused_bias.unsqueeze(-1)
+            ).squeeze(-1) + self.bias.data
 
-            # Create new Conv2d
             new_conv = nn.Conv2d(
                 self.channels, category_prototypes.shape[0], kernel_size=1)
             new_conv.weight.data.copy_(
