@@ -347,7 +347,7 @@ class TopkRouting(nn.Module):
             topk_score = torch.gather(route_weight_full, dim=-1,
                                       index=topk_index)
             topk_score = topk_score * valid_mask.to(topk_score.dtype)
-            topk_score = topk_score * max_len * self.energy
+            topk_score = topk_score * self.energy
 
         if self.debug_route:
             score_detached = topk_score.detach().float()
