@@ -208,7 +208,11 @@ def main():
         # Run forward to get FLOPs
         with torch.no_grad():
             feats = backbone(dummy)
-            head(feats)
+            if isinstance(feats, tuple) and len(feats) == 2 and isinstance(feats[0], tuple):
+                feat_maps, prototypes = feats
+                head(feat_maps, category_prototypes=prototypes)
+            else:
+                head(feats)
 
         for h in head_hooks:
             h.remove()
