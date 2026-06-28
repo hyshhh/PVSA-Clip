@@ -60,8 +60,7 @@ optim_wrapper = dict(
             'norm': dict(decay_mult=0.0),
             'head': dict(lr_mult=10.0),
             'text_encoder': dict(lr_mult=1.0),
-            'cpfm': dict(lr_mult=1.0),
-            'ttrm_alpha': dict(lr_mult=1.0),
+            'ttrm': dict(lr_mult=1.0),
         })
 )
 
@@ -82,5 +81,6 @@ model = dict(
 )
 
 default_hooks = dict(
-    checkpoint=dict(type='CheckpointHook', by_epoch=True, interval=10, save_best='mIoU')
+    checkpoint=dict(type='CheckpointHook', by_epoch=True, interval=10, save_best='mIoU'),
+    grad_monitor=dict(type='GradMonitorHook', interval=100)
 )
