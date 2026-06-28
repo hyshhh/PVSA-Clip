@@ -25,11 +25,7 @@ model = dict(
         qk_dims=[64, 128, 256, 512],
         head_dim=32,
         param_routing=False, diff_routing=False,
-        # Soft routing: route scores modulate KV via (1 + soft_kv_weight * r_weight) * kv
-        # soft_routing=True enables differentiable weighted gather; False = hard index gather
-        soft_routing=True,
-        # soft_kv_weight: modulation strength (0 = pure gather, 0.5 = half-strength, 1 = full soft routing)
-        soft_kv_weight=0.5,
+        soft_routing=False,
         pre_norm=True,
         pe=None,
         auto_pad=True,
