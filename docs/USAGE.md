@@ -36,6 +36,7 @@ CUDA_VISIBLE_DEVICES=0 python tools/test.py configs-h/biformer/biformer_clip_wat
 ```bash
 python tools/deploy_clip_pvsa.py --config configs-h/biformer/biformer_clip_waterseg.py --checkpoint work_dirs/clip_waterseg/best_mIoU_epoch.pth --output work_dirs/deployed/
 ```
+部署后：TextEncoder 移除，Head 融合为 Conv2d，TTRM/Cross-Attn 使用预计算 frozen K/V。
 
 ## 复杂度分析
 ```bash
