@@ -32,6 +32,24 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py configs-h/biform
 CUDA_VISIBLE_DEVICES=0 python tools/test.py configs-h/biformer/biformer_clip_waterseg.py work_dirs/clip_waterseg/epoch_200.pth --show-dir vis_results/
 ```
 
+## 特征图和注意力可视化
+```bash
+# 非 CLIP 路径
+CUDA_VISIBLE_DEVICES=0 python tools/visualize_pvsa.py configs-h/biformer/biformer_baseline_waterseg.py work_dirs/baseline/epoch_200.pth --image demo/demo.png --mode baseline --device cuda:0 --query-index 32
+
+# CLIP 路径
+CUDA_VISIBLE_DEVICES=0 python tools/visualize_pvsa.py configs-h/biformer/biformer_clip_waterseg.py work_dirs/clip_waterseg/epoch_200.pth --image demo/demo.png --mode clip --device cuda:0 --query-index 32
+```
+默认保存位置：
+- 特征图：`demo/feathermap/<baseline|clip>/<图片名>/`
+- 注意力图：`demo/attension_map/<baseline|clip>/<图片名>/`
+
+注意力图包含两个子目录：
+- `route_scores/`：原始一阶段路由的全量窗口权重，可视化为分块热力图，并在每个局部窗口标注 `softmax * energy` 后的得分。
+- `top_p_mask/`：`top-p` 裁剪后实际选中的窗口掩码，未选区域会暗化。
+
+CLIP 路径的特征图会额外保存 `text_injection/`：对启用文本注入的阶段保存注入前、注入后和差异图；没有文本注入的阶段保存在 `stage_outputs/`。
+
 ## 部署
 ```bash
 python tools/deploy_clip_pvsa.py --config configs-h/biformer/biformer_clip_waterseg.py --checkpoint work_dirs/clip_waterseg/epoch_200.pth --output work_dirs/deployed/

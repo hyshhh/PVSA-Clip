@@ -202,6 +202,7 @@ class TopkRouting(nn.Module):
         self.flag = 0
         self.attn_vis_config = _normalize_attn_vis_config(attn_vis_config)
         self._attn_vis_saved = False
+        self._enable_route_debug_cache = False
 
         # TTRM: Text-guided Top-P Routing Module
         self.use_ttrm = use_ttrm
@@ -290,8 +291,10 @@ class TopkRouting(nn.Module):
                 print('[Route] using external GA attention map.')
 
         route_weight_full = None
+        route_score_full_energy = None
         if self.soft_routing:
             route_weight_full = F.softmax(attn, dim=-1)
+            route_score_full_energy = route_weight_full * self.energy
             if self.debug_route:
                 route_detached = route_weight_full.detach().float()
                 print(f'[RouteSoft] flag={self.route_flag} '
@@ -349,6 +352,17 @@ class TopkRouting(nn.Module):
             topk_score = topk_score * valid_mask.to(topk_score.dtype)
             topk_score = topk_score * self.energy
 
+        if route_score_full_energy is None:
+            route_score_full_energy = F.softmax(attn, dim=-1) * self.energy
+        if self._enable_route_debug_cache:
+            self._cache_route_debug(
+                attn=attn,
+                route_score_full_energy=route_score_full_energy,
+                topk_score=topk_score,
+                topk_index=topk_index,
+                valid_mask=valid_mask,
+                keep_len=keep_len)
+
         if self.debug_route:
             score_detached = topk_score.detach().float()
             valid_score = score_detached[valid_mask]
@@ -365,6 +379,23 @@ class TopkRouting(nn.Module):
                   f'after_energy_sum_mean={score_sum:.6f}')
 
         return topk_score, topk_index, valid_mask
+
+    def _cache_route_debug(self, attn: Tensor, route_score_full_energy: Tensor,
+                           topk_score: Tensor, topk_index: Tensor,
+                           valid_mask: Tensor, keep_len: Tensor) -> None:
+        self._last_route_debug = {
+            'attn': attn.detach().cpu(),
+            'route_score_full_energy': route_score_full_energy.detach().cpu(),
+            'topk_score': topk_score.detach().cpu(),
+            'topk_index': topk_index.detach().cpu(),
+            'valid_mask': valid_mask.detach().cpu(),
+            'keep_len': keep_len.detach().cpu(),
+            'route_flag': int(self.route_flag),
+            'configured_topk': int(self.topk),
+            'p': float(self.P),
+            'temperature': float(self.Temperature),
+            'energy': float(self.energy),
+        }
 
     def _maybe_save_attention(self, attn: Tensor, topk_score: Tensor,
                               topk_index: Tensor) -> None:
