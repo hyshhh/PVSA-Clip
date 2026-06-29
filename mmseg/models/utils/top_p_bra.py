@@ -261,7 +261,9 @@ class TopkRouting(nn.Module):
                 key = key.detach()
             q = self.emb(query)
             k = self.emb(key)
-            attn = (q * self.scale) @ k.transpose(-2, -1)   # (n, p2, p2)
+            visual_attn = (q * self.scale) @ k.transpose(-2, -1)
+            attn = visual_attn   # (n, p2, p2)
+            gated_text_bias = None
 
             # TTRM: cross-attention with text before routing
             # Priority: use pre-computed frozen K/V if available (deployment)
@@ -282,17 +284,27 @@ class TopkRouting(nn.Module):
                                    dim=-1)
                 text_bias = q_text @ k_text.transpose(-2, -1)
                 gate = torch.sigmoid(self.ttrm_gate)
-                attn = attn + gate * text_bias
+                gated_text_bias = gate * text_bias
+                attn = attn + gated_text_bias
             elif hasattr(self, '_frozen_alpha'):
                 attn = (1 - self._frozen_alpha) * attn + self._frozen_alpha * attn
         else:
             attn = GA
+            visual_attn = attn
+            gated_text_bias = None
             if self.debug_route:
                 print('[Route] using external GA attention map.')
 
         route_score_full_energy = None
+        route_score_visual_full_energy = None
+        route_score_text_full_energy = None
         if self._enable_route_debug_cache:
             route_score_full_energy = F.softmax(attn, dim=-1) * self.energy
+            route_score_visual_full_energy = (
+                F.softmax(visual_attn, dim=-1) * self.energy)
+            if gated_text_bias is not None:
+                route_score_text_full_energy = (
+                    F.softmax(gated_text_bias, dim=-1) * self.energy)
 
         # 3. Top-k selection (no sorting for speed)
         topk_score, topk_index = torch.topk(
@@ -346,6 +358,8 @@ class TopkRouting(nn.Module):
             self._cache_route_debug(
                 attn=attn,
                 route_score_full_energy=route_score_full_energy,
+                route_score_visual_full_energy=route_score_visual_full_energy,
+                route_score_text_full_energy=route_score_text_full_energy,
                 topk_score=topk_score,
                 topk_index=topk_index,
                 valid_mask=valid_mask,
@@ -369,11 +383,18 @@ class TopkRouting(nn.Module):
         return topk_score, topk_index, valid_mask
 
     def _cache_route_debug(self, attn: Tensor, route_score_full_energy: Tensor,
+                           route_score_visual_full_energy: Tensor,
+                           route_score_text_full_energy: Tensor,
                            topk_score: Tensor, topk_index: Tensor,
                            valid_mask: Tensor, keep_len: Tensor) -> None:
         self._last_route_debug = {
             'attn': attn.detach().cpu(),
             'route_score_full_energy': route_score_full_energy.detach().cpu(),
+            'route_score_visual_full_energy':
+                route_score_visual_full_energy.detach().cpu(),
+            'route_score_text_full_energy':
+                None if route_score_text_full_energy is None
+                else route_score_text_full_energy.detach().cpu(),
             'topk_score': topk_score.detach().cpu(),
             'topk_index': topk_index.detach().cpu(),
             'valid_mask': valid_mask.detach().cpu(),
@@ -487,7 +508,9 @@ class KVGather(nn.Module):
         if self.mul_weight == 'soft':
             # Residual form: (1 + weight * r_weight) * kv
             # soft_weight=0 → pure gather, soft_weight=1 → original soft routing
-            topk_kv = (1 + self.soft_weight * r_weight.view(n, p2, topk, 1, 1)) * topk_kv
+            kv_scale = 1 + self.soft_weight * r_weight.view(n, p2, topk, 1, 1)
+            kv_scale = kv_scale.clamp(min=1.0, max=2.0)
+            topk_kv = kv_scale * topk_kv
         elif self.mul_weight == 'hard':
             raise NotImplementedError('differentiable hard routing TBA')
 

@@ -14,10 +14,10 @@ model = dict(
         topks=[16, 12, 8, 6],
         # Top-P v3 路由参数表
         topp_route_configs={
-            16: dict(maxk=25, p=0.2, temperature=0.0175, energy=4.0),
-            12: dict(maxk=18, p=0.4, temperature=0.025, energy=1.5),
-            8: dict(maxk=36, p=0.6, temperature=0.05, energy=0.75),
-            6: dict(maxk=49, p=0.8, temperature=0.15, energy=0.4),
+            16: dict(maxk=5, p=0.2, temperature=0.4, energy=3.0),
+            12: dict(maxk=10, p=0.4, temperature=1.2, energy=6.0),
+            8: dict(maxk=25, p=0.6, temperature=2.0, energy=25.0),
+            6: dict(maxk=49, p=0.9, temperature=1.5, energy=49.0),
         },
         debug_route=False,
         side_dwconv=5,

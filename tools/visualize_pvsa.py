@@ -417,15 +417,23 @@ def draw_top_p_mask(img_bgr, selected_indices, selected_scores, total,
 def save_route_visuals(routes, img_bgr, attn_root, image_name, query_index,
                        dark_ratio):
     score_dir = osp.join(attn_root, 'route_scores')
+    visual_score_dir = osp.join(score_dir, 'visual')
+    text_score_dir = osp.join(score_dir, 'text')
+    merged_score_dir = osp.join(score_dir, 'merged')
     topp_score_dir = osp.join(attn_root, 'route_scores_topp')
     mask_dir = osp.join(attn_root, 'top_p_mask')
     mkdir(score_dir)
+    mkdir(visual_score_dir)
+    mkdir(text_score_dir)
+    mkdir(merged_score_dir)
     mkdir(topp_score_dir)
     mkdir(mask_dir)
     summary = OrderedDict()
 
     for name, _module, route_debug, stage_idx, block_idx in routes:
         route_scores = route_debug['route_score_full_energy']
+        visual_route_scores = route_debug.get('route_score_visual_full_energy')
+        text_route_scores = route_debug.get('route_score_text_full_energy')
         topk_score = route_debug['topk_score']
         topk_index = route_debug['topk_index']
         valid_mask = route_debug['valid_mask']
@@ -437,6 +445,12 @@ def save_route_visuals(routes, img_bgr, attn_root, image_name, query_index,
             print(f'query_index {query_index} exceeds {total_queries}; use {query}.')
 
         scores = route_scores[0, query].numpy()
+        visual_scores = None
+        text_scores = None
+        if visual_route_scores is not None:
+            visual_scores = visual_route_scores[0, query].numpy()
+        if text_route_scores is not None:
+            text_scores = text_route_scores[0, query].numpy()
         valid = valid_mask[0, query].bool().numpy()
         chosen = topk_index[0, query].numpy()[valid].astype(np.int64)
         chosen_scores = topk_score[0, query].numpy()[valid].astype(np.float32)
@@ -446,9 +460,22 @@ def save_route_visuals(routes, img_bgr, attn_root, image_name, query_index,
         clean_name = sanitize_name(name)
         prefix = f'{image_name}_{clean_name}_q{query}'
 
-        score_overlay = draw_route_score_overlay(
+        merged_overlay = draw_route_score_overlay(
             img_bgr, scores, target_index=query)
-        cv2.imwrite(osp.join(score_dir, f'{prefix}.png'), score_overlay)
+        cv2.imwrite(osp.join(merged_score_dir, f'{prefix}.png'),
+                    merged_overlay)
+
+        if visual_scores is not None:
+            visual_overlay = draw_route_score_overlay(
+                img_bgr, visual_scores, target_index=query)
+            cv2.imwrite(osp.join(visual_score_dir, f'{prefix}.png'),
+                        visual_overlay)
+
+        if text_scores is not None:
+            text_overlay = draw_route_score_overlay(
+                img_bgr, text_scores, target_index=query)
+            cv2.imwrite(osp.join(text_score_dir, f'{prefix}.png'),
+                        text_overlay)
 
         topp_score_overlay = draw_route_score_overlay(
             img_bgr, sparse_topp_scores, target_index=query)
