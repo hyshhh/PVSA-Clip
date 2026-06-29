@@ -267,25 +267,34 @@ class TopkRouting(nn.Module):
 
             # TTRM: cross-attention with text before routing
             # Priority: use pre-computed frozen K/V if available (deployment)
-            has_frozen_kv = (hasattr(self, '_frozen_tc_k')
-                             and self._frozen_tc_k is not None)
+            has_frozen_kv = (
+                hasattr(self, '_frozen_tc_k')
+                and self._frozen_tc_k is not None
+                and hasattr(self, '_frozen_tc_v')
+                and self._frozen_tc_v is not None)
             if has_frozen_kv:
                 tc_k = self._frozen_tc_k
+                tc_v = self._frozen_tc_v
             elif self.use_ttrm and category_prototypes is not None:
                 tc = self.ttrm_norm(category_prototypes)
                 tc_k = self.ttrm_text_proj(tc)
+                tc_v = self.ttrm_text_v_proj(tc)
             else:
                 tc_k = None
+                tc_v = None
 
-            if tc_k is not None:
-                q_text = F.softmax((q * self.scale) @ tc_k.transpose(-2, -1),
-                                   dim=-1)
-                k_text = F.softmax((k * self.scale) @ tc_k.transpose(-2, -1),
-                                   dim=-1)
-                text_bias = q_text @ k_text.transpose(-2, -1)
+            if tc_k is not None and tc_v is not None:
                 gate = torch.sigmoid(self.ttrm_gate)
-                gated_text_bias = gate * text_bias
-                attn = attn + gated_text_bias
+                q_text_attn = F.softmax(
+                    (q * self.scale) @ tc_k.transpose(-2, -1), dim=-1)
+                k_text_attn = F.softmax(
+                    (k * self.scale) @ tc_k.transpose(-2, -1), dim=-1)
+                q_text = self.ttrm_out_proj(q_text_attn @ tc_v)
+                k_text = self.ttrm_out_proj(k_text_attn @ tc_v)
+                q_aug = q + gate * q_text
+                k_aug = k + gate * k_text
+                attn = (q_aug * self.scale) @ k_aug.transpose(-2, -1)
+                gated_text_bias = attn - visual_attn
             elif hasattr(self, '_frozen_alpha'):
                 attn = (1 - self._frozen_alpha) * attn + self._frozen_alpha * attn
         else:
@@ -482,6 +491,7 @@ class TopkRouting(nn.Module):
             return
         tc = self.ttrm_norm(text_prototypes)
         self._frozen_tc_k = self.ttrm_text_proj(tc)
+        self._frozen_tc_v = self.ttrm_text_v_proj(tc)
 
 
 class KVGather(nn.Module):
