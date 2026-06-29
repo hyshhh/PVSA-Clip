@@ -51,6 +51,7 @@ CUDA_VISIBLE_DEVICES=0 python tools/visualize_pvsa.py configs-h/biformer/biforme
 
 注意力图包含两个子目录：
 - `route_scores/`：原始一阶段路由的全量窗口权重，可视化为分块热力图，并在每个局部窗口标注 `softmax * energy` 后的得分。
+- `route_scores_topp/`：`top-k` 内温度软化、再经 `top-p` 截断后的实际软路由权重，也就是送入 `KV` 加权的权重。
 - `top_p_mask/`：`top-p` 裁剪后实际选中的窗口掩码，未选区域会暗化。
 
 CLIP 路径的特征图会额外保存 `text_injection/`：对启用文本注入的阶段保存注入前、注入后和差异图；没有文本注入的阶段保存在 `stage_outputs/`。

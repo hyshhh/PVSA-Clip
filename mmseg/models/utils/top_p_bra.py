@@ -290,17 +290,9 @@ class TopkRouting(nn.Module):
             if self.debug_route:
                 print('[Route] using external GA attention map.')
 
-        route_weight_full = None
         route_score_full_energy = None
-        if self.soft_routing:
-            route_weight_full = F.softmax(attn, dim=-1)
-            route_score_full_energy = route_weight_full * self.energy
-            if self.debug_route:
-                route_detached = route_weight_full.detach().float()
-                print(f'[RouteSoft] flag={self.route_flag} '
-                      f'max={route_detached.max().item():.6f} '
-                      f'mean={route_detached.mean().item():.6f} '
-                      f'entropy={-(route_detached * (route_detached + 1e-12).log()).sum(dim=-1).mean().item():.6f}')
+        if self._enable_route_debug_cache:
+            route_score_full_energy = F.softmax(attn, dim=-1) * self.energy
 
         # 3. Top-k selection (no sorting for speed)
         topk_score, topk_index = torch.topk(
@@ -344,16 +336,12 @@ class TopkRouting(nn.Module):
         topk_score = topk_score * valid_mask.to(topk_score.dtype)
         topk_index = topk_index.masked_fill(~valid_mask, 0)
 
-        # soft routing: use full softmax weights + energy compensation
-        # hard routing: topk_score only used for Top-P pruning (not for KV weighting)
-        if route_weight_full is not None:
-            topk_score = torch.gather(route_weight_full, dim=-1,
-                                      index=topk_index)
+        # BiFormer-style soft routing: keep the top-k softmax weights,
+        # then apply Top-P pruning and energy compensation.
+        if self.soft_routing:
             topk_score = topk_score * valid_mask.to(topk_score.dtype)
             topk_score = topk_score * self.energy
 
-        if route_score_full_energy is None:
-            route_score_full_energy = F.softmax(attn, dim=-1) * self.energy
         if self._enable_route_debug_cache:
             self._cache_route_debug(
                 attn=attn,

@@ -417,13 +417,16 @@ def draw_top_p_mask(img_bgr, selected_indices, selected_scores, total,
 def save_route_visuals(routes, img_bgr, attn_root, image_name, query_index,
                        dark_ratio):
     score_dir = osp.join(attn_root, 'route_scores')
+    topp_score_dir = osp.join(attn_root, 'route_scores_topp')
     mask_dir = osp.join(attn_root, 'top_p_mask')
     mkdir(score_dir)
+    mkdir(topp_score_dir)
     mkdir(mask_dir)
     summary = OrderedDict()
 
     for name, _module, route_debug, stage_idx, block_idx in routes:
         route_scores = route_debug['route_score_full_energy']
+        topk_score = route_debug['topk_score']
         topk_index = route_debug['topk_index']
         valid_mask = route_debug['valid_mask']
         if route_scores.dim() != 3:
@@ -436,13 +439,21 @@ def save_route_visuals(routes, img_bgr, attn_root, image_name, query_index,
         scores = route_scores[0, query].numpy()
         valid = valid_mask[0, query].bool().numpy()
         chosen = topk_index[0, query].numpy()[valid].astype(np.int64)
-        chosen_scores = scores[chosen] if chosen.size > 0 else np.array([])
+        chosen_scores = topk_score[0, query].numpy()[valid].astype(np.float32)
+        sparse_topp_scores = np.zeros_like(scores, dtype=np.float32)
+        if chosen.size > 0:
+            sparse_topp_scores[chosen] = chosen_scores
         clean_name = sanitize_name(name)
         prefix = f'{image_name}_{clean_name}_q{query}'
 
         score_overlay = draw_route_score_overlay(
             img_bgr, scores, target_index=query)
         cv2.imwrite(osp.join(score_dir, f'{prefix}.png'), score_overlay)
+
+        topp_score_overlay = draw_route_score_overlay(
+            img_bgr, sparse_topp_scores, target_index=query)
+        cv2.imwrite(osp.join(topp_score_dir, f'{prefix}.png'),
+                    topp_score_overlay)
 
         mask_overlay = draw_top_p_mask(
             img_bgr=img_bgr,
