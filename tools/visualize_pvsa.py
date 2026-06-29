@@ -439,6 +439,7 @@ def save_route_visuals(routes, img_bgr, attn_root, image_name, query_index,
         topk_score = route_debug['topk_score']
         topk_index = route_debug['topk_index']
         valid_mask = route_debug['valid_mask']
+        kv_scale = route_debug.get('kv_scale')
         if route_scores.dim() != 3:
             continue
         total_queries = route_scores.shape[1]
@@ -456,6 +457,10 @@ def save_route_visuals(routes, img_bgr, attn_root, image_name, query_index,
         valid = valid_mask[0, query].bool().numpy()
         chosen = topk_index[0, query].numpy()[valid].astype(np.int64)
         chosen_scores = topk_score[0, query].numpy()[valid].astype(np.float32)
+        if kv_scale is not None:
+            chosen_kv_scales = kv_scale[0, query].numpy()[valid].astype(np.float32)
+        else:
+            chosen_kv_scales = chosen_scores
         sparse_topp_scores = np.zeros_like(scores, dtype=np.float32)
         if chosen.size > 0:
             sparse_topp_scores[chosen] = chosen_scores
@@ -487,7 +492,7 @@ def save_route_visuals(routes, img_bgr, attn_root, image_name, query_index,
         mask_overlay = draw_top_p_mask(
             img_bgr=img_bgr,
             selected_indices=chosen,
-            selected_scores=chosen_scores,
+            selected_scores=chosen_kv_scales,
             total=scores.shape[0],
             dark_ratio=dark_ratio,
             target_index=query)
@@ -503,7 +508,8 @@ def save_route_visuals(routes, img_bgr, attn_root, image_name, query_index,
             temperature=route_debug.get('temperature'),
             energy=route_debug.get('energy'),
             selected_indices=chosen.tolist(),
-            selected_scores=[float(x) for x in chosen_scores.tolist()])
+            selected_scores=[float(x) for x in chosen_scores.tolist()],
+            selected_kv_scales=[float(x) for x in chosen_kv_scales.tolist()])
 
     if summary:
         with open(osp.join(attn_root, f'{image_name}_route_summary.json'),

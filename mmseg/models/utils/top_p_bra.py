@@ -829,6 +829,13 @@ class ToppAttention(nn.Module):
             'router',
             lambda: self.router(q_win, k_win, GA, category_prototypes=category_prototypes))  # (n, p^2, topk) tensors
 
+        if (getattr(self.router, '_enable_route_debug_cache', False)
+                and hasattr(self.router, '_last_route_debug')
+                and self.soft_routing):
+            kv_scale = 1 + self.kv_gather.soft_weight * r_weight
+            kv_scale = kv_scale.clamp(min=1.0, max=2.0)
+            self.router._last_route_debug['kv_scale'] = kv_scale.detach().cpu()
+
         kv_pix_sel = self.kv_gather(r_idx=r_idx, r_weight=r_weight, kv=kv_pix)  # (n, p^2, topk, h_kv*w_kv, c_qk+c_v)
         k_pix_sel, v_pix_sel = kv_pix_sel.split([self.qk_dim, self.dim], dim=-1)
 
