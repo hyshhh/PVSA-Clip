@@ -299,12 +299,13 @@ class TopkRouting(nn.Module):
         route_score_visual_full_energy = None
         route_score_text_full_energy = None
         if self._enable_route_debug_cache:
-            route_score_full_energy = F.softmax(attn, dim=-1) * self.energy
-            route_score_visual_full_energy = (
-                F.softmax(visual_attn, dim=-1) * self.energy)
+            route_prob = F.softmax(attn, dim=-1)
+            route_prob_visual = F.softmax(visual_attn, dim=-1)
+            route_score_full_energy = route_prob * self.energy
+            route_score_visual_full_energy = route_prob_visual * self.energy
             if gated_text_bias is not None:
                 route_score_text_full_energy = (
-                    F.softmax(gated_text_bias, dim=-1) * self.energy)
+                    route_prob - route_prob_visual) * self.energy
 
         # 3. Top-k selection (no sorting for speed)
         topk_score, topk_index = torch.topk(

@@ -362,6 +362,8 @@ def put_centered_text(img, text, x0, y0, x1, y1, bg_value):
 def score_text(value):
     if abs(value) >= 1:
         return f'{value:.2f}'
+    if abs(value) < 0.01:
+        return f'{value:.4f}'
     return f'{value:.3f}'
 
 

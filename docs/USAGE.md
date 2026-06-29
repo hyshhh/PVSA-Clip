@@ -50,7 +50,7 @@ CUDA_VISIBLE_DEVICES=0 python tools/visualize_pvsa.py configs-h/biformer/biforme
 - 注意力图：`demo/attension_map/<baseline|clip>/<图片名>/`
 
 注意力图包含三个子目录：
-- `route_scores/`：原始一阶段路由的全量窗口权重，可视化为分块热力图，并在每个局部窗口标注 `softmax * energy` 后的得分。CLIP 路径下会进一步分成 `visual/`、`text/`、`merged/`，分别对应纯视觉得分、文本注入得分、合并后得分。
+- `route_scores/`：原始一阶段路由的全量窗口权重，可视化为分块热力图，并在每个局部窗口标注 `softmax * energy` 后的得分。CLIP 路径下会进一步分成 `visual/`、`text/`、`merged/`，分别对应纯视觉得分、文本注入带来的分布变化量、合并后得分。
 - `route_scores_topp/`：`top-k` 内温度软化、再经 `top-p` 截断后的软路由分数。训练时最终乘到 `KV` 上的是 `1 + soft_kv_weight * 分数`，并会截断到 `[1, 2]`。
 - `top_p_mask/`：`top-p` 裁剪后实际选中的窗口掩码，未选区域会暗化。
 
