@@ -256,7 +256,7 @@ class TopkRouting(nn.Module):
     def forward(self, query: Tensor, key: Tensor, GA, category_prototypes=None):
 
         if self.W == False or GA == None:
-            if not self.diff_routing and not self.soft_routing:
+            if not self.diff_routing:
                 query = query.detach()
                 key = key.detach()
             q = self.emb(query)
@@ -549,7 +549,7 @@ class ToppAttention(nn.Module):
         self.use_fast_attention = use_fast_attention
         self.topp_flash_debug = topp_flash_debug
         self._topp_flash_warned = False
-        self.route_pooling = 'avgmax'
+        self.route_pooling = 'avg'
 
         ################side_dwconv (i.e. LCE in ShuntedTransformer)###########
         self.lepe = nn.Conv2d(dim, dim, kernel_size=side_dwconv, stride=1, padding=side_dwconv // 2,
