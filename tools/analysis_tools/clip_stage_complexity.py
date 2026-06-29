@@ -133,6 +133,12 @@ def main():
     for h in bb_hooks:
         h.remove()
 
+    # Debug: print all TTRM-related FLOPs entries
+    print('[DEBUG] TTRM-related flops:')
+    for k, v in sorted(bb_flops_dict.items()):
+        if 'ttrm' in k.lower():
+            print(f'  {k}: {v/1e6:.2f}M')
+
     # Stage-level breakdown
     fam_stages = set(getattr(backbone, 'fam_stages', (0, 1, 2, 3)))
     fusion_stages = set(getattr(backbone, 'fusion_stages', (0, 1, 2, 3)))
