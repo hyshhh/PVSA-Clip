@@ -110,6 +110,11 @@ def main():
         n_windows = (h // n_win) * (w // n_win)  # number of windows
         n_tokens = h * w  # total tokens
 
+        # Top-P truncation: effective topk ≈ maxk * P
+        route_cfg = bb_cfg.get('topp_route_configs', {})
+        p_threshold = route_cfg.get(topk, {}).get('p', 0.5)
+        effective_topk = max(1, int(topk * p_threshold))
+
         # --- Transformer block FLOPs ---
         # 1. pos_embed (dwconv before attn): 2 * d * k^2 * n_tokens
         pos_embed_flops = 2 * d * 3 * 3 * n_tokens
@@ -117,11 +122,11 @@ def main():
         # 2. QKV projection: 3 * (2 * d * qk) * n_tokens
         qkv_flops = 3 * 2 * d * qk * n_tokens
 
-        # 3. Window attention with topk routing:
+        # 3. Window attention with topk routing (after Top-P truncation):
         #    Q,K per window: [win_size, head_dim]
-        #    attn = Q @ K.T: [win_size, topk * win_size] per window
+        #    attn = Q @ K.T: [win_size, effective_topk * win_size] per window
         #    out = attn @ V: same
-        attn_flops = 2 * n_windows * n_heads * win_size * head_dim * topk * win_size * 2
+        attn_flops = 2 * n_windows * n_heads * win_size * head_dim * effective_topk * win_size * 2
 
         # 4. Output projection: 2 * qk * d * n_tokens
         out_proj_flops = 2 * qk * d * n_tokens
