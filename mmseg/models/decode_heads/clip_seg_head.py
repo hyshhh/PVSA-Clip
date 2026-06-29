@@ -89,16 +89,17 @@ class CLIPSegHead(BaseDecodeHead):
         out = self.fusion_conv(torch.cat(outs, dim=1))
 
         out = self.proj_norm(out)
-        out = self.proj(out)  # [B, embed_dim, H, W]
+        out = self.proj(out)  # [B, embed_dim, H, W] or [B, channels, H, W] if fused
+
+        # After fusion, proj is Identity and cls_seg is the fused Conv2d
+        if isinstance(self.proj, nn.Identity):
+            return self.cls_seg(out)
 
         prototypes = category_prototypes
         if prototypes is None:
             prototypes = self._inference_prototypes
 
         if prototypes is not None:
-            # BN + dot product (same as YOLOE BNContrastiveHead)
-            # BN handles normalization, dot product with fixed prototypes
-            # This is fusible into a single Conv2d for deployment
             w = prototypes.unsqueeze(0)  # [1, K, D]
             seg_logits = torch.einsum("bchw,bkc->bkhw", out, w)
             seg_logits = seg_logits * self.logit_scale.exp() + self.bias
