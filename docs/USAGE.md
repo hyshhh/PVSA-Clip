@@ -67,5 +67,5 @@ GPU 架构检测失败：`export PVSA_TOPP_FLASH_ARCH="8.6"`
 - CUDA 核路径只面向推理，不用于训练。
 - 调整 `energy`/`p`/`temperature`/`maxk` 修改配置中的 `topp_route_configs`。
 - CLIP Text Encoder 训练时冻结，部署推理时移除。
-- 部署后模型等价于原始 PVSA-Net + 1x1 Conv，零额外推理开销。
+- 部署后：TextEncoder 移除，Head 融合为 Conv2d，TTRM/Cross-Attn 使用预计算 frozen K/V 交互。
 - 服务器训练前确保在 `pvsa-v3.0` 分支：`git checkout pvsa-v3.0 && git pull`
