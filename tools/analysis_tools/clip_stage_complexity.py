@@ -123,21 +123,25 @@ def main():
     if hasattr(backbone, '_disable_inference_fusion'):
         backbone._disable_inference_fusion = True
 
+    num_classes = cfg.model.decode_head.get('num_classes', 3)
+    embed_dim = cfg.model.text_encoder.get('embed_dim', 512)
+    dummy_protos = torch.randn(num_classes, embed_dim, device=device)
+
+    # Simulate inference: fuse all CLIP modules
+    if hasattr(model, 'fuse_for_deployment'):
+        with torch.no_grad():
+            model.frozen_prototypes.copy_(dummy_protos)
+            model._prototypes_frozen = True
+            # Freeze TTRM and cross-attention
+            for module in backbone.modules():
+                if hasattr(module, 'freeze_for_deployment'):
+                    module.freeze_for_deployment(dummy_protos)
+
     bb_flops_dict, bb_hooks = _register_flops_hooks(backbone)
     with torch.no_grad():
-        # dummy prototypes for TTRM / cross-attention activation
-        num_classes = cfg.model.decode_head.get('num_classes', 3)
-        embed_dim = cfg.model.text_encoder.get('embed_dim', 512)
-        dummy_protos = torch.randn(num_classes, embed_dim, device=device)
         backbone(dummy, category_prototypes=dummy_protos)
     for h in bb_hooks:
         h.remove()
-
-    # Debug: print all TTRM-related FLOPs entries
-    print('[DEBUG] TTRM-related flops:')
-    for k, v in sorted(bb_flops_dict.items()):
-        if 'ttrm' in k.lower():
-            print(f'  {k}: {v/1e6:.2f}M')
 
     # Stage-level breakdown
     fam_stages = set(getattr(backbone, 'fam_stages', (0, 1, 2, 3)))
@@ -195,22 +199,20 @@ def main():
     # ---- Text Encoder analysis ----
     if hasattr(model, 'text_encoder') and model.text_encoder is not None:
         text_enc = model.text_encoder
-        text_enc.eval()
         te_params = _count_params(text_enc)
         print('\n' + '=' * 80)
-        print('Text Encoder')
+        print('Text Encoder (removed after fusion)')
         print('=' * 80)
-        print(f'  Params: {_format(te_params)}')
-        print(f'  Frozen: {not any(p.requires_grad for p in text_enc.parameters())}')
+        print(f'  Params: {_format(te_params)} (not counted in total)')
 
     # ---- Decode Head analysis ----
     if hasattr(model, 'decode_head') and model.decode_head is not None:
         head = model.decode_head
         head.eval()
-        # freeze prototypes for inference simulation
-        if hasattr(model, '_prototypes_frozen'):
-            model._prototypes_frozen = True
-            model.frozen_prototypes.copy_(dummy_protos)
+        # Fuse head for inference simulation (BN + proj + contrastive -> Conv2d)
+        if hasattr(head, 'fuse_for_deployment'):
+            with torch.no_grad():
+                head.fuse_for_deployment(dummy_protos)
 
         head_flops_dict, head_hooks = _register_flops_hooks(head)
         with torch.no_grad():
@@ -222,7 +224,7 @@ def main():
         head_params = _count_params(head)
         head_flops = sum(head_flops_dict.values())
         print('\n' + '=' * 80)
-        print('Decode Head (CLIPSegHead)')
+        print('Decode Head (CLIPSegHead, fused)')
         print('=' * 80)
         print(f'  Params: {_format(head_params)}')
         print(f'  FLOPs:  {head_flops / 1e6:.2f}M')
