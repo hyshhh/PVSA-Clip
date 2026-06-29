@@ -307,6 +307,33 @@ def block_bounds(index, grid, h, w):
     return x0, y0, x1, y1
 
 
+def star_points(cx, cy, outer_radius, inner_radius):
+    points = []
+    for idx in range(10):
+        angle = -np.pi / 2 + idx * np.pi / 5
+        radius = outer_radius if idx % 2 == 0 else inner_radius
+        x = int(round(cx + radius * np.cos(angle)))
+        y = int(round(cy + radius * np.sin(angle)))
+        points.append([x, y])
+    return np.array(points, dtype=np.int32)
+
+
+def draw_target_star(img, target_index, grid):
+    h, w = img.shape[:2]
+    total = grid * grid
+    if target_index < 0 or target_index >= total:
+        return
+    x0, y0, x1, y1 = block_bounds(target_index, grid, h, w)
+    cx = (x0 + x1) // 2
+    cy = (y0 + y1) // 2
+    cell = max(6, min(x1 - x0, y1 - y0))
+    outer = max(5, int(cell * 0.32))
+    inner = max(2, int(outer * 0.45))
+    pts = star_points(cx, cy, outer, inner)
+    cv2.fillPoly(img, [pts], (0, 215, 255), cv2.LINE_AA)
+    cv2.polylines(img, [pts], True, (0, 0, 0), 2, cv2.LINE_AA)
+
+
 def draw_grid(img, grid, color=(255, 255, 255)):
     h, w = img.shape[:2]
     for i in range(1, grid):
@@ -338,7 +365,7 @@ def score_text(value):
     return f'{value:.3f}'
 
 
-def draw_route_score_overlay(img_bgr, scores):
+def draw_route_score_overlay(img_bgr, scores, target_index=None):
     h, w = img_bgr.shape[:2]
     total = int(scores.shape[0])
     grid = int(round(total ** 0.5))
@@ -358,10 +385,13 @@ def draw_route_score_overlay(img_bgr, scores):
         x0, y0, x1, y1 = block_bounds(idx, grid, h, w)
         put_centered_text(
             overlay, score_text(float(value)), x0, y0, x1, y1, norm[idx])
+    if target_index is not None:
+        draw_target_star(overlay, int(target_index), grid)
     return overlay
 
 
-def draw_top_p_mask(img_bgr, selected_indices, selected_scores, total, dark_ratio):
+def draw_top_p_mask(img_bgr, selected_indices, selected_scores, total,
+                    dark_ratio, target_index=None):
     h, w = img_bgr.shape[:2]
     grid = int(round(total ** 0.5))
     if grid * grid != total:
@@ -379,6 +409,8 @@ def draw_top_p_mask(img_bgr, selected_indices, selected_scores, total, dark_rati
         x0, y0, x1, y1 = block_bounds(int(idx), grid, h, w)
         put_centered_text(
             overlay, score_text(float(score)), x0, y0, x1, y1, 1.0)
+    if target_index is not None:
+        draw_target_star(overlay, int(target_index), grid)
     return overlay
 
 
@@ -408,7 +440,8 @@ def save_route_visuals(routes, img_bgr, attn_root, image_name, query_index,
         clean_name = sanitize_name(name)
         prefix = f'{image_name}_{clean_name}_q{query}'
 
-        score_overlay = draw_route_score_overlay(img_bgr, scores)
+        score_overlay = draw_route_score_overlay(
+            img_bgr, scores, target_index=query)
         cv2.imwrite(osp.join(score_dir, f'{prefix}.png'), score_overlay)
 
         mask_overlay = draw_top_p_mask(
@@ -416,7 +449,8 @@ def save_route_visuals(routes, img_bgr, attn_root, image_name, query_index,
             selected_indices=chosen,
             selected_scores=chosen_scores,
             total=scores.shape[0],
-            dark_ratio=dark_ratio)
+            dark_ratio=dark_ratio,
+            target_index=query)
         cv2.imwrite(osp.join(mask_dir, f'{prefix}.png'), mask_overlay)
 
         summary[clean_name] = dict(
