@@ -20,13 +20,13 @@ class BiFormer_fusion_baseline(VTFormer):
         super().__init__(**kwargs)
         self.extra_norms = nn.ModuleList()
         self.bn = nn.ModuleList()
-        self.conv12=nn.ModuleList()
-        self.conv11=nn.ModuleList()
+        self.cnn_conv=nn.ModuleList()
+        self.trans_conv=nn.ModuleList()
         for i in range(4):
             self.extra_norms.append(LayerNorm2d(self.embed_dim[i]))
             self.bn.append(nn.BatchNorm2d(self.embed_dim[i]))
-            self.conv12.append(nn.Conv2d(2*self.embed_dim[i],self.embed_dim[i],1,1,0))
-            self.conv11.append(nn.Conv2d(2*self.embed_dim[i],self.embed_dim[i],1,1,0))
+            self.cnn_conv.append(nn.Conv2d(2*self.embed_dim[i],self.embed_dim[i],1,1,0))
+            self.trans_conv.append(nn.Conv2d(2*self.embed_dim[i],self.embed_dim[i],1,1,0))
             
             
         self.apply(self._init_weights)
@@ -75,47 +75,47 @@ class BiFormer_fusion_baseline(VTFormer):
             os.makedirs(vis_dir, exist_ok=True)
 
         out = []
-        cnn_encoder_out = x
-        channel1=[]
-        channel2=[]
-        channel3=[]
+        cnn_out = x
+        trans_features=[]
+        cnn_features=[]
+        fused_features=[]
         for i in range(4):
             if vis_enabled and (not vis_once or not getattr(self, '_feature_vis_saved', False)):
                 self._save_feature_channel_as_image(x, f'{vis_dir}/stage{i}_xinput.png', vis_out_size, vis_reduce)
-            cnn_encoder_out = self.downsample_layers2[i](cnn_encoder_out)
-            x = self.downsample_layers[i](x)
+            cnn_out = self.cnn_downsample_layers[i](cnn_out)
+            x = self.trans_downsample_layers[i](x)
             x = self.stages[i](x)
             if vis_enabled and (not vis_once or not getattr(self, '_feature_vis_saved', False)):
                 self._save_feature_channel_as_image(x, f'{vis_dir}/stage{i}_before_FAM_x.png', vis_out_size, vis_reduce)
-                self._save_feature_channel_as_image(cnn_encoder_out, f'{vis_dir}/stage{i}_before_FAM_cnn.png', vis_out_size, vis_reduce)
+                self._save_feature_channel_as_image(cnn_out, f'{vis_dir}/stage{i}_before_FAM_cnn.png', vis_out_size, vis_reduce)
 
-            x, cnn_encoder_out = self.FAM[i](x, cnn_encoder_out)
-            channel1.append(x)
-            channel2.append(cnn_encoder_out)
+            x, cnn_out = self.FAM[i](x, cnn_out)
+            trans_features.append(x)
+            cnn_features.append(cnn_out)
 
             if vis_enabled and (not vis_once or not getattr(self, '_feature_vis_saved', False)):
                 self._save_feature_channel_as_image(x, f'{vis_dir}/stage{i}_after_FAM_x.png', vis_out_size, vis_reduce)
-                self._save_feature_channel_as_image(cnn_encoder_out, f'{vis_dir}/stage{i}_after_FAM_cnn.png', vis_out_size, vis_reduce)
+                self._save_feature_channel_as_image(cnn_out, f'{vis_dir}/stage{i}_after_FAM_cnn.png', vis_out_size, vis_reduce)
 
         for i in range(4):
-            channel3.append(self.fusion[i](torch.cat((channel1[i], channel2[i]), dim=1)))
+            fused_features.append(self.fusion[i](torch.cat((trans_features[i], cnn_features[i]), dim=1)))
         for i in range(3):
-            C1=self.conv11[i](channel1[i + 1])
-            C2=self.conv12[i](channel2[i + 1])
-            bn_channel1 = self.sigmoid(self.bn[i](C1))
-            bn_channel2 = self.sigmoid(self.bn[i](C2))
-            target_size = channel3[i].shape[2:]
-            mask1 = F.interpolate(bn_channel1, size=target_size, mode='bilinear', align_corners=False)
-            mask2 = F.interpolate(bn_channel2, size=target_size, mode='bilinear', align_corners=False)
+            trans_proj = self.trans_conv[i](trans_features[i + 1])
+            cnn_proj = self.cnn_conv[i](cnn_features[i + 1])
+            trans_mask = self.sigmoid(self.bn[i](trans_proj))
+            cnn_mask = self.sigmoid(self.bn[i](cnn_proj))
+            target_size = fused_features[i].shape[2:]
+            trans_mask = F.interpolate(trans_mask, size=target_size, mode='bilinear', align_corners=False)
+            cnn_mask = F.interpolate(cnn_mask, size=target_size, mode='bilinear', align_corners=False)
             if vis_enabled and (not vis_once or not getattr(self, '_feature_vis_saved', False)) and i==0:
-                self._save_feature_channel_as_image(mask1, f'{vis_dir}/mask1.png', vis_out_size, vis_reduce)
-                self._save_feature_channel_as_image(mask2, f'{vis_dir}/mask2.png', vis_out_size, vis_reduce)
-            channel3[i] = channel3[i] * (1 + mask1 + mask2)
+                self._save_feature_channel_as_image(trans_mask, f'{vis_dir}/trans_mask.png', vis_out_size, vis_reduce)
+                self._save_feature_channel_as_image(cnn_mask, f'{vis_dir}/cnn_mask.png', vis_out_size, vis_reduce)
+            fused_features[i] = fused_features[i] * (1 + 2 * trans_mask)
 
         for i in range(4):
             if vis_enabled and (not vis_once or not getattr(self, '_feature_vis_saved', False)):
-                self._save_feature_channel_as_image(channel3[i], f'{vis_dir}/stage{i}_after_channel.png', vis_out_size, vis_reduce)
-            out.append(self.extra_norms[i](channel3[i]))
+                self._save_feature_channel_as_image(fused_features[i], f'{vis_dir}/stage{i}_after_channel.png', vis_out_size, vis_reduce)
+            out.append(self.extra_norms[i](fused_features[i]))
 
         if vis_enabled:
             self._feature_vis_saved = True
@@ -182,10 +182,10 @@ class BiFormer_fusion_baseline(VTFormer):
             return
         # Fuse parent (VTFormer) conv-bn layers
         super().optimize_for_inference()
-        for idx in range(len(self.conv11)):
+        for idx in range(len(self.trans_conv)):
             bn = self.bn[idx]
             if isinstance(bn, nn.modules.batchnorm._BatchNorm) and not bn.training:
-                self.conv11[idx] = fuse_conv_bn_eval(self.conv11[idx], bn)
+                self.trans_conv[idx] = fuse_conv_bn_eval(self.trans_conv[idx], bn)
                 self.bn[idx] = nn.Identity()
         if getattr(self, 'topp_flash_backend', None) in ('cuda', 'cuda_forward'):
             _load_cuda_extension()

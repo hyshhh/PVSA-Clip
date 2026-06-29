@@ -155,10 +155,10 @@ def main():
         effective_topk = max(1, int(topk * p))
 
         # Module FLOPs for this stage (from hooks)
-        stage_prefixes = [f'backbone.downsample_layers.{stage}',
+        stage_prefixes = [f'backbone.trans_downsample_layers.{stage}',
                           f'backbone.stages.{stage}',
                           f'backbone.extra_norms.{stage}',
-                          f'backbone.conv11.{stage}',
+                          f'backbone.trans_conv.{stage}',
                           f'backbone.bn.{stage}']
         stage_module_flops = 0
         for name, flops in module_flops_dict.items():

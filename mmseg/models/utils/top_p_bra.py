@@ -40,11 +40,7 @@ def _use_topp_cuda_backend(backend: Optional[str]) -> bool:
     return _normalize_topp_backend(backend) in ('cuda', 'cuda_forward')
 
 
-def _normalize_route_configs(route_configs: Optional[Dict]) -> Dict[int, Dict]:
-    if not route_configs:
-        raise ValueError(
-            'topp_route_configs must be provided by config when using '
-            'ToppAttention.')
+def _normalize_route_configs(route_configs: Dict) -> Dict[int, Dict]:
     return {int(key): dict(value) for key, value in route_configs.items()}
 
 
@@ -199,7 +195,6 @@ class TopkRouting(nn.Module):
         self.emb = nn.Linear(qk_dim, qk_dim) if param_routing else nn.Identity()
         # routing activate
         self.routing_act = nn.Softmax(dim=-1)
-        self.flag = 0
         self.attn_vis_config = _normalize_attn_vis_config(attn_vis_config)
         self._attn_vis_saved = False
         self._enable_route_debug_cache = False
@@ -214,41 +209,21 @@ class TopkRouting(nn.Module):
             self.ttrm_norm = nn.LayerNorm(text_dim)
             self.ttrm_gate = nn.Parameter(torch.tensor([-2.0]))
 
-        # V1.1 hardcoded route parameters (unchanged)
-        # top-p-v2/3_2025_12_25
-        if route_configs is not None:
-            route_configs = _normalize_route_configs(route_configs)
-            if self.route_flag not in route_configs:
-                raise KeyError(
-                    f'topk flag {self.route_flag} is not configured in '
-                    'topp_route_configs.')
-            route_config = route_configs[self.route_flag]
-            self.topk = int(route_config['maxk'])
-            self.P = float(route_config['p'])
-            self.Temperature = float(route_config['temperature'])
-            self.energy = float(route_config['energy'])
-        else:
-            # Fallback to V1.1 hardcoded values
-            if self.route_flag == 16:
-                self.topk = 25
-                self.P = 0.2
-                self.Temperature = 0.0175
-                self.energy = 4
-            elif self.route_flag == 12:
-                self.topk = 18
-                self.P = 0.4
-                self.Temperature = 0.025
-                self.energy = 1.5
-            elif self.route_flag == 8:
-                self.topk = 36
-                self.P = 0.6
-                self.Temperature = 0.05
-                self.energy = 0.75
-            elif self.route_flag == 6:
-                self.P = 0.8
-                self.topk = 49
-                self.Temperature = 0.15
-                self.energy = 0.4
+        # route_configs is required — no fallback
+        if route_configs is None:
+            raise ValueError(
+                'topp_route_configs must be provided. '
+                f'Got None for topk flag {self.route_flag}.')
+        route_configs = _normalize_route_configs(route_configs)
+        if self.route_flag not in route_configs:
+            raise KeyError(
+                f'topk flag {self.route_flag} is not configured in '
+                'topp_route_configs.')
+        route_config = route_configs[self.route_flag]
+        self.topk = int(route_config['maxk'])
+        self.P = float(route_config['p'])
+        self.Temperature = float(route_config['temperature'])
+        self.energy = float(route_config['energy'])
 
         self.silu = True
 
@@ -295,8 +270,6 @@ class TopkRouting(nn.Module):
                 k_aug = k + gate * k_text
                 attn = (q_aug * self.scale) @ k_aug.transpose(-2, -1)
                 gated_text_bias = attn - visual_attn
-            elif hasattr(self, '_frozen_alpha'):
-                attn = (1 - self._frozen_alpha) * attn + self._frozen_alpha * attn
         else:
             attn = GA
             visual_attn = attn
@@ -555,10 +528,8 @@ class ToppAttention(nn.Module):
                  side_dwconv=3,
                  auto_pad=False, W=False,
                  topp_flash_block_windows=64, topp_flash_backend=None,
-                 use_pruned_kv_gather=False, pruned_kv_num_groups=1,
                  topp_route_configs=None,
                  attn_vis_config=None,
-                 use_fast_attention=False,
                  debug_route=False,
                  topp_flash_debug=False,
                  use_route_mask=False,
@@ -576,14 +547,10 @@ class ToppAttention(nn.Module):
         self.W = W
         self.topp_flash_block_windows = topp_flash_block_windows
         self.topp_flash_backend = _normalize_topp_backend(topp_flash_backend)
-        self.use_pruned_kv_gather = use_pruned_kv_gather
-        self.pruned_kv_num_groups = pruned_kv_num_groups
         self.topp_route_configs = topp_route_configs
         self.attn_vis_config = _normalize_attn_vis_config(attn_vis_config)
-        self.use_fast_attention = use_fast_attention
         self.topp_flash_debug = topp_flash_debug
         self._topp_flash_warned = False
-        self.route_pooling = 'avg'
 
         ################side_dwconv (i.e. LCE in ShuntedTransformer)###########
         self.lepe = nn.Conv2d(dim, dim, kernel_size=side_dwconv, stride=1, padding=side_dwconv // 2,
@@ -631,7 +598,6 @@ class ToppAttention(nn.Module):
         self.kv_downsample_mode = kv_downsample_mode
         self.kv_per_win = kv_per_win
         self.kv_downsample_ratio = kv_downsample_ratio
-        self.kv_downsample_kenel = kv_downsample_kernel
         if self.kv_downsample_mode == 'ada_avgpool':
             assert self.kv_per_win is not None
             self.kv_down = nn.AdaptiveAvgPool2d(self.kv_per_win)
@@ -660,13 +626,7 @@ class ToppAttention(nn.Module):
 
     def _pool_route_tokens(self, q, kv):
         k = kv[..., 0:self.qk_dim]
-        if self.route_pooling == 'avg':
-            return q.mean([2, 3]), k.mean([2, 3])
-        if self.route_pooling == 'max':
-            return q.amax(dim=(2, 3)), k.amax(dim=(2, 3))
-        q_route = 0.5 * (q.mean([2, 3]) + q.amax(dim=(2, 3)))
-        k_route = 0.5 * (k.mean([2, 3]) + k.amax(dim=(2, 3)))
-        return q_route, k_route
+        return q.mean([2, 3]), k.mean([2, 3])
 
     def forward(self, x, GA, ret_attn_mask=False, category_prototypes=None):
         """

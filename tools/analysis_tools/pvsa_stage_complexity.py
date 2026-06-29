@@ -66,16 +66,16 @@ def _stage_prefixes(backbone, stage):
     fam_stages = set(getattr(backbone, 'fam_stages', (0, 1, 2, 3)))
     fusion_stages = set(getattr(backbone, 'fusion_stages', (0, 1, 2, 3)))
     prefixes = {
-        'cnn': [f'downsample_layers2.{stage}'],
-        'transformer': [f'downsample_layers.{stage}', f'stages.{stage}'],
+        'cnn': [f'cnn_downsample_layers.{stage}'],
+        'transformer': [f'trans_downsample_layers.{stage}', f'stages.{stage}'],
         'FAM': [f'FAM.{stage}'] if stage in fam_stages else [],
         'vote_fusion': [],
         'out_norm': [f'extra_norms.{stage}'],
     }
     if stage in fusion_stages:
         prefixes['vote_fusion'].extend([
-            f'conv11.{stage}', f'conv12.{stage}',
-            f'bn11.{stage}', f'bn12.{stage}',
+            f'trans_conv.{stage}', f'cnn_conv.{stage}',
+            f'bn.{stage}',
         ])
     return prefixes
 

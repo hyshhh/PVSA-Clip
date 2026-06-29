@@ -66,10 +66,8 @@ class Block(nn.Module):
                  side_dwconv=5, before_attn_dwconv=3, pre_norm=True, auto_pad=False, W=False,
                  topp_flash_block_windows=64,
                  topp_flash_backend=None,
-                 use_pruned_kv_gather=False, pruned_kv_num_groups=1,
                  topp_route_configs=None,
                  attn_vis_config=None,
-                 use_fast_attention=False,
                  debug_route=False,
                  topp_flash_debug=False,
                  use_route_mask=False,
@@ -97,11 +95,8 @@ class Block(nn.Module):
                                 auto_pad=auto_pad, W=self.W,
                                 topp_flash_block_windows=topp_flash_block_windows,
                                 topp_flash_backend=topp_flash_backend,
-                                use_pruned_kv_gather=use_pruned_kv_gather,
-                                pruned_kv_num_groups=pruned_kv_num_groups,
                                 topp_route_configs=topp_route_configs,
                                 attn_vis_config=attn_vis_config,
-                                use_fast_attention=use_fast_attention,
                                 debug_route=debug_route,
                                 topp_flash_debug=topp_flash_debug,
                                 use_route_mask=use_route_mask,
@@ -320,12 +315,8 @@ class VTFormer(nn.Module):
                  topp_flash_backend=None,
                  topp_flash_block_windows=64,
                  topp_flash_debug=False,
-                 # CUDA inference params
-                 use_pruned_kv_gather=False,
-                 pruned_kv_num_groups=1,
                  topp_route_configs=None,
                  attn_vis_config=None,
-                 use_fast_attention=False,
                  debug_route=False,
                  use_route_mask=False,
                  use_nan_guard=False,
@@ -345,11 +336,8 @@ class VTFormer(nn.Module):
         self.topp_flash_backend = _normalize_topp_backend(topp_flash_backend)
         self.topp_flash_block_windows = topp_flash_block_windows
         self.topp_flash_debug = topp_flash_debug
-        self.use_pruned_kv_gather = use_pruned_kv_gather
-        self.pruned_kv_num_groups = pruned_kv_num_groups
         self.topp_route_configs = topp_route_configs
         self.attn_vis_config = attn_vis_config
-        self.use_fast_attention = use_fast_attention
         self.debug_route = debug_route
         self.use_route_mask = use_route_mask
         self.use_nan_guard = use_nan_guard
@@ -484,11 +472,8 @@ class VTFormer(nn.Module):
                         W=self.W,
                         topp_flash_block_windows=self.topp_flash_block_windows,
                         topp_flash_backend=self.topp_flash_backend,
-                        use_pruned_kv_gather=self.use_pruned_kv_gather,
-                        pruned_kv_num_groups=self.pruned_kv_num_groups,
                         topp_route_configs=self.topp_route_configs,
                         attn_vis_config=self.attn_vis_config,
-                        use_fast_attention=self.use_fast_attention,
                         debug_route=self.debug_route,
                         topp_flash_debug=self.topp_flash_debug,
                         use_route_mask=self.use_route_mask,

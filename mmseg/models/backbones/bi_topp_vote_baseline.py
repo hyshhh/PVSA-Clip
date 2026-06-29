@@ -13,8 +13,6 @@ from timm.models import register_model
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 from timm.models.vision_transformer import _cfg
 from ..utils.common import Attention, AttentionLePE, DWConv
-# from ..utils.bra_legacy import BiLevelRoutingAttention
-from ..utils.bra_legacy_hys_v4 import BiLevelRoutingAttention
 from ..utils.top_p_bra import ToppAttention
 from mmseg.registry import MODELS
 
@@ -85,10 +83,8 @@ class Block(nn.Module):
                  side_dwconv=5, before_attn_dwconv=3, pre_norm=True, auto_pad=False, W=False,
                  topp_flash_block_windows=64,
                  topp_flash_backend=None,
-                 use_pruned_kv_gather=False, pruned_kv_num_groups=1,
                  topp_route_configs=None,
                  attn_vis_config=None,
-                 use_fast_attention=False,
                  debug_route=False,
                  topp_flash_debug=False,
                  use_route_mask=False,
@@ -115,11 +111,8 @@ class Block(nn.Module):
                                     auto_pad=auto_pad, W=self.W,
                                     topp_flash_block_windows=topp_flash_block_windows,
                                     topp_flash_backend=topp_flash_backend,
-                                    use_pruned_kv_gather=use_pruned_kv_gather,
-                                    pruned_kv_num_groups=pruned_kv_num_groups,
                                     topp_route_configs=topp_route_configs,
                                     attn_vis_config=attn_vis_config,
-                                    use_fast_attention=use_fast_attention,
                                     debug_route=debug_route,
                                     topp_flash_debug=topp_flash_debug,
                                     use_route_mask=use_route_mask,
@@ -197,10 +190,11 @@ class Block(nn.Module):
         x = x.permute(0, 3, 1, 2)
         return x
 class FeatureAlignmentModule(nn.Module):
-    def __init__(self, dim, reduction=1, lambda_c=.5, lambda_s=.5):
+    def __init__(self, dim, reduction=1):
         super(FeatureAlignmentModule, self).__init__()
-        self.lambda_c = lambda_c
-        self.lambda_s = lambda_s
+        # sigmoid(0) = 0.5, so 2*sigmoid(0) = 1.0 — neutral init
+        self.lambda_c = nn.Parameter(torch.tensor(0.0))
+        self.lambda_s = nn.Parameter(torch.tensor(0.0))
         self.channel_weights = ChannelWeights(dim=dim, reduction=reduction)
         self.spatial_weights = SpatialWeights(dim=dim, reduction=reduction)
 
@@ -222,8 +216,10 @@ class FeatureAlignmentModule(nn.Module):
     def forward(self, x1, x2):
         channel_weights = self.channel_weights(x1, x2)
         spatial_weights = self.spatial_weights(x1, x2)
-        out_x1 = x1 + 0.5 * channel_weights[1] * x2 + 0.5 * spatial_weights[1] * x2
-        out_x2 = x2 + 0.5* channel_weights[0] * x1 + 0.5 * spatial_weights[0] * x1
+        lc = 2.0 * self.lambda_c.sigmoid()
+        ls = 2.0 * self.lambda_s.sigmoid()
+        out_x1 = x1 + lc * channel_weights[1] * x2 + ls * spatial_weights[1] * x2
+        out_x2 = x2 + lc * channel_weights[0] * x1 + ls * spatial_weights[0] * x1
         return out_x1, out_x2
 from mmengine.model import BaseModule, ModuleList, Sequential   
 from mmcv.cnn.bricks import DropPath, build_activation_layer, build_norm_layer
@@ -414,29 +410,7 @@ class SpatialWeights(nn.Module):
         x = torch.cat((x1, x2), dim=1)
         spatial_weights = self.mlp(x).reshape(B, 2, 1, H, W).permute(1, 0, 2, 3, 4)
         return spatial_weights
-class Stem224(nn.Module):
-    def __init__(self, in_chans=3, embed_dim=128):
-        super().__init__()
-        self.conv1 = DepthWiseConvModule(
-            in_chans, embed_dim // 2, embed_dim // 2, kernel_size=3, stride=2, padding=1)
-        self.bn1 = nn.BatchNorm2d(embed_dim // 2)
-        self.act1 = nn.GELU()
 
-        self.conv2 = DepthWiseConvModule(
-            embed_dim // 2, embed_dim // 2, embed_dim, kernel_size=3, stride=2, padding=1)
-        self.bn2 = nn.BatchNorm2d(embed_dim)
-        self.act2 = nn.GELU()
-
-        self.shortcut = nn.Sequential(
-            nn.Conv2d(in_chans, embed_dim, 1, stride=4),  # 下采样 + 对齐通道
-            nn.BatchNorm2d(embed_dim)
-        )
-
-    def forward(self, x):
-        out = self.act1(self.bn1(self.conv1(x)))
-        out = self.act2(self.bn2(self.conv2(out)))
-        out += self.shortcut(x)
-        return out
 @MODELS.register_module(name='VTFormer_baseline')
 class VTFormer(nn.Module):
     def __init__(self, depth=[3, 4, 8, 3], in_chans=3, num_classes=1000, embed_dim=[64, 128, 320, 512],
@@ -468,12 +442,8 @@ class VTFormer(nn.Module):
                  topp_flash_backend=None,
                  topp_flash_block_windows=64,
                  topp_flash_debug=False,
-                 # CUDA inference params
-                 use_pruned_kv_gather=False,
-                 pruned_kv_num_groups=1,
                  topp_route_configs=None,
                  attn_vis_config=None,
-                 use_fast_attention=False,
                  debug_route=False,
                  use_route_mask=False,
                  use_nan_guard=False,
@@ -488,11 +458,8 @@ class VTFormer(nn.Module):
         self.topp_flash_backend = _normalize_topp_backend(topp_flash_backend)
         self.topp_flash_block_windows = topp_flash_block_windows
         self.topp_flash_debug = topp_flash_debug
-        self.use_pruned_kv_gather = use_pruned_kv_gather
-        self.pruned_kv_num_groups = pruned_kv_num_groups
         self.topp_route_configs = topp_route_configs
         self.attn_vis_config = attn_vis_config
-        self.use_fast_attention = use_fast_attention
         self.debug_route = debug_route
         self.use_route_mask = use_route_mask
         self.use_nan_guard = use_nan_guard
@@ -510,41 +477,35 @@ class VTFormer(nn.Module):
                 return MBConv(ch, expansion * ch, ch)
             return DepthWiseConvModule(ch, expansion * ch, ch)
 
-        self.downsample_layers = nn.ModuleList()
-        self.downsample_layers2 = nn.ModuleList()
+        self.trans_downsample_layers = nn.ModuleList()
+        self.cnn_downsample_layers = nn.ModuleList()
         self.FAM = nn.ModuleList()
 
 
 
-        # NOTE: uniformer uses two 3*3 conv, while in many other transformers this is one 7*7 conv
-        stem = nn.Sequential(
-            nn.Conv2d(in_chans, embed_dim[0] // 2, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
-            nn.BatchNorm2d(embed_dim[0] // 2),
-            nn.GELU(),
-            nn.Conv2d(embed_dim[0] // 2, embed_dim[0], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
-            nn.BatchNorm2d(embed_dim[0]),
-        )
-        stem2_layers = [
-            nn.Conv2d(in_chans, embed_dim[0] // 2, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
-            nn.BatchNorm2d(embed_dim[0] // 2),
-            nn.GELU(),
-            nn.Conv2d(embed_dim[0] // 2, embed_dim[0], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
-            nn.BatchNorm2d(embed_dim[0]),
-        ]
-        stem2_layers.extend([
-            _make_cnn_block(embed_dim[0])
-            for _ in range(cnn_block_layers[0])
+        # 共用 stem 结构: Conv→BN→GELU→Conv (stride=2+2=4, 下采样4倍)
+        def _make_stem_conv():
+            return [
+                nn.Conv2d(in_chans, embed_dim[0] // 2, kernel_size=3, stride=2, padding=1),
+                nn.BatchNorm2d(embed_dim[0] // 2),
+                nn.GELU(),
+                nn.Conv2d(embed_dim[0] // 2, embed_dim[0], kernel_size=3, stride=2, padding=1),
+            ]
+        # Transformer 分支: 加 BN 归一化输出
+        trans_stem = nn.Sequential(*_make_stem_conv(), nn.BatchNorm2d(embed_dim[0]))
+        # CNN 分支: 接 DWConv blocks
+        cnn_stem = nn.Sequential(*_make_stem_conv(), *[
+            _make_cnn_block(embed_dim[0]) for _ in range(cnn_block_layers[0])
         ])
-        stem2 = nn.Sequential(*stem2_layers)
 
         if (pe is not None) and 0 in pe_stages:
-            stem.append(get_pe_layer(emb_dim=embed_dim[0], name=pe))
-            stem2.append(get_pe_layer(emb_dim=embed_dim[0], name=pe))
+            trans_stem.append(get_pe_layer(emb_dim=embed_dim[0], name=pe))
+            cnn_stem.append(get_pe_layer(emb_dim=embed_dim[0], name=pe))
         if use_checkpoint_stages:
-            stem = checkpoint_wrapper(stem)
-            stem2 = checkpoint_wrapper(stem2)
-        self.downsample_layers.append(stem)
-        self.downsample_layers2.append(stem2)
+            trans_stem = checkpoint_wrapper(trans_stem)
+            cnn_stem = checkpoint_wrapper(cnn_stem)
+        self.trans_downsample_layers.append(trans_stem)
+        self.cnn_downsample_layers.append(cnn_stem)
 
         self.FAM.append(FeatureAlignmentModule(dim=2*embed_dim[0], reduction=fam_reduction))
         self.fusion = nn.ModuleList()
@@ -555,38 +516,26 @@ class VTFormer(nn.Module):
             nn.Conv2d(2*embed_dim[0], embed_dim[0], kernel_size=(1,1), stride=(1, 1), padding=(0, 0),bias=True)
             )
         for i in range(3):
-            downsample_layer = nn.Sequential(
+            trans_downsample_layer = nn.Sequential(
                 nn.Conv2d(embed_dim[i], embed_dim[i + 1], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
                 nn.BatchNorm2d(embed_dim[i + 1])
             )
-            layers = [
+            cnn_layers = [
                 nn.Conv2d(embed_dim[i], embed_dim[i + 1], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
-                nn.BatchNorm2d(embed_dim[i + 1])
             ]
-            layers.extend([
-            _make_cnn_block(embed_dim[i + 1])
-            for _ in range(cnn_block_layers[i + 1])
-             ])
-            downsample_layer2 = nn.Sequential(*layers)
-            #VTFormer1.4 1   v1.5-3
-            # downsample_layer2 = nn.Sequential(
-            #     nn.Conv2d(embed_dim[i], embed_dim[i + 1], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
-            #     nn.BatchNorm2d(embed_dim[i + 1]),
-            #     DepthWiseConvModule(embed_dim[i + 1], 4*embed_dim[i + 1], embed_dim[i + 1],3, 1, 1),
-            #     DepthWiseConvModule(embed_dim[i + 1], 4*embed_dim[i + 1], embed_dim[i + 1],3, 1, 1),
-            #     # DepthWiseConvModule(embed_dim[i + 1], 4*embed_dim[i + 1], embed_dim[i + 1],3, 1, 1),
-            # )
+            cnn_layers.extend([
+                _make_cnn_block(embed_dim[i + 1])
+                for _ in range(cnn_block_layers[i + 1])
+            ])
+            cnn_downsample_layer = nn.Sequential(*cnn_layers)
             if (pe is not None) and i + 1 in pe_stages:
-                downsample_layer.append(get_pe_layer(emb_dim=embed_dim[i + 1], name=pe))
-                downsample_layer2.append(get_pe_layer(emb_dim=embed_dim[i + 1], name=pe))
-                # pool1.append(get_pe_layer(emb_dim=embed_dim[i + 1], name=pe))
+                trans_downsample_layer.append(get_pe_layer(emb_dim=embed_dim[i + 1], name=pe))
+                cnn_downsample_layer.append(get_pe_layer(emb_dim=embed_dim[i + 1], name=pe))
             if use_checkpoint_stages:
-                downsample_layer = checkpoint_wrapper(downsample_layer)
-                downsample_layer2 = checkpoint_wrapper(downsample_layer2)
-                # pool1= checkpoint_wrapper(pool1)
-            self.downsample_layers.append(downsample_layer)
-            self.downsample_layers2.append(downsample_layer2)
-            # self.pool_layers.append(pool1)
+                trans_downsample_layer = checkpoint_wrapper(trans_downsample_layer)
+                cnn_downsample_layer = checkpoint_wrapper(cnn_downsample_layer)
+            self.trans_downsample_layers.append(trans_downsample_layer)
+            self.cnn_downsample_layers.append(cnn_downsample_layer)
             self.fusion.append(
             nn.Conv2d(2*embed_dim[i + 1], embed_dim[i + 1], kernel_size=(1,1), stride=(1, 1), padding=(0, 0),bias=True)
             )
@@ -625,11 +574,8 @@ class VTFormer(nn.Module):
                         W=self.W,
                         topp_flash_block_windows=self.topp_flash_block_windows,
                         topp_flash_backend=self.topp_flash_backend,
-                        use_pruned_kv_gather=self.use_pruned_kv_gather,
-                        pruned_kv_num_groups=self.pruned_kv_num_groups,
                         topp_route_configs=self.topp_route_configs,
                         attn_vis_config=self.attn_vis_config,
-                        use_fast_attention=self.use_fast_attention,
                         debug_route=self.debug_route,
                         topp_flash_debug=self.topp_flash_debug,
                         use_route_mask=self.use_route_mask,
@@ -680,9 +626,9 @@ class VTFormer(nn.Module):
         if (self.training or self._inference_fused
                 or self._disable_inference_fusion):
             return
-        for layer in self.downsample_layers:
+        for layer in self.trans_downsample_layers:
             _fuse_sequential_conv_bn(layer)
-        for layer in self.downsample_layers2:
+        for layer in self.cnn_downsample_layers:
             _fuse_sequential_conv_bn(layer)
         for module in self.modules():
             if isinstance(module, (DepthWiseConvModule, MBConv)):
@@ -691,7 +637,7 @@ class VTFormer(nn.Module):
 
     def forward_features(self, x):
         for i in range(4):
-            x = self.downsample_layers[i](x)  # res = (56, 28, 14, 7), wins = (64, 16, 4, 1)
+            x = self.trans_downsample_layers[i](x)  # res = (56, 28, 14, 7), wins = (64, 16, 4, 1)
             x = self.stages[i](x)
         x = self.norm(x)
         x = self.pre_logits(x)
