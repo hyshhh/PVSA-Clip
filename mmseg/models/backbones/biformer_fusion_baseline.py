@@ -104,8 +104,9 @@ class BiFormer_fusion_baseline(VTFormer):
             C2=self.conv12[i](channel2[i + 1])
             bn_channel1 = self.sigmoid(self.bn[i](C1))
             bn_channel2 = self.sigmoid(self.bn[i](C2))
-            mask1 = self.upsample2(bn_channel1)
-            mask2 = self.upsample2(bn_channel2)
+            target_size = channel3[i].shape[2:]
+            mask1 = F.interpolate(bn_channel1, size=target_size, mode='bilinear', align_corners=False)
+            mask2 = F.interpolate(bn_channel2, size=target_size, mode='bilinear', align_corners=False)
             if vis_enabled and (not vis_once or not getattr(self, '_feature_vis_saved', False)) and i==0:
                 self._save_feature_channel_as_image(mask1, f'{vis_dir}/mask1.png', vis_out_size, vis_reduce)
                 self._save_feature_channel_as_image(mask2, f'{vis_dir}/mask2.png', vis_out_size, vis_reduce)

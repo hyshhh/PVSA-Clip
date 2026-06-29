@@ -12,9 +12,9 @@ model = dict(
         kv_downsample_mode='identity',
         topks=[16, 12, 8, 6],
         topp_route_configs={
-            16: dict(maxk=5, p=0.2, temperature=0.4, energy=3.0),
-            12: dict(maxk=10, p=0.4, temperature=1.2, energy=6.0),
-            8: dict(maxk=25, p=0.6, temperature=2.0, energy=25.0),
+            16: dict(maxk=5, p=0.2, temperature=0.8, energy=3.0),
+            12: dict(maxk=10, p=0.4, temperature=3.0, energy=12.0),
+            8: dict(maxk=25, p=0.7, temperature=3.0, energy=25.0),
             6: dict(maxk=49, p=0.9, temperature=1.5, energy=49.0),
         },
         side_dwconv=5,
