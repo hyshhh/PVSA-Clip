@@ -41,8 +41,32 @@ def _fmt(v):
     return f'{v / 1e6:.3f}M'
 
 
-def _flops(v):
-    return f'{v / 1e6:.2f}'
+def _gf(v):
+    return f'{v / 1e9:.3f}'
+
+
+def _register_module_hooks(module):
+    flops_dict = {}
+    hooks = []
+
+    def _make_hook(name):
+        def hook_fn(m, inp, out):
+            flops = 0
+            if isinstance(m, torch.nn.Linear):
+                flops = 2 * inp[0].shape[0] * m.in_features * m.out_features
+            elif isinstance(m, torch.nn.Conv2d):
+                out_h, out_w = out.shape[2], out.shape[3]
+                flops = 2 * m.in_channels * m.out_channels * \
+                    m.kernel_size[0] * m.kernel_size[1] * out_h * out_w // m.groups
+            elif isinstance(m, torch.nn.BatchNorm2d):
+                flops = inp[0].numel() * 2
+            if flops > 0:
+                flops_dict[name] = flops
+        return hook_fn
+
+    for name, m in module.named_modules():
+        hooks.append(m.register_forward_hook(_make_hook(name)))
+    return flops_dict, hooks
 
 
 def main():
@@ -70,32 +94,50 @@ def main():
     input_shape = _input_shape(args.shape)
     H, W = input_shape[1], input_shape[2]
 
-    # Backbone config
     bb_cfg = cfg.model.backbone
-    embed_dim = bb_cfg.embed_dim  # [64, 128, 256, 512]
-    depth = bb_cfg.depth          # [3, 4, 6, 3]
-    mlp_ratios = bb_cfg.mlp_ratios  # [3, 3, 3, 3]
-    n_win = bb_cfg.n_win          # 7
-    topks = bb_cfg.topks          # [16, 12, 8, 6]
-    qk_dims = bb_cfg.qk_dims      # [64, 128, 256, 512]
-    head_dim = bb_cfg.head_dim    # 32
+    embed_dim = bb_cfg.embed_dim
+    depth = bb_cfg.depth
+    mlp_ratios = bb_cfg.mlp_ratios
+    n_win = bb_cfg.n_win
+    topks = bb_cfg.topks
+    qk_dims = bb_cfg.qk_dims
+    head_dim = bb_cfg.head_dim
     use_ttrm = bb_cfg.get('use_ttrm', False)
     ttrm_stages = set(bb_cfg.get('ttrm_stages', []))
     cross_attn_stages = set(bb_cfg.get('cross_attn_stages', []))
     num_classes = cfg.model.decode_head.get('num_classes', 3)
     text_dim = cfg.model.text_encoder.get('embed_dim', 512)
-    win_size = n_win * n_win  # 49
+    win_size = n_win * n_win
+    route_cfgs = bb_cfg.get('topp_route_configs', {})
 
-    print('=' * 90)
-    print(f'Input: {input_shape}, window: {n_win}x{n_win}={win_size}, '
-          f'num_classes: {num_classes}')
-    print('=' * 90)
+    # ---- Method 1: Module hooks (Linear/Conv/BN only, comparable to get_flops.py) ----
+    dummy = torch.randn(1, *input_shape, device=device)
+    model.backbone._disable_inference_fusion = True
 
-    # Analytical FLOPs calculation per stage
-    total_bb_flops = 0
-    print(f'{"stage":>5} | {"transformer":>14} | {"ttrm":>14} | '
-          f'{"cross_attn":>14} | {"vote_fusion":>14} | {"total":>14}')
-    print('-' * 90)
+    # Run full model forward to get module-level FLOPs
+    module_flops_dict, module_hooks = _register_module_hooks(model)
+    with torch.no_grad():
+        # Simulate inference path
+        if hasattr(model, 'text_encoder') and model.text_encoder is not None:
+            model._prototypes_frozen = True
+            model.frozen_prototypes.copy_(
+                torch.randn(num_classes, text_dim, device=device))
+        model(dummy)
+    for h in module_hooks:
+        h.remove()
+    module_total = sum(module_flops_dict.values())
+
+    # ---- Method 2: Analytical (includes attention matmul) ----
+    total_attn_matmul = 0
+    total_ttrm_matmul = 0
+    total_ca_matmul = 0
+
+    print('=' * 95)
+    print(f'Input: {input_shape}, window: {n_win}x{n_win}={win_size}')
+    print('=' * 95)
+    print(f'{"stage":>5} | {"module_flops":>13} | {"+attn_matmul":>13} | '
+          f'{"+ttrm_matmul":>13} | {"+ca_matmul":>13} | {"stage_total":>13}')
+    print('-' * 95)
 
     for stage in range(4):
         d = embed_dim[stage]
@@ -103,110 +145,72 @@ def main():
         n_heads = qk // head_dim
         topk = topks[stage]
         n_layers = depth[stage]
-        mlp_ratio = mlp_ratios[stage]
-        # Spatial resolution at this stage
-        h = H // (2 ** (stage + 2))  # stem downsamples 4x, each stage 2x
+        h = H // (2 ** (stage + 2))
         w = W // (2 ** (stage + 2))
-        n_windows = (h // n_win) * (w // n_win)  # number of windows
-        n_tokens = h * w  # total tokens
+        n_windows = (h // n_win) * (w // n_win)
+        n_tokens = h * w
 
-        # Top-P truncation: effective topk ≈ maxk * P
-        route_cfg = bb_cfg.get('topp_route_configs', {})
-        p_threshold = route_cfg.get(topk, {}).get('p', 0.5)
-        effective_topk = max(1, int(topk * p_threshold))
+        # Top-P effective topk
+        p = route_cfgs.get(topk, {}).get('p', 0.5)
+        effective_topk = max(1, int(topk * p))
 
-        # --- Transformer block FLOPs ---
-        # 1. pos_embed (dwconv before attn): 2 * d * k^2 * n_tokens
-        pos_embed_flops = 2 * d * 3 * 3 * n_tokens
+        # Module FLOPs for this stage (from hooks)
+        stage_prefixes = [f'backbone.downsample_layers.{stage}',
+                          f'backbone.stages.{stage}',
+                          f'backbone.extra_norms.{stage}',
+                          f'backbone.conv11.{stage}',
+                          f'backbone.bn.{stage}']
+        stage_module_flops = 0
+        for name, flops in module_flops_dict.items():
+            for prefix in stage_prefixes:
+                if name.startswith(prefix):
+                    stage_module_flops += flops
+                    break
 
-        # 2. QKV projection: 3 * (2 * d * qk) * n_tokens
-        qkv_flops = 3 * 2 * d * qk * n_tokens
+        # Attention matmul: Q@K.T + attn@V
+        attn_matmul = (2 * 2 * n_windows * n_heads * win_size * head_dim *
+                       effective_topk * win_size) * n_layers
+        total_attn_matmul += attn_matmul
 
-        # 3. Window attention with topk routing (after Top-P truncation):
-        #    Q,K per window: [win_size, head_dim]
-        #    attn = Q @ K.T: [win_size, effective_topk * win_size] per window
-        #    out = attn @ V: same
-        attn_flops = 2 * n_windows * n_heads * win_size * head_dim * effective_topk * win_size * 2
-
-        # 4. Output projection: 2 * qk * d * n_tokens
-        out_proj_flops = 2 * qk * d * n_tokens
-
-        # 5. MLP: 2 * (d * mlp_d + mlp_d * d) * n_tokens
-        mlp_d = int(mlp_ratio * d)
-        mlp_flops = 2 * 2 * d * mlp_d * n_tokens
-
-        # 6. LayerNorm (2 per block): ~5 * d * n_tokens each
-        ln_flops = 2 * 5 * d * n_tokens
-
-        transformer_flops = (pos_embed_flops + qkv_flops + attn_flops +
-                             out_proj_flops + mlp_flops + ln_flops) * n_layers
-
-        # --- TTRM FLOPs ---
-        ttrm_flops = 0
+        # TTRM matmul: q@tc_k.T + k@tc_k.T + q_text@k_text.T
+        ttrm_matmul = 0
         if use_ttrm and stage in ttrm_stages:
             K = num_classes
-            # Per window: q @ tc_k.T [win_size, qk] @ [qk, K] = [win_size, K]
-            # k @ tc_k.T same
-            # q_text @ k_text.T [win_size, K] @ [K, win_size] = [win_size, win_size]
-            ttrm_per_window = (2 * win_size * qk * K +   # q @ tc_k.T
-                               2 * win_size * qk * K +   # k @ tc_k.T
-                               2 * win_size * K * win_size)  # q_text @ k_text.T
-            ttrm_flops = ttrm_per_window * n_windows * n_layers
+            ttrm_per_win = (2 * win_size * qk * K +   # q@tc_k.T
+                            2 * win_size * qk * K +   # k@tc_k.T
+                            2 * win_size * K * win_size)  # q_text@k_text.T
+            ttrm_matmul = ttrm_per_win * n_windows * n_layers
+        total_ttrm_matmul += ttrm_matmul
 
-        # --- Cross-attention FLOPs ---
-        ca_flops = 0
+        # Cross-attention matmul: q@k.T + attn@v
+        ca_matmul = 0
         if stage in cross_attn_stages:
             K = num_classes
-            # Per token: q @ k.T [n_tokens, d] @ [d, K] = [n_tokens, K]
-            # attn @ v [n_tokens, K] @ [K, d] = [n_tokens, d]
-            ca_per_token = 2 * n_tokens * d * K * 2  # q@k.T + attn@v
-            ca_out_proj = 2 * d * d * n_tokens
-            ca_flops = (ca_per_token + ca_out_proj) * n_layers
+            ca_matmul = (2 * n_tokens * d * K * 2) * n_layers  # q@k.T + attn@v
+        total_ca_matmul += ca_matmul
 
-        # --- Vote fusion FLOPs ---
-        vote_flops = 0
-        if stage < 3:
-            # conv11: Conv2d(d_next, d, 1x1) applied to upsampled feature
-            h_cur = h
-            w_cur = w
-            vote_flops = 2 * embed_dim[stage + 1] * d * h_cur * w_cur
-            # BN + sigmoid + upsample are negligible
+        stage_total = stage_module_flops + attn_matmul + ttrm_matmul + ca_matmul
+        print(f'{stage:>5} | {_gf(stage_module_flops):>11}G | '
+              f'{_gf(attn_matmul):>11}G | {_gf(ttrm_matmul):>11}G | '
+              f'{_gf(ca_matmul):>11}G | {_gf(stage_total):>11}G')
 
-        stage_total = transformer_flops + ttrm_flops + ca_flops + vote_flops
-        total_bb_flops += stage_total
+    # ---- Head FLOPs (from hooks) ----
+    head_flops = 0
+    for name, flops in module_flops_dict.items():
+        if 'decode_head' in name:
+            head_flops += flops
 
-        print(f'{stage:>5} | {_flops(transformer_flops):>12}F | '
-              f'{_flops(ttrm_flops):>12}F | {_flops(ca_flops):>12}F | '
-              f'{_flops(vote_flops):>12}F | {_flops(stage_total):>12}F')
+    total_analytical = (module_total + total_attn_matmul +
+                        total_ttrm_matmul + total_ca_matmul)
 
-    print(f'\nBackbone Total: {total_bb_flops / 1e9:.2f}G FLOPs, '
-          f'{_fmt(_count_params(model.backbone))} params')
-
-    # ---- Text Encoder (removed after fusion) ----
-    if hasattr(model, 'text_encoder') and model.text_encoder is not None:
-        te_params = _count_params(model.text_encoder)
-        print(f'\nText Encoder (removed after fusion): {_fmt(te_params)} params')
-
-    # ---- Decode Head ----
-    if hasattr(model, 'decode_head') and model.decode_head is not None:
-        head = model.decode_head
-        head_params = _count_params(head)
-        # Fused head: single Conv2d(channels, num_classes, 1x1)
-        # Input: [B, 256, H/4, W/4] -> [B, num_classes, H/4, W/4]
-        h4 = H // 4
-        w4 = W // 4
-        channels = cfg.model.decode_head.get('channels', 256)
-        head_flops = 2 * channels * num_classes * h4 * w4
-        print(f'\nDecode Head (CLIPSegHead, fused Conv2d):')
-        print(f'  Params: {_fmt(head_params)} (before fusion)')
-        print(f'  FLOPs:  {_flops(head_flops)}F (after fusion: single Conv2d)')
-
-    # ---- Total ----
-    total_params = _count_params(model)
-    total_inference_flops = total_bb_flops + head_flops
-    print(f'\n{"=" * 90}')
-    print(f'Total Inference FLOPs: {total_inference_flops / 1e9:.2f}G')
-    print(f'Total Params: {_fmt(total_params)} (TextEncoder excluded after fusion)')
+    print(f'\n{"=" * 95}')
+    print(f'Module FLOPs (Linear/Conv/BN):  {_gf(module_total)}G  '
+          f'(comparable to get_flops.py)')
+    print(f'  + Attention matmul:           {_gf(total_attn_matmul)}G')
+    print(f'  + TTRM matmul:                {_gf(total_ttrm_matmul)}G')
+    print(f'  + Cross-Attn matmul:          {_gf(total_ca_matmul)}G')
+    print(f'Total Inference FLOPs:          {_gf(total_analytical)}G')
+    print(f'Total Params: {_fmt(_count_params(model))}')
 
 
 if __name__ == '__main__':
