@@ -12,22 +12,15 @@ from mmseg.registry import MODELS
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description='Profile CLIP-PVSA model stage complexity.')
+        description='Profile CLIP-PVSA model inference complexity.')
     parser.add_argument('config', help='config file path')
     parser.add_argument(
-        '--shape',
-        type=int,
-        nargs='+',
-        default=[224, 224],
+        '--shape', type=int, nargs='+', default=[256, 256],
         help='input image size')
     parser.add_argument(
-        '--device',
-        default='cuda',
-        help='cuda or cpu')
+        '--device', default='cuda', help='cuda or cpu')
     parser.add_argument(
-        '--cfg-options',
-        nargs='+',
-        action=DictAction,
+        '--cfg-options', nargs='+', action=DictAction,
         help='override config options')
     return parser.parse_args()
 
@@ -44,52 +37,12 @@ def _count_params(module):
     return sum(p.numel() for p in module.parameters())
 
 
-def _count_params_by_prefix(module, prefixes):
-    total = 0
-    for name, param in module.named_parameters():
-        if any(name == prefix or name.startswith(prefix + '.')
-               for prefix in prefixes):
-            total += param.numel()
-    return total
+def _fmt(v):
+    return f'{v / 1e6:.3f}M'
 
 
-def _format(value):
-    return f'{value / 1e6:.3f}M'
-
-
-def _register_flops_hooks(module):
-    flops_dict = {}
-    hooks = []
-
-    def _make_hook(name):
-        def hook_fn(m, inp, out):
-            flops = 0
-            if isinstance(m, torch.nn.Linear):
-                flops = 2 * inp[0].shape[0] * m.in_features * m.out_features
-            elif isinstance(m, torch.nn.Conv2d):
-                out_h, out_w = out.shape[2], out.shape[3]
-                flops = 2 * m.in_channels * m.out_channels * \
-                    m.kernel_size[0] * m.kernel_size[1] * out_h * out_w // m.groups
-            elif isinstance(m, torch.nn.BatchNorm2d):
-                flops = inp[0].numel() * 2
-            if flops > 0:
-                flops_dict[name] = flops
-        return hook_fn
-
-    for name, m in module.named_modules():
-        hooks.append(m.register_forward_hook(_make_hook(name)))
-
-    return flops_dict, hooks
-
-
-def _sum_flops(flops_dict, prefixes):
-    total = 0.0
-    for name, flops in flops_dict.items():
-        for prefix in prefixes:
-            if name == prefix or name.startswith(prefix + '.'):
-                total += flops
-                break
-    return total
+def _flops(v):
+    return f'{v / 1e6:.2f}'
 
 
 def main():
@@ -115,129 +68,140 @@ def main():
     model.eval().to(device)
 
     input_shape = _input_shape(args.shape)
-    dummy = torch.randn(1, *input_shape, device=device)
+    H, W = input_shape[1], input_shape[2]
 
-    # ---- Backbone analysis ----
-    backbone = model.backbone
-    backbone.eval()
-    if hasattr(backbone, '_disable_inference_fusion'):
-        backbone._disable_inference_fusion = True
-
+    # Backbone config
+    bb_cfg = cfg.model.backbone
+    embed_dim = bb_cfg.embed_dim  # [64, 128, 256, 512]
+    depth = bb_cfg.depth          # [3, 4, 6, 3]
+    mlp_ratios = bb_cfg.mlp_ratios  # [3, 3, 3, 3]
+    n_win = bb_cfg.n_win          # 7
+    topks = bb_cfg.topks          # [16, 12, 8, 6]
+    qk_dims = bb_cfg.qk_dims      # [64, 128, 256, 512]
+    head_dim = bb_cfg.head_dim    # 32
+    use_ttrm = bb_cfg.get('use_ttrm', False)
+    ttrm_stages = set(bb_cfg.get('ttrm_stages', []))
+    cross_attn_stages = set(bb_cfg.get('cross_attn_stages', []))
     num_classes = cfg.model.decode_head.get('num_classes', 3)
-    embed_dim = cfg.model.text_encoder.get('embed_dim', 512)
-    dummy_protos = torch.randn(num_classes, embed_dim, device=device)
+    text_dim = cfg.model.text_encoder.get('embed_dim', 512)
+    win_size = n_win * n_win  # 49
 
-    # Simulate inference: fuse all CLIP modules
-    if hasattr(model, 'fuse_for_deployment'):
-        with torch.no_grad():
-            model.frozen_prototypes.copy_(dummy_protos)
-            model._prototypes_frozen = True
-            # Freeze TTRM and cross-attention
-            for module in backbone.modules():
-                if hasattr(module, 'freeze_for_deployment'):
-                    module.freeze_for_deployment(dummy_protos)
+    print('=' * 90)
+    print(f'Input: {input_shape}, window: {n_win}x{n_win}={win_size}, '
+          f'num_classes: {num_classes}')
+    print('=' * 90)
 
-    bb_flops_dict, bb_hooks = _register_flops_hooks(backbone)
-    with torch.no_grad():
-        backbone(dummy, category_prototypes=dummy_protos)
-    for h in bb_hooks:
-        h.remove()
-
-    # Stage-level breakdown
-    fam_stages = set(getattr(backbone, 'fam_stages', (0, 1, 2, 3)))
-    fusion_stages = set(getattr(backbone, 'fusion_stages', (0, 1, 2, 3)))
-    ttrm_stages = set(getattr(backbone, 'ttrm_stages', ()))
-    cross_attn_stages = set(getattr(backbone, 'cross_attn_stages', ()))
-
-    print('=' * 80)
-    print('Backbone Stage Complexity (CLIP path)')
-    print('=' * 80)
-    print(f'{"stage":>5} | {"transformer":>16} | {"ttrm":>16} | '
-          f'{"cross_attn":>16} | {"vote_fusion":>16}')
-    print('-' * 80)
+    # Analytical FLOPs calculation per stage
+    total_bb_flops = 0
+    print(f'{"stage":>5} | {"transformer":>14} | {"ttrm":>14} | '
+          f'{"cross_attn":>14} | {"vote_fusion":>14} | {"total":>14}')
+    print('-' * 90)
 
     for stage in range(4):
-        prefixes = {
-            'transformer': [f'downsample_layers.{stage}', f'stages.{stage}'],
-            'vote_fusion': [],
-        }
-        if stage in fusion_stages:
-            prefixes['vote_fusion'].extend([
-                f'conv11.{stage}', f'conv12.{stage}',
-                f'bn11.{stage}', f'bn12.{stage}',
-            ])
+        d = embed_dim[stage]
+        qk = qk_dims[stage]
+        n_heads = qk // head_dim
+        topk = topks[stage]
+        n_layers = depth[stage]
+        mlp_ratio = mlp_ratios[stage]
+        # Spatial resolution at this stage
+        h = H // (2 ** (stage + 2))  # stem downsamples 4x, each stage 2x
+        w = W // (2 ** (stage + 2))
+        n_windows = (h // n_win) * (w // n_win)  # number of windows
+        n_tokens = h * w  # total tokens
 
-        ttrm_prefixes = []
-        if stage in ttrm_stages:
-            depth = getattr(backbone, 'depth', [3, 4, 6, 3])[stage]
-            for j in range(depth):
-                ttrm_prefixes.append(f'stages.{stage}.{j}.PA.ttrm')
+        # --- Transformer block FLOPs ---
+        # 1. pos_embed (dwconv before attn): 2 * d * k^2 * n_tokens
+        pos_embed_flops = 2 * d * 3 * 3 * n_tokens
 
-        ca_prefixes = []
+        # 2. QKV projection: 3 * (2 * d * qk) * n_tokens
+        qkv_flops = 3 * 2 * d * qk * n_tokens
+
+        # 3. Window attention with topk routing:
+        #    Q,K per window: [win_size, head_dim]
+        #    attn = Q @ K.T: [win_size, topk * win_size] per window
+        #    out = attn @ V: same
+        attn_flops = 2 * n_windows * n_heads * win_size * head_dim * topk * win_size * 2
+
+        # 4. Output projection: 2 * qk * d * n_tokens
+        out_proj_flops = 2 * qk * d * n_tokens
+
+        # 5. MLP: 2 * (d * mlp_d + mlp_d * d) * n_tokens
+        mlp_d = int(mlp_ratio * d)
+        mlp_flops = 2 * 2 * d * mlp_d * n_tokens
+
+        # 6. LayerNorm (2 per block): ~5 * d * n_tokens each
+        ln_flops = 2 * 5 * d * n_tokens
+
+        transformer_flops = (pos_embed_flops + qkv_flops + attn_flops +
+                             out_proj_flops + mlp_flops + ln_flops) * n_layers
+
+        # --- TTRM FLOPs ---
+        ttrm_flops = 0
+        if use_ttrm and stage in ttrm_stages:
+            K = num_classes
+            # Per window: q @ tc_k.T [win_size, qk] @ [qk, K] = [win_size, K]
+            # k @ tc_k.T same
+            # q_text @ k_text.T [win_size, K] @ [K, win_size] = [win_size, win_size]
+            ttrm_per_window = (2 * win_size * qk * K +   # q @ tc_k.T
+                               2 * win_size * qk * K +   # k @ tc_k.T
+                               2 * win_size * K * win_size)  # q_text @ k_text.T
+            ttrm_flops = ttrm_per_window * n_windows * n_layers
+
+        # --- Cross-attention FLOPs ---
+        ca_flops = 0
         if stage in cross_attn_stages:
-            depth = getattr(backbone, 'depth', [3, 4, 6, 3])[stage]
-            for j in range(depth):
-                ca_prefixes.append(f'stages.{stage}.{j}.cross_attn')
+            K = num_classes
+            # Per token: q @ k.T [n_tokens, d] @ [d, K] = [n_tokens, K]
+            # attn @ v [n_tokens, K] @ [K, d] = [n_tokens, d]
+            ca_per_token = 2 * n_tokens * d * K * 2  # q@k.T + attn@v
+            ca_out_proj = 2 * d * d * n_tokens
+            ca_flops = (ca_per_token + ca_out_proj) * n_layers
 
-        cells = []
-        for group in ('transformer', 'ttrm', 'cross_attn', 'vote_fusion'):
-            if group == 'ttrm':
-                p = ttrm_prefixes
-            elif group == 'cross_attn':
-                p = ca_prefixes
-            else:
-                p = prefixes[group]
-            gf = _sum_flops(bb_flops_dict, p)
-            gp = _count_params_by_prefix(backbone, p)
-            cells.append(f'{gf / 1e6:.2f}F/{_format(gp)}')
-        print(f'{stage:>5} | ' + ' | '.join(cells))
+        # --- Vote fusion FLOPs ---
+        vote_flops = 0
+        if stage < 3:
+            # conv11: Conv2d(d_next, d, 1x1) applied to upsampled feature
+            h_cur = h
+            w_cur = w
+            vote_flops = 2 * embed_dim[stage + 1] * d * h_cur * w_cur
+            # BN + sigmoid + upsample are negligible
 
-    bb_total_params = _count_params(backbone)
-    bb_total_flops = sum(bb_flops_dict.values())
-    print(f'\nBackbone Total: {bb_total_flops / 1e9:.2f}G FLOPs, {bb_total_params / 1e6:.2f}M params')
+        stage_total = transformer_flops + ttrm_flops + ca_flops + vote_flops
+        total_bb_flops += stage_total
 
-    # ---- Text Encoder analysis ----
+        print(f'{stage:>5} | {_flops(transformer_flops):>12}F | '
+              f'{_flops(ttrm_flops):>12}F | {_flops(ca_flops):>12}F | '
+              f'{_flops(vote_flops):>12}F | {_flops(stage_total):>12}F')
+
+    print(f'\nBackbone Total: {total_bb_flops / 1e9:.2f}G FLOPs, '
+          f'{_fmt(_count_params(model.backbone))} params')
+
+    # ---- Text Encoder (removed after fusion) ----
     if hasattr(model, 'text_encoder') and model.text_encoder is not None:
-        text_enc = model.text_encoder
-        te_params = _count_params(text_enc)
-        print('\n' + '=' * 80)
-        print('Text Encoder (removed after fusion)')
-        print('=' * 80)
-        print(f'  Params: {_format(te_params)} (not counted in total)')
+        te_params = _count_params(model.text_encoder)
+        print(f'\nText Encoder (removed after fusion): {_fmt(te_params)} params')
 
-    # ---- Decode Head analysis ----
+    # ---- Decode Head ----
     if hasattr(model, 'decode_head') and model.decode_head is not None:
         head = model.decode_head
-        head.eval()
-        # Fuse head for inference simulation (BN + proj + contrastive -> Conv2d)
-        if hasattr(head, 'fuse_for_deployment'):
-            with torch.no_grad():
-                head.fuse_for_deployment(dummy_protos)
-
-        head_flops_dict, head_hooks = _register_flops_hooks(head)
-        with torch.no_grad():
-            feat_maps, _ = backbone(dummy, category_prototypes=dummy_protos)
-            head(feat_maps, category_prototypes=dummy_protos)
-        for h in head_hooks:
-            h.remove()
-
         head_params = _count_params(head)
-        head_flops = sum(head_flops_dict.values())
-        print('\n' + '=' * 80)
-        print('Decode Head (CLIPSegHead, fused)')
-        print('=' * 80)
-        print(f'  Params: {_format(head_params)}')
-        print(f'  FLOPs:  {head_flops / 1e6:.2f}M')
+        # Fused head: single Conv2d(channels, num_classes, 1x1)
+        # Input: [B, 256, H/4, W/4] -> [B, num_classes, H/4, W/4]
+        h4 = H // 4
+        w4 = W // 4
+        channels = cfg.model.decode_head.get('channels', 256)
+        head_flops = 2 * channels * num_classes * h4 * w4
+        print(f'\nDecode Head (CLIPSegHead, fused Conv2d):')
+        print(f'  Params: {_fmt(head_params)} (before fusion)')
+        print(f'  FLOPs:  {_flops(head_flops)}F (after fusion: single Conv2d)')
 
     # ---- Total ----
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print('\n' + '=' * 80)
-    print('Total Model')
-    print('=' * 80)
-    print(f'  Total params:     {_format(total_params)}')
-    print(f'  Trainable params: {_format(trainable)}')
-    print(f'  Frozen params:    {_format(total_params - trainable)}')
+    total_params = _count_params(model)
+    total_inference_flops = total_bb_flops + head_flops
+    print(f'\n{"=" * 90}')
+    print(f'Total Inference FLOPs: {total_inference_flops / 1e9:.2f}G')
+    print(f'Total Params: {_fmt(total_params)} (TextEncoder excluded after fusion)')
 
 
 if __name__ == '__main__':
