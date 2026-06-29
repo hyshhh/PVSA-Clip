@@ -69,16 +69,21 @@ def parse_args():
         '--route-stage',
         type=int,
         default=0,
-        help='route stage to visualize when --all-routes is not set')
+        help='route stage to visualize when --single-route is set')
     parser.add_argument(
         '--route-block',
         type=int,
         default=0,
-        help='route block to visualize when --all-routes is not set')
+        help='route block to visualize when --single-route is set')
     parser.add_argument(
         '--all-routes',
         action='store_true',
-        help='save route maps for all routed blocks')
+        default=True,
+        help='save route maps for all routed blocks, enabled by default')
+    parser.add_argument(
+        '--single-route',
+        action='store_true',
+        help='only save the route selected by --route-stage and --route-block')
     parser.add_argument(
         '--feature-reduce',
         choices=['l2', 'mean', 'max'],
@@ -285,7 +290,7 @@ def collect_route_modules(model, args):
         if route_debug is None:
             continue
         stage_idx, block_idx = parse_stage_block(name)
-        if not args.all_routes:
+        if args.single_route:
             if stage_idx != args.route_stage or block_idx != args.route_block:
                 continue
         routes.append((name, module, route_debug, stage_idx, block_idx))
@@ -550,10 +555,6 @@ def main():
             args.feature_reduce)
 
     routes = collect_route_modules(model, args)
-    if not routes and not args.all_routes:
-        print('No route cache matched the requested stage/block; save all routes instead.')
-        args.all_routes = True
-        routes = collect_route_modules(model, args)
     if not routes:
         print('No Top-P route cache found. Check whether the model uses Top-P routing.')
     else:

@@ -43,6 +43,7 @@ CUDA_VISIBLE_DEVICES=0 python tools/visualize_pvsa.py configs-h/biformer/biforme
 CUDA_VISIBLE_DEVICES=0 python tools/visualize_pvsa.py configs-h/biformer/biformer_clip_waterseg.py work_dirs/clip_waterseg/epoch_200.pth 1 --mode clip --device cuda:0 --query-index 32
 ```
 其中 `1` 表示配置文件中测试集的第一张图片；也可以写成 `--test-index 1`。保留 `--image` 时会优先使用手动指定的图片路径。
+默认会保存所有 stage、所有 block 的 `top-p` 路由图；如果只想看单个路由块，可加 `--single-route --route-stage 0 --route-block 0`。
 
 默认保存位置：
 - 特征图：`demo/feathermap/<baseline|clip>/<图片名>/`
