@@ -23,18 +23,18 @@ CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_clip_wa
 ## 推理
 ```bash
 # Baseline
-CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py configs-h/biformer/biformer_baseline_waterseg.py work_dirs/baseline/best_mIoU_epoch.pth --cfg-options model.backbone.topp_flash_backend=None
+CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py configs-h/biformer/biformer_baseline_waterseg.py work_dirs/baseline/epoch_200.pth --cfg-options model.backbone.topp_flash_backend=None
 
 # CLIP
-CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py configs-h/biformer/biformer_clip_waterseg.py work_dirs/clip_waterseg/best_mIoU_epoch.pth --cfg-options model.backbone.topp_flash_backend=None
+CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py configs-h/biformer/biformer_clip_waterseg.py work_dirs/clip_waterseg/epoch_200.pth --cfg-options model.backbone.topp_flash_backend=None
 
 # 保存分割可视化结果
-CUDA_VISIBLE_DEVICES=0 python tools/test.py configs-h/biformer/biformer_clip_waterseg.py checkpoint.pth --show-dir vis_results/
+CUDA_VISIBLE_DEVICES=0 python tools/test.py configs-h/biformer/biformer_clip_waterseg.py work_dirs/clip_waterseg/epoch_200.pth --show-dir vis_results/
 ```
 
 ## 部署
 ```bash
-python tools/deploy_clip_pvsa.py --config configs-h/biformer/biformer_clip_waterseg.py --checkpoint work_dirs/clip_waterseg/best_mIoU_epoch.pth --output work_dirs/deployed/
+python tools/deploy_clip_pvsa.py --config configs-h/biformer/biformer_clip_waterseg.py --checkpoint work_dirs/clip_waterseg/epoch_200.pth --output work_dirs/deployed/
 ```
 部署后：TextEncoder 移除，Head 融合为 Conv2d，TTRM/Cross-Attn 使用预计算 frozen K/V。
 
@@ -50,7 +50,7 @@ python tools/analysis_tools/clip_stage_complexity.py configs-h/biformer/biformer
 ```bash
 rm -rf ~/.cache/torch_extensions/py*/pvsa_topp_flash_cuda
 export CC=/usr/bin/gcc-11 && export CXX=/usr/bin/g++-11
-CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py configs-h/biformer/biformer_clip_waterseg.py checkpoint.pth --cfg-options model.backbone.topp_flash_backend=cuda model.backbone.topp_flash_debug=True
+CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py configs-h/biformer/biformer_clip_waterseg.py work_dirs/clip_waterseg/epoch_200.pth --cfg-options model.backbone.topp_flash_backend=cuda model.backbone.topp_flash_debug=True
 ```
 GPU 架构检测失败：`export PVSA_TOPP_FLASH_ARCH="8.6"`
 
