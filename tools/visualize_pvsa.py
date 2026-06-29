@@ -34,7 +34,18 @@ def parse_args():
         description='Visualize PVSA feature maps and Top-P routing maps.')
     parser.add_argument('config', help='config file path')
     parser.add_argument('checkpoint', help='checkpoint file path')
-    parser.add_argument('--image', required=True, help='input image path')
+    parser.add_argument(
+        'test_index',
+        nargs='?',
+        type=int,
+        help='1-based image index in config test dataset')
+    parser.add_argument('--image', help='input image path')
+    parser.add_argument(
+        '--test-index',
+        dest='test_index_opt',
+        metavar='TEST_INDEX',
+        type=int,
+        help='1-based image index in config test dataset')
     parser.add_argument(
         '--mode',
         choices=['baseline', 'clip'],
@@ -96,6 +107,41 @@ def mkdir(path):
 
 def image_stem(path):
     return osp.splitext(osp.basename(path))[0]
+
+
+def resolve_test_image_from_config(cfg, test_index):
+    if test_index is None:
+        return None
+    if test_index <= 0:
+        raise ValueError('--test-index uses 1-based indexing and must be >= 1.')
+    if 'test_dataloader' not in cfg:
+        raise KeyError('test_dataloader is not found in config.')
+
+    from mmseg.registry import DATASETS
+
+    dataset_cfg = cfg.test_dataloader.get('dataset')
+    if dataset_cfg is None:
+        raise KeyError('test_dataloader.dataset is not found in config.')
+    dataset = DATASETS.build(dataset_cfg)
+    zero_index = test_index - 1
+    if zero_index >= len(dataset):
+        raise IndexError(
+            f'test_index={test_index} exceeds test dataset size={len(dataset)}.')
+
+    if hasattr(dataset, 'get_data_info'):
+        data_info = dataset.get_data_info(zero_index)
+    elif hasattr(dataset, 'data_list'):
+        data_info = dataset.data_list[zero_index]
+    else:
+        raise TypeError('Cannot read image path from this dataset object.')
+
+    img_path = data_info.get('img_path')
+    if img_path is None and 'img_path' in data_info.get('data_samples', {}):
+        img_path = data_info['data_samples']['img_path']
+    if img_path is None:
+        raise KeyError('img_path is not found in selected test data.')
+    print(f'Use test dataset image #{test_index}: {img_path}')
+    return img_path
 
 
 def sanitize_name(name):
@@ -435,27 +481,37 @@ def save_clip_features(feature_store, text_store, img_bgr, feature_root,
 
 def main():
     args = parse_args()
+    from mmengine.config import Config
     from mmseg.apis import inference_model, init_model
     from mmseg.utils import register_all_modules
 
-    if not osp.isfile(args.image):
-        raise FileNotFoundError(args.image)
-    img_bgr = cv2.imread(args.image)
-    if img_bgr is None:
-        raise RuntimeError(f'Failed to read image: {args.image}')
-
     register_all_modules(init_default_scope=True)
+    cfg = Config.fromfile(args.config)
+    if args.cfg_options is not None:
+        cfg.merge_from_dict(args.cfg_options)
+    selected_index = (
+        args.test_index_opt
+        if args.test_index_opt is not None else args.test_index)
+    image_path = args.image or resolve_test_image_from_config(
+        cfg, selected_index)
+    if image_path is None:
+        raise ValueError('Please specify --image or a test dataset index.')
+    if not osp.isfile(image_path):
+        raise FileNotFoundError(image_path)
+    img_bgr = cv2.imread(image_path)
+    if img_bgr is None:
+        raise RuntimeError(f'Failed to read image: {image_path}')
+
     model = init_model(
-        args.config,
+        cfg,
         args.checkpoint,
-        device=args.device,
-        cfg_options=args.cfg_options)
+        device=args.device)
     model.eval()
     if not args.keep_cuda_route:
         disable_cuda_route_backend(model)
     enable_route_debug_cache(model)
 
-    name = image_stem(args.image)
+    name = image_stem(image_path)
     feature_root = osp.abspath(osp.join(args.feature_dir, args.mode, name))
     attn_root = osp.abspath(osp.join(args.attn_dir, args.mode, name))
     mkdir(feature_root)
@@ -478,7 +534,7 @@ def main():
         handles.extend(register_text_hooks(backbone, text_store))
 
     try:
-        inference_model(model, args.image)
+        inference_model(model, image_path)
     finally:
         for handle in handles:
             handle.remove()

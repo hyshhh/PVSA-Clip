@@ -36,10 +36,14 @@ CUDA_VISIBLE_DEVICES=0 python tools/test.py configs-h/biformer/biformer_clip_wat
 ```bash
 # 非 CLIP 路径
 CUDA_VISIBLE_DEVICES=0 python tools/visualize_pvsa.py configs-h/biformer/biformer_baseline_waterseg.py work_dirs/baseline/epoch_200.pth --image demo/demo.png --mode baseline --device cuda:0 --query-index 32
+CUDA_VISIBLE_DEVICES=0 python tools/visualize_pvsa.py configs-h/biformer/biformer_baseline_waterseg.py work_dirs/baseline/epoch_200.pth 1 --mode baseline --device cuda:0 --query-index 32
 
 # CLIP 路径
 CUDA_VISIBLE_DEVICES=0 python tools/visualize_pvsa.py configs-h/biformer/biformer_clip_waterseg.py work_dirs/clip_waterseg/epoch_200.pth --image demo/demo.png --mode clip --device cuda:0 --query-index 32
+CUDA_VISIBLE_DEVICES=0 python tools/visualize_pvsa.py configs-h/biformer/biformer_clip_waterseg.py work_dirs/clip_waterseg/epoch_200.pth 1 --mode clip --device cuda:0 --query-index 32
 ```
+其中 `1` 表示配置文件中测试集的第一张图片；也可以写成 `--test-index 1`。保留 `--image` 时会优先使用手动指定的图片路径。
+
 默认保存位置：
 - 特征图：`demo/feathermap/<baseline|clip>/<图片名>/`
 - 注意力图：`demo/attension_map/<baseline|clip>/<图片名>/`
