@@ -86,3 +86,18 @@ class TextCrossAttention(nn.Module):
         enhanced = self.norm(v_tokens + gate * out)
 
         return enhanced.reshape(B, H, W, C)
+
+    @torch.no_grad()
+    def freeze_for_deployment(self, text_prototypes):
+        """Pre-compute frozen K/V from text prototypes for inference.
+
+        After this call, forward() no longer needs text_prototypes and
+        out_proj is merged into V projection.
+        """
+        k = self.text_proj_k(text_prototypes)  # [K, D]
+        v = self.text_proj_v(text_prototypes)  # [K, D]
+        # Merge out_proj into V: new_v = out_proj(v)
+        v_weight = self.out_proj.weight.data  # [D, D]
+        v_bias = self.out_proj.bias.data  # [D]
+        self._frozen_k = k
+        self._frozen_v = F.linear(v, v_weight, v_bias)

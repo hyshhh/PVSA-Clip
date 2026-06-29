@@ -186,3 +186,34 @@ class CLIPEncoderDecoder(EncoderDecoder):
         feats, category_prototypes = self.extract_feat(inputs)
         return self.decode_head.forward(
             feats, category_prototypes=category_prototypes)
+
+    @torch.no_grad()
+    def fuse_for_deployment(self):
+        """Fuse all CLIP modules for deployment.
+
+        After calling this:
+        - TextEncoder is removed (frozen prototypes used instead)
+        - Head's classification is fused into a single Conv2d
+        - Backbone TTRM uses pre-computed frozen K
+        - Backbone TextCrossAttention uses pre-computed frozen K/V
+
+        Call this AFTER loading checkpoint and BEFORE inference.
+        """
+        # 1. Get category prototypes
+        self.text_encoder.eval()
+        category_prototypes = self.text_encoder()
+        self.frozen_prototypes.copy_(category_prototypes)
+        self._prototypes_frozen = True
+
+        # 2. Fuse decode head (BN + proj + contrastive -> Conv2d)
+        if hasattr(self.decode_head, 'fuse_for_deployment'):
+            self.decode_head.fuse_for_deployment(category_prototypes)
+
+        # 3. Freeze backbone TTRM and TextCrossAttention
+        for name, module in self.backbone.named_modules():
+            # Freeze TTRM (inside TopkRouting inside ToppAttention inside Block)
+            if hasattr(module, 'freeze_for_deployment'):
+                module.freeze_for_deployment(category_prototypes)
+
+        # 4. Remove TextEncoder (free memory)
+        self.text_encoder = None

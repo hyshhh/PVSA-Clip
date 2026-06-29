@@ -431,6 +431,17 @@ class TopkRouting(nn.Module):
                   f'max={attn_max:.6f} mean={attn_mean:.6f} '
                   f'sum_mean={attn_sum:.6f} gt_0.9_ratio={peak_ratio:.6f}')
 
+    @torch.no_grad()
+    def freeze_for_deployment(self, text_prototypes):
+        """Pre-compute frozen TTRM K from text prototypes for inference.
+
+        After this call, forward() no longer needs text_prototypes for TTRM.
+        """
+        if not self.use_ttrm:
+            return
+        tc = self.ttrm_norm(text_prototypes)
+        self._frozen_tc_k = F.normalize(self.ttrm_text_proj(tc), dim=-1)
+
 
 class KVGather(nn.Module):
     def __init__(self, mul_weight='none', soft_weight=0.5):
