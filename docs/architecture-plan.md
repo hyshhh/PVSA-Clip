@@ -92,7 +92,7 @@ Top-P 路由：
 
 **与 SAM3 的区别：** SAM3 在编码器/解码器每层都做视觉-文本交叉注意力（6层×2），计算量大。TTRM 只在路由器的窗口池化后做一次轻量交叉注意力，且 gate 初始值很小（≈0.12），训练初期以原始视觉 Q 为主，逐步注入文本信息。
 
-**部署融合：** TTRM 关闭，走纯视觉路由，零额外开销。
+**部署融合：** TTRM 使用预计算 frozen K，无需 TextEncoder，仍有文本语义引导路由。
 
 ---
 
@@ -127,7 +127,7 @@ enhanced_visual = LayerNorm(visual + gate × text_info)
 
 **与 TTRM 的区别：** TTRM 在路由器内部做，影响"选哪些窗口"；TextCrossAttention 在 ToppAttention 之后做，直接修改视觉特征本身。两者互补。
 
-**部署融合：** TextCrossAttention 模块直接删除，走纯视觉前向，零额外开销。
+**部署融合：** TextCrossAttention 使用预计算 frozen K/V，out_proj 融合进 V 投影，无需 TextEncoder。
 
 ---
 
@@ -174,6 +174,6 @@ enhanced_visual = LayerNorm(visual + gate × text_info)
 
 **Step 3：** 分类头融合 — BN + einsum + scale + bias 融合进 1x1 Conv2d
 
-**Step 4：** TTRM 关闭 + TextCrossAttention 删除 — 走纯视觉路由
+**Step 4：** TTRM frozen K + TextCrossAttention frozen K/V — 预计算文本投影，推理时无需 TextEncoder
 
-**最终模型等价于原始 PVSA-Net + 一个 1x1 Conv 分类头，零文本计算开销。**
+**最终模型：TextEncoder 移除，Head 融合为 Conv2d，TTRM/Cross-Attn 使用预计算 frozen K/V 交互，零 TextEncoder 开销。**
