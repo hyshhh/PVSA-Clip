@@ -259,8 +259,8 @@ class TopkRouting(nn.Module):
             if not self.diff_routing and not self.soft_routing:
                 query = query.detach()
                 key = key.detach()
-            q = F.normalize(query, dim=-1)
-            k = F.normalize(key, dim=-1)
+            q = self.emb(query)
+            k = self.emb(key)
             attn = (q * self.scale) @ k.transpose(-2, -1)   # (n, p2, p2)
 
             # TTRM: cross-attention with text before routing
@@ -271,7 +271,7 @@ class TopkRouting(nn.Module):
                 tc_k = self._frozen_tc_k
             elif self.use_ttrm and category_prototypes is not None:
                 tc = self.ttrm_norm(category_prototypes)
-                tc_k = F.normalize(self.ttrm_text_proj(tc), dim=-1)
+                tc_k = self.ttrm_text_proj(tc)
             else:
                 tc_k = None
 
@@ -459,7 +459,7 @@ class TopkRouting(nn.Module):
         if not self.use_ttrm:
             return
         tc = self.ttrm_norm(text_prototypes)
-        self._frozen_tc_k = F.normalize(self.ttrm_text_proj(tc), dim=-1)
+        self._frozen_tc_k = self.ttrm_text_proj(tc)
 
 
 class KVGather(nn.Module):
