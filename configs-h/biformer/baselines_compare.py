@@ -52,6 +52,45 @@ val_evaluator = dict(type='IoUMetric', iou_metrics=['mIoU', 'mDice'],
                      ignore_index=255, classwise=True)
 test_evaluator = val_evaluator
 
+# ======================== 优化器 ========================
+# Transformer 模型 (Swin-T / SegFormer / BiFormer) 用 AdamW
+# CNN 模型 (DeepLabV3+) 用 SGD，切换时取消注释下面 SGD 块、注释 AdamW 块
+
+# ---- AdamW（默认，Transformer 模型） ----
+optim_wrapper = dict(
+    _delete_=True,
+    type='OptimWrapper',
+    optimizer=dict(type='AdamW', lr=6e-4, betas=(0.9, 0.999),
+                   weight_decay=0.01),
+    paramwise_cfg=dict(
+        custom_keys={
+            'norm': dict(decay_mult=0.0),
+            'head': dict(lr_mult=10.0),
+        }),
+)
+param_scheduler = [
+    dict(type='LinearLR', start_factor=0.001, by_epoch=True, begin=0, end=10),
+    dict(type='PolyLR', eta_min=1e-6, power=1.0, by_epoch=True,
+         begin=10, end=200),
+]
+
+# ---- SGD（DeepLabV3+ 时取消注释） ----
+# optim_wrapper = dict(
+#     _delete_=True,
+#     type='OptimWrapper',
+#     optimizer=dict(type='SGD', lr=0.01, momentum=0.9, weight_decay=0.0005),
+#     paramwise_cfg=dict(
+#         custom_keys={
+#             'norm': dict(decay_mult=0.0),
+#             'head': dict(lr_mult=10.0),
+#         }),
+# )
+# param_scheduler = [
+#     dict(type='LinearLR', start_factor=0.001, by_epoch=True, begin=0, end=10),
+#     dict(type='PolyLR', eta_min=1e-6, power=0.9, by_epoch=True,
+#          begin=10, end=200),
+# ]
+
 default_hooks = dict(
     checkpoint=dict(type='CheckpointHook', by_epoch=True, interval=10,
                     save_best='mIoU'),
