@@ -40,6 +40,8 @@ model = dict(
         topp_flash_backend=None,
         topp_flash_block_windows=64,
         topp_flash_debug=False,
+        # 路由 token 池化方式: 'avg' | 'max' | 'avgmax'
+        route_pooling='avgmax',
         # 特征图保存开关
         feature_vis_config=dict(
             enabled=False,              # True 开启保存

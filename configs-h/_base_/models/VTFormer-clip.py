@@ -34,6 +34,8 @@ model = dict(
         # CUDA inference backend
         topp_flash_backend=None,
         use_route_mask=True,
+        # 路由 token 池化方式: 'avg' | 'max' | 'avgmax'
+        route_pooling='avgmax',
     ),
     decode_head=dict(
         type='CLIPSegHead',

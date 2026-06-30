@@ -531,7 +531,8 @@ class ToppAttention(nn.Module):
                  topp_flash_debug=False,
                  use_route_mask=False,
                  use_ttrm=False,
-                 soft_kv_weight=0.5):
+                 soft_kv_weight=0.5,
+                 route_pooling='avg'):
         super().__init__()
         # local attention setting
         self.dim = dim
@@ -618,10 +619,20 @@ class ToppAttention(nn.Module):
         self.attn_act = nn.Softmax(dim=-1)
 
         self.auto_pad = auto_pad
+        self.route_pooling = route_pooling
 
     def _pool_route_tokens(self, q, kv):
         k = kv[..., 0:self.qk_dim]
-        return q.mean([2, 3]), k.mean([2, 3])
+        if self.route_pooling == 'avg':
+            return q.mean([2, 3]), k.mean([2, 3])
+        elif self.route_pooling == 'max':
+            return q.amax([2, 3]), k.amax([2, 3])
+        elif self.route_pooling == 'avgmax':
+            return (q.mean([2, 3]) + q.amax([2, 3])) / 2, \
+                   (k.mean([2, 3]) + k.amax([2, 3])) / 2
+        else:
+            raise ValueError(f'route_pooling={self.route_pooling} not supported, '
+                             f'choose from avg/max/avgmax')
 
     def forward(self, x, GA, ret_attn_mask=False, category_prototypes=None):
         """
