@@ -43,8 +43,11 @@ class BiFormer_fusion(VTFormer):
             raise TypeError(f'pretrained must be a str or None, but got {type(pretrained)}')
 
     def forward_features(self, x: torch.Tensor, category_prototypes=None):
-        if not self.training:
-            self.optimize_for_inference()
+        # NOTE: optimize_for_inference() removed from here.
+        # Conv+BN fusing mutates model state_dict, causing key mismatch
+        # when loading checkpoints after eval()+forward triggers fusion.
+        # Call model.optimize_for_inference() explicitly AFTER loading
+        # weights if you want inference fusion.
 
         out = []
         stage_features = []

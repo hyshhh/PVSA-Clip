@@ -61,8 +61,11 @@ class BiFormer_fusion_baseline(VTFormer):
 
 
     def forward_features(self, x: torch.Tensor):
-        if not self.training:
-            self.optimize_for_inference()
+        # NOTE: optimize_for_inference() removed from here.
+        # Conv+BN fusing mutates model state_dict, causing key mismatch
+        # when loading checkpoints after eval()+forward triggers fusion.
+        # Call model.optimize_for_inference() explicitly AFTER loading
+        # weights if you want inference fusion.
 
         vis_cfg = self.feature_vis_config
         vis_enabled = vis_cfg.get('enabled', False)
