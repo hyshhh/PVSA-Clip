@@ -23,6 +23,7 @@ model = dict(
         head_dim=32,
         diff_routing=True,
         soft_routing=True,
+        param_routing=True,
         pre_norm=True,
         auto_pad=True,
         remove_cnn_branch=True,
