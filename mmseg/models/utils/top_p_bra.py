@@ -180,7 +180,6 @@ class TopkRouting(nn.Module):
                  route_configs=None,
                  attn_vis_config=None,
                  debug_route=False,
-                 use_nan_guard=False,
                  use_ttrm=False,
                  soft_routing=False):
         super().__init__()
@@ -191,7 +190,6 @@ class TopkRouting(nn.Module):
         self.soft_routing = soft_routing
         self.W = W
         self.debug_route = debug_route
-        self.use_nan_guard = use_nan_guard
         self.emb = nn.Linear(qk_dim, qk_dim) if param_routing else nn.Identity()
         # routing activate
         self.routing_act = nn.Softmax(dim=-1)
@@ -241,7 +239,7 @@ class TopkRouting(nn.Module):
             gated_text_bias = None
 
             # TTRM: cross-attention with text before routing
-            # Priority: use pre-computed frozen K/V if available (deployment)
+            # Use cached K/V when available (frozen or auto-cached in eval)
             has_frozen_kv = (
                 hasattr(self, '_frozen_tc_k')
                 and self._frozen_tc_k is not None
@@ -254,6 +252,10 @@ class TopkRouting(nn.Module):
                 tc = self.ttrm_norm(category_prototypes)
                 tc_k = self.ttrm_text_proj(tc)
                 tc_v = self.ttrm_text_v_proj(tc)
+                # Auto-cache in eval mode (text prototypes are fixed)
+                if not self.training:
+                    self.register_buffer('_frozen_tc_k', tc_k)
+                    self.register_buffer('_frozen_tc_v', tc_v)
             else:
                 tc_k = None
                 tc_v = None
@@ -294,13 +296,7 @@ class TopkRouting(nn.Module):
             attn, k=self.topk, dim=-1, sorted=True
         )  # (n, p2, k)
 
-        if self.use_nan_guard:
-            topk_score = torch.nan_to_num(topk_score, nan=0.0, posinf=50.0,
-                                          neginf=-50.0)
-            topk_score = (topk_score / self.Temperature).clamp(-50.0, 50.0)
-            topk_score = torch.softmax(topk_score, dim=-1)
-        else:
-            topk_score = torch.softmax(topk_score / self.Temperature, dim=-1)
+        topk_score = torch.softmax(topk_score / self.Temperature, dim=-1)
         self._maybe_save_attention(attn, topk_score, topk_index)
 
         # 5. Cumulative probability pruning
@@ -459,12 +455,13 @@ class TopkRouting(nn.Module):
         """Pre-compute frozen TTRM K from text prototypes for inference.
 
         After this call, forward() no longer needs text_prototypes for TTRM.
+        Registered as buffers so they are saved/loaded with checkpoints.
         """
         if not self.use_ttrm:
             return
         tc = self.ttrm_norm(text_prototypes)
-        self._frozen_tc_k = self.ttrm_text_proj(tc)
-        self._frozen_tc_v = self.ttrm_text_v_proj(tc)
+        self.register_buffer('_frozen_tc_k', self.ttrm_text_proj(tc))
+        self.register_buffer('_frozen_tc_v', self.ttrm_text_v_proj(tc))
 
 
 class KVGather(nn.Module):
@@ -533,7 +530,6 @@ class ToppAttention(nn.Module):
                  debug_route=False,
                  topp_flash_debug=False,
                  use_route_mask=False,
-                 use_nan_guard=False,
                  use_ttrm=False,
                  soft_kv_weight=0.5):
         super().__init__()
@@ -573,7 +569,6 @@ class ToppAttention(nn.Module):
                                   route_configs=self.topp_route_configs,
                                   attn_vis_config=self.attn_vis_config,
                                   debug_route=debug_route,
-                                  use_nan_guard=use_nan_guard,
                                   use_ttrm=use_ttrm,
                                   soft_routing=soft_routing)
         if self.soft_routing:  # soft routing, always diffrentiable (if no detach)

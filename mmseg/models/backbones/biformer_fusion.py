@@ -58,8 +58,9 @@ class BiFormer_fusion(VTFormer):
         for i in range(3):
             gate_visual = self.sigmoid(
                 self.bn[i](self.conv11[i](stage_features[i + 1])))
-            stage_features[i] = stage_features[i] + \
-                self.upsample2(gate_visual) * stage_features[i]
+            target_size = stage_features[i].shape[2:]
+            gate_up = F.interpolate(gate_visual, size=target_size, mode='bilinear', align_corners=False)
+            stage_features[i] = stage_features[i] + gate_up * stage_features[i]
 
         for i in range(4):
             out.append(self.extra_norms[i](stage_features[i]))

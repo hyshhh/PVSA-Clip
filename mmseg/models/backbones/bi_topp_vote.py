@@ -71,7 +71,6 @@ class Block(nn.Module):
                  debug_route=False,
                  topp_flash_debug=False,
                  use_route_mask=False,
-                 use_nan_guard=False,
                  use_ttrm=False,
                  soft_kv_weight=0.5,
                  cross_attn_module=None):
@@ -100,7 +99,6 @@ class Block(nn.Module):
                                 debug_route=debug_route,
                                 topp_flash_debug=topp_flash_debug,
                                 use_route_mask=use_route_mask,
-                                use_nan_guard=use_nan_guard,
                                 use_ttrm=use_ttrm,
                                 soft_kv_weight=soft_kv_weight)
 
@@ -319,7 +317,6 @@ class VTFormer(nn.Module):
                  attn_vis_config=None,
                  debug_route=False,
                  use_route_mask=False,
-                 use_nan_guard=False,
                  fam_reduction=4,
                  cnn_dwconv_layers=[2, 1, 2, 1],
                  feature_vis_config=None,
@@ -340,7 +337,6 @@ class VTFormer(nn.Module):
         self.attn_vis_config = attn_vis_config
         self.debug_route = debug_route
         self.use_route_mask = use_route_mask
-        self.use_nan_guard = use_nan_guard
         self.feature_vis_config = feature_vis_config or {}
         self._inference_fused = False
         self._disable_inference_fusion = False
@@ -477,7 +473,6 @@ class VTFormer(nn.Module):
                         debug_route=self.debug_route,
                         topp_flash_debug=self.topp_flash_debug,
                         use_route_mask=self.use_route_mask,
-                        use_nan_guard=use_nan_guard,
                         use_ttrm=(use_ttrm and i in ttrm_stages),
                         soft_kv_weight=soft_kv_weight,
                         cross_attn_module=TextCrossAttention(

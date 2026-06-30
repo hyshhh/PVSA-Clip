@@ -33,6 +33,7 @@ model = dict(
         cross_attn_stages=[2, 3],
         # CUDA inference backend
         topp_flash_backend=None,
+        use_route_mask=True,
     ),
     decode_head=dict(
         type='CLIPSegHead',

@@ -88,7 +88,7 @@ class Block(nn.Module):
                  debug_route=False,
                  topp_flash_debug=False,
                  use_route_mask=False,
-                 use_nan_guard=False):
+                 ):
         super().__init__()
         qk_dim = qk_dim or dim
 
@@ -115,8 +115,7 @@ class Block(nn.Module):
                                     attn_vis_config=attn_vis_config,
                                     debug_route=debug_route,
                                     topp_flash_debug=topp_flash_debug,
-                                    use_route_mask=use_route_mask,
-                                    use_nan_guard=use_nan_guard)
+                                    use_route_mask=use_route_mask)
         elif topk == -1:
             self.attn = Attention(dim=dim)
         elif topk == -2:
@@ -446,7 +445,6 @@ class VTFormer(nn.Module):
                  attn_vis_config=None,
                  debug_route=False,
                  use_route_mask=False,
-                 use_nan_guard=False,
                  fam_reduction=4,
                  cnn_block_layers=[2, 1, 2, 1],
                  cnn_block_type='dwconv',
@@ -462,7 +460,6 @@ class VTFormer(nn.Module):
         self.attn_vis_config = attn_vis_config
         self.debug_route = debug_route
         self.use_route_mask = use_route_mask
-        self.use_nan_guard = use_nan_guard
         self.feature_vis_config = feature_vis_config or {}
         self._inference_fused = False
         self._disable_inference_fusion = False
@@ -578,8 +575,7 @@ class VTFormer(nn.Module):
                         attn_vis_config=self.attn_vis_config,
                         debug_route=self.debug_route,
                         topp_flash_debug=self.topp_flash_debug,
-                        use_route_mask=self.use_route_mask,
-                        use_nan_guard=self.use_nan_guard) for j in range(depth[i])],
+                        use_route_mask=self.use_route_mask) for j in range(depth[i])],
             )
             if i in use_checkpoint_stages:
                 stage = checkpoint_wrapper(stage)
