@@ -29,7 +29,8 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py configs-h/biform
 CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py configs-h/biformer/biformer_clip_waterseg.py work_dirs/clip_waterseg/epoch_200.pth --cfg-options model.backbone.topp_flash_backend=None
 
 # 保存分割可视化结果
-CUDA_VISIBLE_DEVICES=0 python tools/test.py configs-h/biformer/biformer_clip_waterseg.py work_dirs/clip_waterseg/epoch_200.pth --show-dir vis_results/
+CUDA_VISIBLE_DEVICES=0 python tools/test.py configs-h/biformer/biformer_baseline_waterseg.py work_dirs/baseline/epoch_200.pth --show-dir vis_results/baseline/
+CUDA_VISIBLE_DEVICES=0 python tools/test.py configs-h/biformer/biformer_clip_waterseg.py work_dirs/clip_waterseg/epoch_200.pth --show-dir vis_results/clip/
 ```
 
 ## 特征图和注意力可视化
