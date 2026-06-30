@@ -15,7 +15,6 @@ model = dict(
             16: dict(maxk=5, mink=2, p=0.2, temperature=0.5, energy=3.0),
             12: dict(maxk=10, mink=3, p=0.6, temperature=4, energy=6.0),
             8: dict(maxk=25, mink=5, p=0.6, temperature=8, energy=12.0),
-            6: dict(maxk=49, mink=8, p=2.0, temperature=10, energy=24.0),
         },
         side_dwconv=5,
         before_attn_dwconv=3,
