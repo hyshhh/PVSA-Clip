@@ -222,6 +222,7 @@ class TopkRouting(nn.Module):
         self.P = float(route_config['p'])
         self.Temperature = float(route_config['temperature'])
         self.energy = float(route_config['energy'])
+        self.mink = int(route_config.get('mink', 1))
 
         self.silu = True
 
@@ -304,7 +305,7 @@ class TopkRouting(nn.Module):
 
         keep_mask = cumsum <= self.P                   # (n, p2, k)
         keep_len = keep_mask.sum(dim=-1, keepdim=True) # (n, p2, 1)
-        keep_len = keep_len.clamp(min=1)
+        keep_len = keep_len.clamp(min=self.mink)
 
         # 6. Vectorized truncation (NO LOOP)
         max_len = keep_len.max()
