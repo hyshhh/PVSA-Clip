@@ -8,17 +8,6 @@ _base_ = [
 # Baseline PVSA-Net training (non-CLIP)
 # CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_baseline_waterseg.py
 
-crop_size = (256, 256)
-data_preprocessor = dict(
-    type='SegDataPreProcessor',
-    mean=[123.675, 116.28, 103.53],
-    std=[58.395, 57.12, 57.375],
-    bgr_to_rgb=True,
-    pad_val=0,
-    seg_pad_val=255,
-    size=crop_size
-)
-
 train_dataloader = dict(
     batch_size=16,
     num_workers=8,
@@ -58,7 +47,6 @@ val_evaluator = dict(
 test_evaluator = val_evaluator
 
 model = dict(
-    data_preprocessor=data_preprocessor,
     test_cfg=dict(mode='whole')
 )
 
