@@ -89,6 +89,7 @@ class Block(nn.Module):
                  topp_flash_debug=False,
                  use_route_mask=False,
                  route_pooling='avg',
+                 use_plain_attn=False,
                  ):
         super().__init__()
         qk_dim = qk_dim or dim
@@ -100,7 +101,7 @@ class Block(nn.Module):
             self.pos_embed = nn.Conv2d(dim, dim, kernel_size=before_attn_dwconv, padding=1, groups=dim)
         else:
             self.pos_embed = lambda x: 0
-        if topk > 0:
+        if topk > 0 and not use_plain_attn:
             self.PA = ToppAttention(dim=dim, num_heads=num_heads, n_win=n_win, qk_dim=qk_dim,
                                     qk_scale=qk_scale, kv_per_win=kv_per_win,
                                     kv_downsample_ratio=kv_downsample_ratio,
@@ -118,6 +119,11 @@ class Block(nn.Module):
                                     topp_flash_debug=topp_flash_debug,
                                     use_route_mask=use_route_mask,
                                     route_pooling=route_pooling)
+            self._use_plain_attn = False
+        elif topk > 0 and use_plain_attn:
+            # 最后一层用普通 self-attention（token 数少，O(n²) 可接受）
+            self.PA = Attention(dim=dim, num_heads=num_heads)
+            self._use_plain_attn = True
         elif topk == -1:
             self.attn = Attention(dim=dim)
         elif topk == -2:
@@ -161,8 +167,11 @@ class Block(nn.Module):
         """
         # VTFormerv1.22,只有Top-p
         x = x + self.pos_embed(x)
-        x = x.permute(0, 2, 3, 1) 
-        PA=self.PA(self.norm3(x),None)
+        x = x.permute(0, 2, 3, 1)
+        if self._use_plain_attn:
+            PA = self.PA(self.norm3(x))
+        else:
+            PA = self.PA(self.norm3(x), None)
         if self.pre_norm:
                 x = x + self.drop_path(PA)   # (N, H, W, C)          
                 x = x + self.drop_path(self.mlp2(self.norm4(x)))  # (N, H, W, C)
@@ -448,6 +457,7 @@ class VTFormer(nn.Module):
                  debug_route=False,
                  use_route_mask=False,
                  route_pooling='avg',
+                 use_plain_attn_last_stage=False,
                  fam_reduction=4,
                  cnn_block_layers=[2, 1, 2, 1],
                  cnn_block_type='dwconv',
@@ -464,6 +474,7 @@ class VTFormer(nn.Module):
         self.debug_route = debug_route
         self.use_route_mask = use_route_mask
         self.route_pooling = route_pooling
+        self.use_plain_attn_last_stage = use_plain_attn_last_stage
         self.feature_vis_config = feature_vis_config or {}
         self._inference_fused = False
         self._disable_inference_fusion = False
@@ -580,7 +591,9 @@ class VTFormer(nn.Module):
                         debug_route=self.debug_route,
                         topp_flash_debug=self.topp_flash_debug,
                         use_route_mask=self.use_route_mask,
-                        route_pooling=self.route_pooling) for j in range(depth[i])],
+                        route_pooling=self.route_pooling,
+                        use_plain_attn=(self.use_plain_attn_last_stage and i == 3)
+                        ) for j in range(depth[i])],
             )
             if i in use_checkpoint_stages:
                 stage = checkpoint_wrapper(stage)

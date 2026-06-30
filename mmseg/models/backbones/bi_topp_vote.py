@@ -74,6 +74,7 @@ class Block(nn.Module):
                  use_ttrm=False,
                  soft_kv_weight=0.5,
                  route_pooling='avg',
+                 use_plain_attn=False,
                  cross_attn_module=None):
         super().__init__()
         qk_dim = qk_dim or dim
@@ -84,25 +85,30 @@ class Block(nn.Module):
         else:
             self.pos_embed = lambda x: 0
 
-        self.PA = ToppAttention(dim=dim, num_heads=num_heads, n_win=n_win, qk_dim=qk_dim,
-                                qk_scale=qk_scale, kv_per_win=kv_per_win,
-                                kv_downsample_ratio=kv_downsample_ratio,
-                                kv_downsample_kernel=kv_downsample_kernel,
-                                kv_downsample_mode=kv_downsample_mode,
-                                topk=topk, param_attention=param_attention, param_routing=param_routing,
-                                diff_routing=diff_routing, soft_routing=soft_routing,
-                                side_dwconv=side_dwconv,
-                                auto_pad=auto_pad, W=self.W,
-                                topp_flash_block_windows=topp_flash_block_windows,
-                                topp_flash_backend=topp_flash_backend,
-                                topp_route_configs=topp_route_configs,
-                                attn_vis_config=attn_vis_config,
-                                debug_route=debug_route,
-                                topp_flash_debug=topp_flash_debug,
-                                use_route_mask=use_route_mask,
-                                use_ttrm=use_ttrm,
-                                soft_kv_weight=soft_kv_weight,
-                                route_pooling=route_pooling)
+        if topk > 0 and not use_plain_attn:
+            self.PA = ToppAttention(dim=dim, num_heads=num_heads, n_win=n_win, qk_dim=qk_dim,
+                                    qk_scale=qk_scale, kv_per_win=kv_per_win,
+                                    kv_downsample_ratio=kv_downsample_ratio,
+                                    kv_downsample_kernel=kv_downsample_kernel,
+                                    kv_downsample_mode=kv_downsample_mode,
+                                    topk=topk, param_attention=param_attention, param_routing=param_routing,
+                                    diff_routing=diff_routing, soft_routing=soft_routing,
+                                    side_dwconv=side_dwconv,
+                                    auto_pad=auto_pad, W=self.W,
+                                    topp_flash_block_windows=topp_flash_block_windows,
+                                    topp_flash_backend=topp_flash_backend,
+                                    topp_route_configs=topp_route_configs,
+                                    attn_vis_config=attn_vis_config,
+                                    debug_route=debug_route,
+                                    topp_flash_debug=topp_flash_debug,
+                                    use_route_mask=use_route_mask,
+                                    use_ttrm=use_ttrm,
+                                    soft_kv_weight=soft_kv_weight,
+                                    route_pooling=route_pooling)
+            self._use_plain_attn = False
+        elif topk > 0 and use_plain_attn:
+            self.PA = Attention(dim=dim, num_heads=num_heads)
+            self._use_plain_attn = True
 
         # Cross-attention module (for stages 2-3, shared across blocks in same stage)
         self.cross_attn = cross_attn_module
@@ -119,7 +125,10 @@ class Block(nn.Module):
     def forward(self, x, category_prototypes=None):
         x = x + self.pos_embed(x)
         x = x.permute(0, 2, 3, 1)
-        PA = self.PA(self.norm3(x), None, category_prototypes=category_prototypes)
+        if self._use_plain_attn:
+            PA = self.PA(self.norm3(x))
+        else:
+            PA = self.PA(self.norm3(x), None, category_prototypes=category_prototypes)
         if self.pre_norm:
             x = x + self.drop_path(PA)
             # Cross-attention: visual features attend to text prototypes
@@ -320,6 +329,7 @@ class VTFormer(nn.Module):
                  debug_route=False,
                  use_route_mask=False,
                  route_pooling='avg',
+                 use_plain_attn_last_stage=False,
                  fam_reduction=4,
                  cnn_dwconv_layers=[2, 1, 2, 1],
                  feature_vis_config=None,
@@ -341,6 +351,7 @@ class VTFormer(nn.Module):
         self.debug_route = debug_route
         self.use_route_mask = use_route_mask
         self.route_pooling = route_pooling
+        self.use_plain_attn_last_stage = use_plain_attn_last_stage
         self.feature_vis_config = feature_vis_config or {}
         self._inference_fused = False
         self._disable_inference_fusion = False
@@ -480,6 +491,7 @@ class VTFormer(nn.Module):
                         use_ttrm=(use_ttrm and i in ttrm_stages),
                         soft_kv_weight=soft_kv_weight,
                         route_pooling=self.route_pooling,
+                        use_plain_attn=(self.use_plain_attn_last_stage and i == 3),
                         cross_attn_module=TextCrossAttention(
                             visual_dim=embed_dim[i], text_dim=512,
                             num_heads=nheads[i]) if use_ca else None

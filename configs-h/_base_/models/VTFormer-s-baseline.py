@@ -42,6 +42,8 @@ model = dict(
         topp_flash_debug=False,
         # 路由 token 池化方式: 'avg' | 'max' | 'avgmax'
         route_pooling='avgmax',
+        # 最后一层 stage 用普通 self-attention 替代 ToppAttention
+        use_plain_attn_last_stage=True,
         # 特征图保存开关
         feature_vis_config=dict(
             enabled=False,              # True 开启保存

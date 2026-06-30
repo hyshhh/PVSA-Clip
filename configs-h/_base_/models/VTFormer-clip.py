@@ -36,6 +36,8 @@ model = dict(
         use_route_mask=True,
         # 路由 token 池化方式: 'avg' | 'max' | 'avgmax'
         route_pooling='avgmax',
+        # 最后一层 stage 用普通 self-attention 替代 ToppAttention
+        use_plain_attn_last_stage=True,
     ),
     decode_head=dict(
         type='CLIPSegHead',
