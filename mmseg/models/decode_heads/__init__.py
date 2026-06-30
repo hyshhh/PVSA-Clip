@@ -2,5 +2,14 @@
 from .decode_head import BaseDecodeHead
 from .segformer_head import SegformerHead
 from .clip_seg_head import CLIPSegHead
+# 标准 mmseg head（用于对比实验）
+from .fcn_head import FCNHead
+from .aspp_head import ASPPHead
+from .sep_aspp_head import DepthwiseSeparableASPPHead
+from .psp_head import PSPHead
+from .uper_head import UPerHead
 
-__all__ = ['BaseDecodeHead', 'SegformerHead', 'CLIPSegHead']
+__all__ = [
+    'BaseDecodeHead', 'SegformerHead', 'CLIPSegHead',
+    'FCNHead', 'ASPPHead', 'DepthwiseSeparableASPPHead', 'PSPHead', 'UPerHead',
+]
