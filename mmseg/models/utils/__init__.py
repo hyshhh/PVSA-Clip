@@ -3,8 +3,10 @@ from .wrappers import Upsample, resize
 from .text_encoder import TextEncoder
 from .res_layer import ResLayer
 from .embed import PatchEmbed, PatchMerging
+from .shape_convert import nchw_to_nlc, nlc_to_nchw
 
 __all__ = [
     'Upsample', 'resize', 'TextEncoder',
     'ResLayer', 'PatchEmbed', 'PatchMerging',
+    'nchw_to_nlc', 'nlc_to_nchw',
 ]
