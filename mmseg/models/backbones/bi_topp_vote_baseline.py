@@ -456,7 +456,7 @@ class VTFormer(nn.Module):
         # CNN 分支: 接 DWConv blocks
         cnn_stem_layers = _make_stem_conv() + [
             nn.BatchNorm2d(embed_dim[0]),
-            nn.GELU(inplace=True),
+            nn.ReLU(inplace=True),
         ]
         cnn_stem_layers.extend([
             _make_cnn_block(embed_dim[0]) for _ in range(cnn_block_layers[0])
