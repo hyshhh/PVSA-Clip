@@ -95,3 +95,7 @@ default_hooks = dict(
     checkpoint=dict(type='CheckpointHook', by_epoch=True, interval=10,
                     save_best='mIoU'),
 )
+
+model = dict(
+    data_preprocessor=data_preprocessor,
+)
