@@ -35,7 +35,7 @@ model = dict(
         layer_scale_init_value=-1,
         qk_dims=[64, 128, 256, 512],
         head_dim=32,
-        param_routing=True, diff_routing=True, soft_routing=True,
+        param_routing=False, diff_routing=False, soft_routing=False,
         pre_norm=True,
         pe=None,
         auto_pad=True,
@@ -50,7 +50,7 @@ model = dict(
         topp_flash_block_windows=64,
         topp_flash_debug=False,
         # 路由 token 池化方式: 'avg' | 'max' | 'avgmax'
-        route_pooling='avgmax',
+        route_pooling='avg',
         # 最后一层 stage 用普通 self-attention 替代 ToppAttention
         use_plain_attn_last_stage=True,
         # 特征图保存开关

@@ -31,6 +31,8 @@ optim_wrapper = dict(
             'pos_block': dict(decay_mult=0.0),
             'norm': dict(decay_mult=0.0),
             'head': dict(lr_mult=10.0),
+            # 路由器降学习率：验证「路由器是否训练过猛」
+            'PA.router': dict(lr_mult=0.2, decay_mult=1.0),
         })
 )
 

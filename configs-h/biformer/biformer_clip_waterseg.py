@@ -61,6 +61,8 @@ optim_wrapper = dict(
             'head': dict(lr_mult=10.0),
             'text_encoder': dict(lr_mult=1.0),
             'ttrm': dict(lr_mult=1.0),
+            # 路由器降学习率：验证「路由器是否训练过猛」
+            'PA.router': dict(lr_mult=0.2, decay_mult=1.0),
         })
 )
 
