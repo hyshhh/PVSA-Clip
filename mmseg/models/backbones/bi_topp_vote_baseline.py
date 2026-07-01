@@ -1,7 +1,5 @@
 import math
 from collections import OrderedDict
-from functools import partial
-from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -9,9 +7,7 @@ from torch.nn.utils.fusion import fuse_conv_bn_eval
 
 from einops.layers.torch import Rearrange
 from fairscale.nn.checkpoint import checkpoint_wrapper
-from timm.models import register_model
-from timm.models.layers import DropPath, to_2tuple, trunc_normal_
-from timm.models.vision_transformer import _cfg
+from timm.models.layers import DropPath, trunc_normal_
 from ..utils.common import Attention, AttentionLePE, DWConv
 from ..utils.top_p_bra import ToppAttention
 from mmseg.registry import MODELS
@@ -59,18 +55,6 @@ def _fuse_sequential_conv_bn(module):
 def get_pe_layer(emb_dim, pe_dim=None, name='none'):
     if name == 'none':
         return nn.Identity()
-    # if name == 'sum':
-    #     return Summer(PositionalEncodingPermute2D(emb_dim))
-    # elif name == 'npe.sin':
-    #     return NeuralPE(emb_dim=emb_dim, pe_dim=pe_dim, mode='sin')
-    # elif name == 'npe.coord':
-    #     return NeuralPE(emb_dim=emb_dim, pe_dim=pe_dim, mode='coord')
-    # elif name == 'hpe.conv':
-    #     return HybridPE(emb_dim=emb_dim, pe_dim=pe_dim, mode='conv', res_shortcut=True)
-    # elif name == 'hpe.dsconv':
-    #     return HybridPE(emb_dim=emb_dim, pe_dim=pe_dim, mode='dsconv', res_shortcut=True)
-    # elif name == 'hpe.pointconv':
-    #     return HybridPE(emb_dim=emb_dim, pe_dim=pe_dim, mode='pointconv', res_shortcut=True)
     else:
         raise ValueError(f'PE name {name} is not surpported!')
 
@@ -139,11 +123,6 @@ class Block(nn.Module):
         self.norm2 = nn.LayerNorm(dim, eps=1e-6)
         self.norm3 = nn.LayerNorm(dim, eps=1e-6)
         self.norm4 = nn.LayerNorm(dim, eps=1e-6)
-        # self.mlp = nn.Sequential(nn.Linear(dim, int(mlp_ratio * dim)),
-        #                          DWConv(int(mlp_ratio * dim)) if mlp_dwconv else nn.Identity(),
-        #                          nn.GELU(),
-        #                          nn.Linear(int(mlp_ratio * dim), dim)
-        #                          )
         self.mlp2 = nn.Sequential(nn.Linear(dim, int(mlp_ratio * dim)),
                                  DWConv(int(mlp_ratio * dim)) if mlp_dwconv else nn.Identity(),
                                  nn.GELU(),
@@ -177,28 +156,7 @@ class Block(nn.Module):
                 x = x + self.drop_path(self.mlp2(self.norm4(x)))  # (N, H, W, C)
         x = x.permute(0, 3, 1, 2)
         return x
-        # x = x.permute(0, 3, 1, 2)
 
-        
-        # VTFormerv3.1
-        x = x + self.pos_embed(x)
-        x = x.permute(0, 2, 3, 1) 
-        GA,A1=self.attn(self.norm1(x))
-
-        if self.pre_norm:
-                x = x + self.drop_path(GA)  # (N, H, W, C)
-                x = x + self.drop_path(self.mlp(self.norm2(x)))  # (N, H, W, C)
-        # x = x.permute(0, 3, 1, 2)
-
-        # #VTFormerv3.1
-        # x = x + self.pos_embed(x)
-        # x = x.permute(0, 2, 3, 1)
-        PA=self.PA(self.norm3(x),A1)
-        if self.pre_norm:
-                x = x + self.drop_path(PA)  # (N, H, W, C)          
-                x = x + self.drop_path(self.mlp2(self.norm4(x)))  # (N, H, W, C)
-        x = x.permute(0, 3, 1, 2)
-        return x
 class FeatureAlignmentModule(nn.Module):
     def __init__(self, dim, reduction=1):
         super(FeatureAlignmentModule, self).__init__()
@@ -231,10 +189,6 @@ class FeatureAlignmentModule(nn.Module):
         out_x1 = x1 + lc * channel_weights[1] * x2 + ls * spatial_weights[1] * x2
         out_x2 = x2 + lc * channel_weights[0] * x1 + ls * spatial_weights[0] * x1
         return out_x1, out_x2
-from mmengine.model import BaseModule, ModuleList, Sequential   
-from mmcv.cnn.bricks import DropPath, build_activation_layer, build_norm_layer
-import torch
-import torch.nn as nn
 
 class DepthWiseConvModule(nn.Module):
     def __init__(self,
@@ -380,16 +334,10 @@ class ChannelWeights(nn.Module):
 
     def forward(self, x1, x2):
         B, C, H, W = x1.shape
-        # print("!!!!!!!!!!!!")
-        # print(B, C, H, W)#(1,12,256,256)
         x = torch.cat((x1, x2), dim=1)
-        # print("a")
-        # print(x.shape)
 
         # Avg. Adaptive normalization
         avg = self.avg_pool(x).view(B, 2 * C)
-        # print("b")
-        # print("avg shape:", avg.shape)
         avg_attn = self.mlp_avg(avg).softmax(dim=-1)
         avg_x1, avg_x2 = (avg_attn.view(B, 2, 1) * avg.view(B, 2, C)).chunk(2, dim=1)
         avg_x = (avg_x1 + avg_x2).view(B, C)
@@ -506,9 +454,14 @@ class VTFormer(nn.Module):
         # Transformer 分支: 加 BN 归一化输出
         trans_stem = nn.Sequential(*_make_stem_conv(), nn.BatchNorm2d(embed_dim[0]))
         # CNN 分支: 接 DWConv blocks
-        cnn_stem = nn.Sequential(*_make_stem_conv(), *[
+        cnn_stem_layers = _make_stem_conv() + [
+            nn.BatchNorm2d(embed_dim[0]),
+            nn.GELU(inplace=True),
+        ]
+        cnn_stem_layers.extend([
             _make_cnn_block(embed_dim[0]) for _ in range(cnn_block_layers[0])
         ])
+        cnn_stem = nn.Sequential(*cnn_stem_layers)
 
         if (pe is not None) and 0 in pe_stages:
             trans_stem.append(get_pe_layer(emb_dim=embed_dim[0], name=pe))
@@ -521,9 +474,6 @@ class VTFormer(nn.Module):
 
         self.FAM.append(FeatureAlignmentModule(dim=2*embed_dim[0], reduction=fam_reduction))
         self.fusion = nn.ModuleList()
-        self.norm = nn.LayerNorm(normalized_shape=1)  # 根据实际维度调整
-        # 定义Sigmoid激活
-        self.sigmoid = nn.Sigmoid()
         self.fusion.append(
             nn.Conv2d(2*embed_dim[0], embed_dim[0], kernel_size=(1,1), stride=(1, 1), padding=(0, 0),bias=True)
             )
@@ -534,6 +484,8 @@ class VTFormer(nn.Module):
             )
             cnn_layers = [
                 nn.Conv2d(embed_dim[i], embed_dim[i + 1], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
+                nn.BatchNorm2d(embed_dim[i + 1]),
+                nn.GELU(),
             ]
             cnn_layers.extend([
                 _make_cnn_block(embed_dim[i + 1])
@@ -559,7 +511,6 @@ class VTFormer(nn.Module):
         nheads = [dim // head_dim for dim in qk_dims]
         dp_rates = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depth))]
         cur = 0
-        topks=[16,12,8,6]
         for i in range(4):
             stage = nn.Sequential(
                 *[Block(dim=embed_dim[i], drop_path=dp_rates[cur + j],

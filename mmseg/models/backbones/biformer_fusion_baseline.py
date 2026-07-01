@@ -8,37 +8,47 @@ from ..utils.topp_flash_kernel import _load_cuda_extension
 from timm.models.layers import LayerNorm2d
 from mmengine.runner import load_checkpoint
 import os
-import warnings
 import numpy as np
 import cv2
 from PIL import Image
-import torch
 import torch.nn.functional as F
 @MODELS.register_module()
 class BiFormer_fusion_baseline(VTFormer):
-    def __init__(self, pretrained=None, **kwargs):
+    def __init__(self, pretrained=None, cross_stage_fusion_mode='gate', **kwargs):
         super().__init__(**kwargs)
+        valid_fusion_modes = {'none', 'gate', 'concat', 'gate_concat'}
+        if cross_stage_fusion_mode not in valid_fusion_modes:
+            raise ValueError(
+                f'cross_stage_fusion_mode must be one of {valid_fusion_modes}, '
+                f'but got {cross_stage_fusion_mode}')
+        self.cross_stage_fusion_mode = cross_stage_fusion_mode
         self.extra_norms = nn.ModuleList()
-        self.bn = nn.ModuleList()
+        self.trans_bn = nn.ModuleList()
+        self.cnn_bn = nn.ModuleList()
         self.cnn_conv=nn.ModuleList()
         self.trans_conv=nn.ModuleList()
+        self.trans_cross_stage_fusion = nn.ModuleList()
+        self.cnn_cross_stage_fusion = nn.ModuleList()
+        self.trans_gate_scale = nn.ParameterList()
+        self.cnn_gate_scale = nn.ParameterList()
         for i in range(4):
             self.extra_norms.append(LayerNorm2d(self.embed_dim[i]))
-            self.bn.append(nn.BatchNorm2d(self.embed_dim[i]))
+            self.trans_bn.append(nn.BatchNorm2d(self.embed_dim[i]))
+            self.cnn_bn.append(nn.BatchNorm2d(self.embed_dim[i]))
             self.cnn_conv.append(nn.Conv2d(2*self.embed_dim[i],self.embed_dim[i],1,1,0))
             self.trans_conv.append(nn.Conv2d(2*self.embed_dim[i],self.embed_dim[i],1,1,0))
+            if i < 3:
+                self.trans_cross_stage_fusion.append(
+                    nn.Conv2d(2 * self.embed_dim[i], self.embed_dim[i], 1, 1, 0))
+                self.cnn_cross_stage_fusion.append(
+                    nn.Conv2d(2 * self.embed_dim[i], self.embed_dim[i], 1, 1, 0))
+                self.trans_gate_scale.append(nn.Parameter(torch.tensor(0.0)))
+                self.cnn_gate_scale.append(nn.Parameter(torch.tensor(0.0)))
             
             
         self.apply(self._init_weights)
         self.init_weights(pretrained=pretrained)
         nn.SyncBatchNorm.convert_sync_batchnorm(self)
-        self.upsample2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
-        # self.upsample4 = nn.Upsample(scale_factor=4, mode='bilinear', align_corners=False)
-        # self.upsample8 = nn.Upsample(scale_factor=8, mode='bilinear', align_corners=False)
-        # self.pool2=nn.AvgPool2d(kernel_size=2, stride=2)
-        # self.pool4=nn.AvgPool2d(kernel_size=4, stride=4)
-        # self.pool8=nn.AvgPool2d(kernel_size=8, stride=8)
-        # self.norm = nn.LayerNorm(normalized_shape=1)  # 根据实际维度调整
         self.sigmoid = nn.Sigmoid()
         
 
@@ -100,20 +110,33 @@ class BiFormer_fusion_baseline(VTFormer):
                 self._save_feature_channel_as_image(x, f'{vis_dir}/stage{i}_after_FAM_x.png', vis_out_size, vis_reduce)
                 self._save_feature_channel_as_image(cnn_out, f'{vis_dir}/stage{i}_after_FAM_cnn.png', vis_out_size, vis_reduce)
 
-        for i in range(4):
-            fused_features.append(self.fusion[i](torch.cat((trans_features[i], cnn_features[i]), dim=1)))
         for i in range(3):
             trans_proj = self.trans_conv[i](trans_features[i + 1])
             cnn_proj = self.cnn_conv[i](cnn_features[i + 1])
-            trans_mask = self.sigmoid(self.bn[i](trans_proj))
-            cnn_mask = self.sigmoid(self.bn[i](cnn_proj))
-            target_size = fused_features[i].shape[2:]
+            trans_mask = self.sigmoid(self.trans_bn[i](trans_proj))
+            cnn_mask = self.sigmoid(self.cnn_bn[i](cnn_proj))
+            trans_scale = 2.0 * self.trans_gate_scale[i].sigmoid()
+            cnn_scale = 2.0 * self.cnn_gate_scale[i].sigmoid()
+            target_size = trans_features[i].shape[2:]
+            trans_high = F.interpolate(trans_proj, size=target_size, mode='bilinear', align_corners=False)
+            cnn_high = F.interpolate(cnn_proj, size=target_size, mode='bilinear', align_corners=False)
             trans_mask = F.interpolate(trans_mask, size=target_size, mode='bilinear', align_corners=False)
             cnn_mask = F.interpolate(cnn_mask, size=target_size, mode='bilinear', align_corners=False)
             if vis_enabled and (not vis_once or not getattr(self, '_feature_vis_saved', False)) and i==0:
                 self._save_feature_channel_as_image(trans_mask, f'{vis_dir}/trans_mask.png', vis_out_size, vis_reduce)
                 self._save_feature_channel_as_image(cnn_mask, f'{vis_dir}/cnn_mask.png', vis_out_size, vis_reduce)
-            fused_features[i] = fused_features[i] * (1 + 2 * trans_mask)
+            trans_feat = trans_features[i]
+            cnn_feat = cnn_features[i]
+            if self.cross_stage_fusion_mode in {'gate', 'gate_concat'}:
+                trans_feat = trans_feat * (1 + trans_scale * (2 * trans_mask - 1))
+                cnn_feat = cnn_feat * (1 + cnn_scale * (2 * cnn_mask - 1))
+            if self.cross_stage_fusion_mode in {'concat', 'gate_concat'}:
+                trans_feat = self.trans_cross_stage_fusion[i](
+                    torch.cat((trans_feat, trans_high), dim=1))
+                cnn_feat = self.cnn_cross_stage_fusion[i](
+                    torch.cat((cnn_feat, cnn_high), dim=1))
+            fused_features.append(self.fusion[i](torch.cat((trans_feat, cnn_feat), dim=1)))
+        fused_features.append(self.fusion[3](torch.cat((trans_features[3], cnn_features[3]), dim=1)))
 
         for i in range(4):
             if vis_enabled and (not vis_once or not getattr(self, '_feature_vis_saved', False)):
@@ -186,10 +209,14 @@ class BiFormer_fusion_baseline(VTFormer):
         # Fuse parent (VTFormer) conv-bn layers
         super().optimize_for_inference()
         for idx in range(len(self.trans_conv)):
-            bn = self.bn[idx]
-            if isinstance(bn, nn.modules.batchnorm._BatchNorm) and not bn.training:
-                self.trans_conv[idx] = fuse_conv_bn_eval(self.trans_conv[idx], bn)
-                self.bn[idx] = nn.Identity()
+            trans_bn = self.trans_bn[idx]
+            cnn_bn = self.cnn_bn[idx]
+            if isinstance(trans_bn, nn.modules.batchnorm._BatchNorm) and not trans_bn.training:
+                self.trans_conv[idx] = fuse_conv_bn_eval(self.trans_conv[idx], trans_bn)
+                self.trans_bn[idx] = nn.Identity()
+            if isinstance(cnn_bn, nn.modules.batchnorm._BatchNorm) and not cnn_bn.training:
+                self.cnn_conv[idx] = fuse_conv_bn_eval(self.cnn_conv[idx], cnn_bn)
+                self.cnn_bn[idx] = nn.Identity()
         if getattr(self, 'topp_flash_backend', None) in ('cuda', 'cuda_forward'):
             _load_cuda_extension()
 
