@@ -20,7 +20,6 @@ model = dict(
         attn_drop_rate=0.,
         drop_path_rate=0.3,
         patch_norm=True,
-        out_after_grid=True,
         use_checkpoint=False),
     decode_head=dict(
         type='SegformerHead',
