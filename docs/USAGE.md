@@ -13,8 +13,10 @@ python tools/generate_water_prompt_bank.py --output tools/prompt_bank_water.pt -
 
 ## 我们的模型（PVSA-Net）
 ```bash
-# 训练 - Baseline
+# 训练 - Baseline (gqy 数据集, 200 epoch)
 CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_baseline_waterseg.py --work-dir work_dirs/baseline
+# 训练 - Baseline (CamVid 数据集, 400 epoch)
+CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_baseline_camvid.py --work-dir work_dirs/baseline_camvid
 # 训练 - CLIP
 CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_clip_waterseg.py --work-dir work_dirs/clip_waterseg
 # 推理 - Baseline

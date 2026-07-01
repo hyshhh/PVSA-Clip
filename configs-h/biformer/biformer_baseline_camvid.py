@@ -1,12 +1,12 @@
 _base_ = [
     '../_base_/models/VTFormer-s-baseline.py',
-    '../_base_/datasets/gqy.py',
+    '../_base_/datasets/camvid.py',
     '../_base_/default_runtime.py',
     '../_base_/schedules/schedule_20k.py'
 ]
 
-# Baseline PVSA-Net training (gqy/KAKA dataset, 200 epochs)
-# CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_baseline_waterseg.py --work-dir work_dirs/baseline
+# Baseline PVSA-Net training (CamVid dataset, 400 epochs)
+# CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_baseline_camvid.py --work-dir work_dirs/baseline_camvid
 
 train_dataloader = dict(
     batch_size=16,
@@ -17,10 +17,10 @@ val_dataloader = dict(batch_size=4, num_workers=2)
 test_dataloader = dict(batch_size=1, num_workers=1)
 
 param_scheduler = [
-    dict(type='LinearLR', start_factor=0.001, by_epoch=True, begin=0, end=10),
-    dict(type='PolyLR', eta_min=1e-6, power=1.0, by_epoch=True, begin=10, end=200)
+    dict(type='LinearLR', start_factor=0.001, by_epoch=True, begin=0, end=20),
+    dict(type='PolyLR', eta_min=1e-6, power=1.0, by_epoch=True, begin=20, end=400)
 ]
-train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=200, val_interval=10)
+train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=400, val_interval=40)
 
 optim_wrapper = dict(
     _delete_=True,
