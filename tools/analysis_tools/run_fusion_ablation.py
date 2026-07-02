@@ -4,7 +4,12 @@ import itertools
 import json
 import subprocess
 import sys
+from types import SimpleNamespace
 from pathlib import Path
+
+from mmengine.logging import MMLogger
+
+from tools.analysis_tools.get_flops import inference as get_flops_inference
 
 
 FUSION_TYPES = [
@@ -48,6 +53,16 @@ def parse_args():
         '--dry-run',
         action='store_true',
         help='Only print commands without launching training.')
+    parser.add_argument(
+        '--summary-only',
+        action='store_true',
+        help='Do not launch training, only refresh summary.csv from existing work_dirs.')
+    parser.add_argument(
+        '--shape',
+        type=int,
+        nargs='+',
+        default=[256, 256],
+        help='Input shape used for FLOPs/Params summary.')
     return parser.parse_args()
 
 
@@ -56,6 +71,12 @@ def build_run_name(fusion_type, cross_stage_mode):
 
 
 def parse_best_miou(work_dir: Path):
+    vis_scalars = work_dir / 'vis_data' / 'scalars.json'
+    if vis_scalars.exists():
+        best = parse_best_miou_from_json(vis_scalars)
+        if best is not None:
+            return best
+
     best_ckpt = work_dir / 'best_mIoU.pth'
     if best_ckpt.exists():
         timestamp_files = sorted(work_dir.glob('*.json'))
@@ -90,6 +111,20 @@ def parse_best_miou_from_json(json_file: Path):
     return best
 
 
+def compute_model_complexity(config_path: Path, fusion_type, cross_stage_mode, shape):
+    logger = MMLogger.get_instance(name='fusion_ablation_complexity')
+    args = SimpleNamespace(
+        config=str(config_path),
+        shape=list(shape),
+        cfg_options={
+            'model.backbone.fusion_type': fusion_type,
+            'model.backbone.cross_stage_fusion_mode': cross_stage_mode,
+        },
+    )
+    result = get_flops_inference(args, logger)
+    return result['flops'], result['params']
+
+
 def main():
     args = parse_args()
     config_path = Path(args.config).resolve()
@@ -103,13 +138,28 @@ def main():
         run_name = build_run_name(fusion_type, cross_stage_mode)
         work_dir = work_dir_root / run_name
         best_existing = parse_best_miou(work_dir)
+        flops, params = compute_model_complexity(
+            config_path, fusion_type, cross_stage_mode, args.shape)
         if args.skip_existing and best_existing is not None:
             summary_rows.append({
                 'run_name': run_name,
                 'fusion_type': fusion_type,
                 'cross_stage_fusion_mode': cross_stage_mode,
+                'flops': flops,
+                'params': params,
                 'best_mIoU': best_existing,
                 'status': 'skipped_existing',
+            })
+            continue
+        if args.summary_only:
+            summary_rows.append({
+                'run_name': run_name,
+                'fusion_type': fusion_type,
+                'cross_stage_fusion_mode': cross_stage_mode,
+                'flops': flops,
+                'params': params,
+                'best_mIoU': '' if best_existing is None else f'{best_existing:.6f}',
+                'status': 'summary_only' if best_existing is not None else 'missing',
             })
             continue
 
@@ -131,6 +181,8 @@ def main():
                 'run_name': run_name,
                 'fusion_type': fusion_type,
                 'cross_stage_fusion_mode': cross_stage_mode,
+                'flops': flops,
+                'params': params,
                 'best_mIoU': '',
                 'status': 'dry_run',
             })
@@ -142,6 +194,8 @@ def main():
             'run_name': run_name,
             'fusion_type': fusion_type,
             'cross_stage_fusion_mode': cross_stage_mode,
+            'flops': flops,
+            'params': params,
             'best_mIoU': '' if best_miou is None else f'{best_miou:.6f}',
             'status': 'ok' if result.returncode == 0 else f'failed({result.returncode})',
         })
@@ -156,7 +210,10 @@ def write_summary(path: Path, rows):
     with path.open('w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(
             f,
-            fieldnames=['run_name', 'fusion_type', 'cross_stage_fusion_mode', 'best_mIoU', 'status'])
+            fieldnames=[
+                'run_name', 'fusion_type', 'cross_stage_fusion_mode',
+                'flops', 'params', 'best_mIoU', 'status'
+            ])
         writer.writeheader()
         writer.writerows(rows)
 
