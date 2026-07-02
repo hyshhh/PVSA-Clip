@@ -46,6 +46,18 @@ def parse_args():
         default=[],
         help='Additional cfg-options passed through to tools/train.py.')
     parser.add_argument(
+        '--fusion-types',
+        nargs='+',
+        choices=FUSION_TYPES,
+        default=FUSION_TYPES,
+        help='Fusion types to run.')
+    parser.add_argument(
+        '--cross-stage-modes',
+        nargs='+',
+        choices=CROSS_STAGE_FUSION_MODES,
+        default=CROSS_STAGE_FUSION_MODES,
+        help='Cross-stage fusion modes to run.')
+    parser.add_argument(
         '--skip-existing',
         action='store_true',
         help='Skip runs that already have a best mIoU result.')
@@ -137,7 +149,7 @@ def main():
     summary_rows = []
 
     for fusion_type, cross_stage_mode in itertools.product(
-            FUSION_TYPES, CROSS_STAGE_FUSION_MODES):
+            args.fusion_types, args.cross_stage_modes):
         run_name = build_run_name(fusion_type, cross_stage_mode)
         work_dir = work_dir_root / run_name
         best_existing = parse_best_miou(work_dir)

@@ -1,5 +1,5 @@
 default_scope = 'mmseg'
-randomness = dict(seed=42, deterministic=True)
+randomness = dict(seed=42, deterministic=False)
 env_cfg = dict(
     cudnn_benchmark=False,
     mp_cfg=dict(mp_start_method='fork', opencv_num_threads=0),

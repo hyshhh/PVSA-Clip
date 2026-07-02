@@ -181,8 +181,10 @@ class DepthWiseConvModule(nn.Module):
                  stride=1,
                  padding=1,
                  drop_rate=0.,
-                 dilation=1):
+                 dilation=1,
+                 activate_after_dw=False):
         super(DepthWiseConvModule, self).__init__()
+        self.activate_after_dw = activate_after_dw
         
         # 1. 自动计算 Padding，保证 stride=1 时尺寸不变
         # 考虑到 dilation 的情况: padding = dilation * (kernel_size - 1) // 2
@@ -224,7 +226,8 @@ class DepthWiseConvModule(nn.Module):
         out = self.activate(out) # 升维后激活
         out = self.pe_conv(out)
         out = self.bn2(out)
-        # 深度卷积后不激活（标准 MobileNetV2 线性瓶颈层）
+        if self.activate_after_dw:
+            out = self.activate(out)
         out = self.fc2(out)
         out = self.bn3(out)
         # 最后通常不激活，直接做 Dropout 和 Add
@@ -246,10 +249,12 @@ class DepthWiseConvModule(nn.Module):
 class MBConv(nn.Module):
     """EfficientNet MBConv 块：升维→DWConv→SE→降维，SiLU 激活"""
     def __init__(self, embed_dims, feedforward_channels, output_channels,
-                 kernel_size=3, stride=1, se_ratio=0.25, drop_rate=0.):
+                 kernel_size=3, stride=1, se_ratio=0.25, drop_rate=0.,
+                 use_se=True):
         super().__init__()
         padding = kernel_size // 2
         self.use_residual = (stride == 1 and embed_dims == output_channels)
+        self.use_se = use_se
         # 升维
         self.expand = nn.Sequential(
             nn.Conv2d(embed_dims, feedforward_channels, 1, bias=False),
@@ -263,13 +268,14 @@ class MBConv(nn.Module):
             nn.BatchNorm2d(feedforward_channels),
             nn.SiLU())
         # SE 注意力
-        se_channels = max(1, int(embed_dims * se_ratio))
-        self.se = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(feedforward_channels, se_channels, 1),
-            nn.SiLU(),
-            nn.Conv2d(se_channels, feedforward_channels, 1),
-            nn.Sigmoid())
+        if self.use_se:
+            se_channels = max(1, int(embed_dims * se_ratio))
+            self.se = nn.Sequential(
+                nn.AdaptiveAvgPool2d(1),
+                nn.Conv2d(feedforward_channels, se_channels, 1),
+                nn.SiLU(),
+                nn.Conv2d(se_channels, feedforward_channels, 1),
+                nn.Sigmoid())
         # 降维
         self.proj = nn.Sequential(
             nn.Conv2d(feedforward_channels, output_channels, 1, bias=False),
@@ -280,7 +286,8 @@ class MBConv(nn.Module):
         residual = x
         x = self.expand(x)
         x = self.dw_conv(x)
-        x = x * self.se(x)
+        if self.use_se:
+            x = x * self.se(x)
         x = self.proj(x)
         x = self.drop(x)
         if self.use_residual:
@@ -413,11 +420,21 @@ class VTFormer(nn.Module):
         self.norm_eval = norm_eval
         ############ downsample layers (patch embeddings) ######################
         # CNN block 工厂函数
+        valid_cnn_block_types = {'dwconv', 'dwconv_act', 'mbconv', 'mbconv_no_se'}
+        if cnn_block_type not in valid_cnn_block_types:
+            raise ValueError(
+                f'cnn_block_type must be one of {valid_cnn_block_types}, '
+                f'but got {cnn_block_type}')
+        self.cnn_block_type = cnn_block_type
         expansion = 4
         def _make_cnn_block(ch):
             if cnn_block_type == 'mbconv':
                 return MBConv(ch, expansion * ch, ch)
-            return DepthWiseConvModule(ch, expansion * ch, ch)
+            if cnn_block_type == 'mbconv_no_se':
+                return MBConv(ch, expansion * ch, ch, use_se=False)
+            return DepthWiseConvModule(
+                ch, expansion * ch, ch,
+                activate_after_dw=(cnn_block_type == 'dwconv_act'))
 
         self.trans_downsample_layers = nn.ModuleList()
         self.cnn_downsample_layers = nn.ModuleList()

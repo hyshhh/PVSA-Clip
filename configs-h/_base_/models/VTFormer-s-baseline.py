@@ -43,7 +43,8 @@ model = dict(
         fam_reduction=4,
         # CNN 分支各层 block 数量：[stem, stage1, stage2, stage3]
         cnn_block_layers=[2, 1, 2, 1],
-        # CNN block 类型：'dwconv'（GELU+线性瓶颈）或 'mbconv'（SiLU+SE+4x扩展）
+        # CNN block 类型:
+        # 'dwconv' | 'dwconv_act' | 'mbconv' | 'mbconv_no_se'
         cnn_block_type='dwconv',
         # CUDA 推理后端
         topp_flash_backend=None,
