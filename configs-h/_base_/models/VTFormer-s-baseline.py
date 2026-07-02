@@ -45,6 +45,7 @@ model = dict(
         cnn_block_layers=[2, 1, 2, 1],
         # CNN block 类型:
         # 'dwconv' | 'dwconv_act' | 'mbconv' | 'mbconv_no_se'
+        # 'c2f' | 'c3k2' | 'convnext'
         cnn_block_type='dwconv',
         # CUDA 推理后端
         topp_flash_backend=None,
@@ -61,7 +62,7 @@ model = dict(
             out_size=512,               # 上采样目标尺寸
             channel_reduce='mean'),     # 通道聚合方式：'mean' | 'max'
         # 同层融合消融: 'conv1x1' | 'conv1x1_bn_gelu' | 'conv1x1_bn_gelu_dwconv'
-        fusion_type='conv1x1',
+        fusion_type='conv1x1_bn_gelu_dwconv',
         # 跨层融合消融:
         # 'none' | 'gate' | 'concat' | 'gate_concat' | 'cross_gate' | 'cross_concat'
         cross_stage_fusion_mode='gate',

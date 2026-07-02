@@ -301,6 +301,132 @@ class MBConv(nn.Module):
         self.dw_conv[0], self.dw_conv[1] = _fuse_conv_bn(self.dw_conv[0], self.dw_conv[1])
         self.proj[0], self.proj[1] = _fuse_conv_bn(self.proj[0], self.proj[1])
 
+
+class ConvBNAct(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size=1, stride=1,
+                 groups=1, act=True):
+        super().__init__()
+        padding = kernel_size // 2
+        self.conv = nn.Conv2d(
+            in_channels, out_channels, kernel_size, stride, padding,
+            groups=groups, bias=False)
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.act = nn.SiLU() if act else nn.Identity()
+
+    def forward(self, x):
+        return self.act(self.bn(self.conv(x)))
+
+    def fuse_for_inference(self):
+        if self.training:
+            return
+        self.conv, self.bn = _fuse_conv_bn(self.conv, self.bn)
+
+
+class C2fBottleneck(nn.Module):
+    def __init__(self, channels, shortcut=True):
+        super().__init__()
+        self.cv1 = ConvBNAct(channels, channels, kernel_size=3)
+        self.cv2 = ConvBNAct(channels, channels, kernel_size=3)
+        self.shortcut = shortcut
+
+    def forward(self, x):
+        out = self.cv2(self.cv1(x))
+        return x + out if self.shortcut else out
+
+    def fuse_for_inference(self):
+        self.cv1.fuse_for_inference()
+        self.cv2.fuse_for_inference()
+
+
+class C2fBlock(nn.Module):
+    """YOLO 风格 C2f 块，用于验证跨阶段部分连接的 CNN 分支收益。"""
+    def __init__(self, channels, hidden_ratio=0.5, num_blocks=2):
+        super().__init__()
+        hidden_channels = max(1, int(channels * hidden_ratio))
+        self.cv1 = ConvBNAct(channels, 2 * hidden_channels, kernel_size=1)
+        self.blocks = nn.ModuleList([
+            C2fBottleneck(hidden_channels) for _ in range(num_blocks)
+        ])
+        self.cv2 = ConvBNAct(
+            (2 + num_blocks) * hidden_channels, channels, kernel_size=1)
+
+    def forward(self, x):
+        y = list(self.cv1(x).chunk(2, dim=1))
+        y.extend(block(y[-1]) for block in self.blocks)
+        return self.cv2(torch.cat(y, dim=1))
+
+    def fuse_for_inference(self):
+        self.cv1.fuse_for_inference()
+        for block in self.blocks:
+            block.fuse_for_inference()
+        self.cv2.fuse_for_inference()
+
+
+class C3k2Bottleneck(nn.Module):
+    def __init__(self, channels, shortcut=True):
+        super().__init__()
+        self.cv1 = ConvBNAct(channels, channels, kernel_size=3)
+        self.cv2 = ConvBNAct(channels, channels, kernel_size=3)
+        self.shortcut = shortcut
+
+    def forward(self, x):
+        out = self.cv2(self.cv1(x))
+        return x + out if self.shortcut else out
+
+    def fuse_for_inference(self):
+        self.cv1.fuse_for_inference()
+        self.cv2.fuse_for_inference()
+
+
+class C3k2Block(nn.Module):
+    """C3k2 风格块，用于对比更强卷积分支的局部建模能力。"""
+    def __init__(self, channels, hidden_ratio=0.5, num_blocks=2):
+        super().__init__()
+        hidden_channels = max(1, int(channels * hidden_ratio))
+        self.cv1 = ConvBNAct(channels, hidden_channels, kernel_size=1)
+        self.cv2 = ConvBNAct(channels, hidden_channels, kernel_size=1)
+        self.blocks = nn.Sequential(*[
+            C3k2Bottleneck(hidden_channels) for _ in range(num_blocks)
+        ])
+        self.cv3 = ConvBNAct(2 * hidden_channels, channels, kernel_size=1)
+
+    def forward(self, x):
+        return self.cv3(torch.cat((self.blocks(self.cv1(x)), self.cv2(x)), dim=1))
+
+    def fuse_for_inference(self):
+        self.cv1.fuse_for_inference()
+        self.cv2.fuse_for_inference()
+        for block in self.blocks:
+            block.fuse_for_inference()
+        self.cv3.fuse_for_inference()
+
+
+class ConvNeXtBlock(nn.Module):
+    """ConvNeXt 块，用于验证大核深度卷积和通道 MLP 的收益。"""
+    def __init__(self, channels, layer_scale=1e-6, drop_rate=0.):
+        super().__init__()
+        self.dwconv = nn.Conv2d(
+            channels, channels, kernel_size=7, padding=3,
+            groups=channels)
+        self.norm = nn.LayerNorm(channels, eps=1e-6)
+        self.pwconv1 = nn.Linear(channels, 4 * channels)
+        self.act = nn.GELU()
+        self.pwconv2 = nn.Linear(4 * channels, channels)
+        self.gamma = nn.Parameter(layer_scale * torch.ones(channels))
+        self.drop = nn.Dropout(drop_rate)
+
+    def forward(self, x):
+        residual = x
+        out = self.dwconv(x)
+        out = out.permute(0, 2, 3, 1)
+        out = self.norm(out)
+        out = self.pwconv1(out)
+        out = self.act(out)
+        out = self.pwconv2(out)
+        out = self.gamma.view(1, 1, 1, -1) * out
+        out = out.permute(0, 3, 1, 2)
+        return residual + self.drop(out)
+
 class ChannelWeights(nn.Module):
     def __init__(self, dim, reduction=1):
         super(ChannelWeights, self).__init__()
@@ -420,7 +546,10 @@ class VTFormer(nn.Module):
         self.norm_eval = norm_eval
         ############ downsample layers (patch embeddings) ######################
         # CNN block 工厂函数
-        valid_cnn_block_types = {'dwconv', 'dwconv_act', 'mbconv', 'mbconv_no_se'}
+        valid_cnn_block_types = {
+            'dwconv', 'dwconv_act', 'mbconv', 'mbconv_no_se',
+            'c2f', 'c3k2', 'convnext'
+        }
         if cnn_block_type not in valid_cnn_block_types:
             raise ValueError(
                 f'cnn_block_type must be one of {valid_cnn_block_types}, '
@@ -432,6 +561,12 @@ class VTFormer(nn.Module):
                 return MBConv(ch, expansion * ch, ch)
             if cnn_block_type == 'mbconv_no_se':
                 return MBConv(ch, expansion * ch, ch, use_se=False)
+            if cnn_block_type == 'c2f':
+                return C2fBlock(ch)
+            if cnn_block_type == 'c3k2':
+                return C3k2Block(ch)
+            if cnn_block_type == 'convnext':
+                return ConvNeXtBlock(ch)
             return DepthWiseConvModule(
                 ch, expansion * ch, ch,
                 activate_after_dw=(cnn_block_type == 'dwconv_act'))
@@ -596,7 +731,9 @@ class VTFormer(nn.Module):
         for layer in self.cnn_downsample_layers:
             _fuse_sequential_conv_bn(layer)
         for module in self.modules():
-            if isinstance(module, (DepthWiseConvModule, MBConv)):
+            if isinstance(module, (
+                    DepthWiseConvModule, MBConv, ConvBNAct, C2fBottleneck,
+                    C2fBlock, C3k2Bottleneck, C3k2Block)):
                 module.fuse_for_inference()
         self._inference_fused = True
 
