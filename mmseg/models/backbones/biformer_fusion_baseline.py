@@ -16,7 +16,6 @@ import torch.nn.functional as F
 class BiFormer_fusion_baseline(VTFormer):
     def __init__(self, pretrained=None, cross_stage_fusion_mode='gate',
                  fusion_type='conv1x1', **kwargs):
-        super().__init__(**kwargs)
         valid_fusion_modes = {
             'none', 'gate', 'concat', 'gate_concat', 'cross_gate', 'cross_concat'
         }
@@ -31,6 +30,7 @@ class BiFormer_fusion_baseline(VTFormer):
                 f'but got {fusion_type}')
         self.cross_stage_fusion_mode = cross_stage_fusion_mode
         self.fusion_type = fusion_type
+        super().__init__(**kwargs)
         self.extra_norms = nn.ModuleList()
         self.trans_bn = nn.ModuleList()
         self.cnn_bn = nn.ModuleList()
