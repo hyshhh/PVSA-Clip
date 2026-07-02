@@ -71,25 +71,25 @@ def build_run_name(fusion_type, cross_stage_mode):
 
 
 def parse_best_miou(work_dir: Path):
-    vis_scalars = work_dir / 'vis_data' / 'scalars.json'
-    if vis_scalars.exists():
-        best = parse_best_miou_from_json(vis_scalars)
-        if best is not None:
-            return best
+    if not work_dir.exists():
+        return None
 
-    best_ckpt = work_dir / 'best_mIoU.pth'
-    if best_ckpt.exists():
-        timestamp_files = sorted(work_dir.glob('*.json'))
-        for json_file in reversed(timestamp_files):
-            best = parse_best_miou_from_json(json_file)
-            if best is not None:
-                return best
+    candidates = []
 
-    for json_file in sorted(work_dir.glob('*.json')):
-        best = parse_best_miou_from_json(json_file)
-        if best is not None:
-            return best
-    return None
+    # 优先读取 MMEngine 标量日志；有些实验会把 vis_data 放到子目录里。
+    candidates.extend(sorted(work_dir.rglob('scalars.json')))
+
+    # 再兼容根目录/子目录下的其它 json 日志。
+    candidates.extend(sorted(
+        json_file for json_file in work_dir.rglob('*.json')
+        if json_file.name != 'summary.csv' and json_file.name != 'scalars.json'))
+
+    best = None
+    for json_file in candidates:
+        value = parse_best_miou_from_json(json_file)
+        if value is not None:
+            best = value if best is None else max(best, value)
+    return best
 
 
 def parse_best_miou_from_json(json_file: Path):
@@ -104,8 +104,11 @@ def parse_best_miou_from_json(json_file: Path):
                     record = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if 'mIoU' in record and isinstance(record['mIoU'], (int, float)):
-                    best = max(best, float(record['mIoU'])) if best is not None else float(record['mIoU'])
+                for key, value in record.items():
+                    if 'mIoU' not in key or not isinstance(value, (int, float)):
+                        continue
+                    value = float(value)
+                    best = value if best is None else max(best, value)
     except OSError:
         return None
     return best
