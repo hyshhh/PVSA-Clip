@@ -5,10 +5,9 @@ import torch
 import torch.nn as nn
 from torch.nn.utils.fusion import fuse_conv_bn_eval
 
-from einops.layers.torch import Rearrange
 from fairscale.nn.checkpoint import checkpoint_wrapper
 from timm.models.layers import DropPath, trunc_normal_
-from ..utils.common import Attention, AttentionLePE, DWConv
+from ..utils.common import Attention, DWConv
 from ..utils.top_p_bra import ToppAttention
 from mmseg.registry import MODELS
 
@@ -76,6 +75,12 @@ class Block(nn.Module):
                  use_plain_attn=False,
                  ):
         super().__init__()
+        if topk <= 0:
+            raise ValueError(f'Block only supports topk > 0, but got {topk}')
+        if not pre_norm:
+            raise ValueError('Block only supports pre_norm=True')
+        if layer_scale_init_value > 0:
+            raise ValueError('Block does not use layer scale in the current implementation')
         qk_dim = qk_dim or dim
 
         # modules
@@ -108,37 +113,15 @@ class Block(nn.Module):
             # 最后一层用普通 self-attention（token 数少，O(n²) 可接受）
             self.PA = Attention(dim=dim, num_heads=num_heads)
             self._use_plain_attn = True
-        elif topk == -1:
-            self.attn = Attention(dim=dim)
-        elif topk == -2:
-            self.attn = AttentionLePE(dim=dim, side_dwconv=side_dwconv)
-        elif topk == 0:
-            self.attn = nn.Sequential(Rearrange('n h w c -> n c h w'),  # compatiability
-                                      nn.Conv2d(dim, dim, 1),  # pseudo qkv linear
-                                      nn.Conv2d(dim, dim, 5, padding=2, groups=dim),  # pseudo attention
-                                      nn.Conv2d(dim, dim, 1),  # pseudo out linear
-                                      Rearrange('n c h w -> n h w c')
-                                      )
-        self.norm1 = nn.LayerNorm(dim, eps=1e-6)  # important to avoid attention collapsing
-        self.norm2 = nn.LayerNorm(dim, eps=1e-6)
         self.norm3 = nn.LayerNorm(dim, eps=1e-6)
         self.norm4 = nn.LayerNorm(dim, eps=1e-6)
         self.mlp2 = nn.Sequential(nn.Linear(dim, int(mlp_ratio * dim)),
                                  DWConv(int(mlp_ratio * dim)) if mlp_dwconv else nn.Identity(),
                                  nn.GELU(),
-                                 nn.Linear(int(mlp_ratio * dim), dim)
-                                 )
+                                  nn.Linear(int(mlp_ratio * dim), dim)
+                                  )
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
-        # tricks: layer scale & pre_norm/post_norm
-        if layer_scale_init_value > 0:
-            self.use_layer_scale = True
-            self.gamma1 = nn.Parameter(layer_scale_init_value * torch.ones((dim)), requires_grad=True)
-            self.gamma2 = nn.Parameter(layer_scale_init_value * torch.ones((dim)), requires_grad=True)
-        else:
-            self.use_layer_scale = False
-        self.pre_norm = pre_norm
-        
 
     def forward(self, x):
         """
@@ -151,9 +134,8 @@ class Block(nn.Module):
             PA = self.PA(self.norm3(x))
         else:
             PA = self.PA(self.norm3(x), None)
-        if self.pre_norm:
-                x = x + self.drop_path(PA)   # (N, H, W, C)          
-                x = x + self.drop_path(self.mlp2(self.norm4(x)))  # (N, H, W, C)
+        x = x + self.drop_path(PA)   # (N, H, W, C)
+        x = x + self.drop_path(self.mlp2(self.norm4(x)))  # (N, H, W, C)
         x = x.permute(0, 3, 1, 2)
         return x
 
@@ -474,9 +456,12 @@ class VTFormer(nn.Module):
 
         self.FAM.append(FeatureAlignmentModule(dim=2*embed_dim[0], reduction=fam_reduction))
         self.fusion = nn.ModuleList()
-        self.fusion.append(
-            nn.Conv2d(2*embed_dim[0], embed_dim[0], kernel_size=(1,1), stride=(1, 1), padding=(0, 0),bias=True)
-            )
+        fusion_builder = getattr(
+            self,
+            '_build_fusion_layer',
+            lambda channels: nn.Conv2d(
+                2 * channels, channels, kernel_size=1, stride=1, padding=0, bias=True))
+        self.fusion.append(fusion_builder(embed_dim[0]))
         for i in range(3):
             trans_downsample_layer = nn.Sequential(
                 nn.Conv2d(embed_dim[i], embed_dim[i + 1], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
@@ -500,9 +485,7 @@ class VTFormer(nn.Module):
                 cnn_downsample_layer = checkpoint_wrapper(cnn_downsample_layer)
             self.trans_downsample_layers.append(trans_downsample_layer)
             self.cnn_downsample_layers.append(cnn_downsample_layer)
-            self.fusion.append(
-            nn.Conv2d(2*embed_dim[i + 1], embed_dim[i + 1], kernel_size=(1,1), stride=(1, 1), padding=(0, 0),bias=True)
-            )
+            self.fusion.append(fusion_builder(embed_dim[i + 1]))
             self.FAM.append(FeatureAlignmentModule(dim=2*embed_dim[i + 1], reduction=fam_reduction))
 
         ##########################################################################

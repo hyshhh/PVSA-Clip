@@ -14,14 +14,23 @@ from PIL import Image
 import torch.nn.functional as F
 @MODELS.register_module()
 class BiFormer_fusion_baseline(VTFormer):
-    def __init__(self, pretrained=None, cross_stage_fusion_mode='gate', **kwargs):
+    def __init__(self, pretrained=None, cross_stage_fusion_mode='gate',
+                 fusion_type='conv1x1', **kwargs):
         super().__init__(**kwargs)
-        valid_fusion_modes = {'none', 'gate', 'concat', 'gate_concat'}
+        valid_fusion_modes = {
+            'none', 'gate', 'concat', 'gate_concat', 'cross_gate', 'cross_concat'
+        }
         if cross_stage_fusion_mode not in valid_fusion_modes:
             raise ValueError(
                 f'cross_stage_fusion_mode must be one of {valid_fusion_modes}, '
                 f'but got {cross_stage_fusion_mode}')
+        valid_fusion_types = {'conv1x1', 'conv1x1_bn_gelu', 'conv1x1_bn_gelu_dwconv'}
+        if fusion_type not in valid_fusion_types:
+            raise ValueError(
+                f'fusion_type must be one of {valid_fusion_types}, '
+                f'but got {fusion_type}')
         self.cross_stage_fusion_mode = cross_stage_fusion_mode
+        self.fusion_type = fusion_type
         self.extra_norms = nn.ModuleList()
         self.trans_bn = nn.ModuleList()
         self.cnn_bn = nn.ModuleList()
@@ -33,11 +42,14 @@ class BiFormer_fusion_baseline(VTFormer):
         self.cnn_gate_scale = nn.ParameterList()
         for i in range(4):
             self.extra_norms.append(LayerNorm2d(self.embed_dim[i]))
-            self.trans_bn.append(nn.BatchNorm2d(self.embed_dim[i]))
-            self.cnn_bn.append(nn.BatchNorm2d(self.embed_dim[i]))
-            self.cnn_conv.append(nn.Conv2d(2*self.embed_dim[i],self.embed_dim[i],1,1,0))
-            self.trans_conv.append(nn.Conv2d(2*self.embed_dim[i],self.embed_dim[i],1,1,0))
             if i < 3:
+                # trans_conv/cnn_conv 作用在高一层 (i+1) 的特征上做通道投影，
+                # 输入通道应为 embed_dim[i+1]，而非 2*embed_dim[i]（此前二者恰好数值相等，
+                # 是因为 embed_dim 逐级翻倍，换成非翻倍配置会直接报通道不匹配）。
+                self.trans_bn.append(nn.BatchNorm2d(self.embed_dim[i]))
+                self.cnn_bn.append(nn.BatchNorm2d(self.embed_dim[i]))
+                self.cnn_conv.append(nn.Conv2d(self.embed_dim[i + 1], self.embed_dim[i], 1, 1, 0))
+                self.trans_conv.append(nn.Conv2d(self.embed_dim[i + 1], self.embed_dim[i], 1, 1, 0))
                 self.trans_cross_stage_fusion.append(
                     nn.Conv2d(2 * self.embed_dim[i], self.embed_dim[i], 1, 1, 0))
                 self.cnn_cross_stage_fusion.append(
@@ -50,7 +62,26 @@ class BiFormer_fusion_baseline(VTFormer):
         self.init_weights(pretrained=pretrained)
         nn.SyncBatchNorm.convert_sync_batchnorm(self)
         self.sigmoid = nn.Sigmoid()
-        
+
+    def _build_fusion_layer(self, channels):
+        if self.fusion_type == 'conv1x1':
+            return nn.Conv2d(2 * channels, channels, kernel_size=1, stride=1, padding=0, bias=True)
+
+        layers = [
+            nn.Conv2d(2 * channels, channels, kernel_size=1, stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(channels),
+            nn.GELU(),
+        ]
+        if self.fusion_type == 'conv1x1_bn_gelu_dwconv':
+            layers.extend([
+                nn.Conv2d(
+                    channels, channels, kernel_size=3, stride=1, padding=1,
+                    groups=channels, bias=False),
+                nn.BatchNorm2d(channels),
+                nn.GELU(),
+            ])
+        return nn.Sequential(*layers)
+
 
 
     def init_weights(self, pretrained=None):
@@ -111,30 +142,46 @@ class BiFormer_fusion_baseline(VTFormer):
                 self._save_feature_channel_as_image(cnn_out, f'{vis_dir}/stage{i}_after_FAM_cnn.png', vis_out_size, vis_reduce)
 
         for i in range(3):
-            trans_proj = self.trans_conv[i](trans_features[i + 1])
-            cnn_proj = self.cnn_conv[i](cnn_features[i + 1])
-            trans_mask = self.sigmoid(self.trans_bn[i](trans_proj))
-            cnn_mask = self.sigmoid(self.cnn_bn[i](cnn_proj))
-            trans_scale = 2.0 * self.trans_gate_scale[i].sigmoid()
-            cnn_scale = 2.0 * self.cnn_gate_scale[i].sigmoid()
-            target_size = trans_features[i].shape[2:]
-            trans_high = F.interpolate(trans_proj, size=target_size, mode='bilinear', align_corners=False)
-            cnn_high = F.interpolate(cnn_proj, size=target_size, mode='bilinear', align_corners=False)
-            trans_mask = F.interpolate(trans_mask, size=target_size, mode='bilinear', align_corners=False)
-            cnn_mask = F.interpolate(cnn_mask, size=target_size, mode='bilinear', align_corners=False)
-            if vis_enabled and (not vis_once or not getattr(self, '_feature_vis_saved', False)) and i==0:
-                self._save_feature_channel_as_image(trans_mask, f'{vis_dir}/trans_mask.png', vis_out_size, vis_reduce)
-                self._save_feature_channel_as_image(cnn_mask, f'{vis_dir}/cnn_mask.png', vis_out_size, vis_reduce)
             trans_feat = trans_features[i]
             cnn_feat = cnn_features[i]
-            if self.cross_stage_fusion_mode in {'gate', 'gate_concat'}:
-                trans_feat = trans_feat * (1 + trans_scale * (2 * trans_mask - 1))
-                cnn_feat = cnn_feat * (1 + cnn_scale * (2 * cnn_mask - 1))
-            if self.cross_stage_fusion_mode in {'concat', 'gate_concat'}:
-                trans_feat = self.trans_cross_stage_fusion[i](
-                    torch.cat((trans_feat, trans_high), dim=1))
-                cnn_feat = self.cnn_cross_stage_fusion[i](
-                    torch.cat((cnn_feat, cnn_high), dim=1))
+            if self.cross_stage_fusion_mode == 'none':
+                fused_features.append(self.fusion[i](torch.cat((trans_feat, cnn_feat), dim=1)))
+                continue
+            target_size = trans_features[i].shape[2:]
+            if self.cross_stage_fusion_mode in {'gate', 'gate_concat', 'cross_gate'}:
+                trans_proj = self.trans_conv[i](trans_features[i + 1])
+                cnn_proj = self.cnn_conv[i](cnn_features[i + 1])
+                trans_mask = self.sigmoid(self.trans_bn[i](trans_proj))
+                cnn_mask = self.sigmoid(self.cnn_bn[i](cnn_proj))
+                trans_scale = 2.0 * self.trans_gate_scale[i].sigmoid()
+                cnn_scale = 2.0 * self.cnn_gate_scale[i].sigmoid()
+                trans_mask = F.interpolate(trans_mask, size=target_size, mode='bilinear', align_corners=False)
+                cnn_mask = F.interpolate(cnn_mask, size=target_size, mode='bilinear', align_corners=False)
+                if vis_enabled and (not vis_once or not getattr(self, '_feature_vis_saved', False)) and i == 0:
+                    self._save_feature_channel_as_image(trans_mask, f'{vis_dir}/trans_mask.png', vis_out_size, vis_reduce)
+                    self._save_feature_channel_as_image(cnn_mask, f'{vis_dir}/cnn_mask.png', vis_out_size, vis_reduce)
+                if self.cross_stage_fusion_mode == 'cross_gate':
+                    trans_feat = trans_feat * (1 + trans_scale * (cnn_mask - 0.5))
+                    cnn_feat = cnn_feat * (1 + cnn_scale * (trans_mask - 0.5))
+                else:
+                    trans_feat = trans_feat * (1 + trans_scale * (trans_mask - 0.5))
+                    cnn_feat = cnn_feat * (1 + cnn_scale * (cnn_mask - 0.5))
+            if self.cross_stage_fusion_mode in {'concat', 'gate_concat', 'cross_concat'}:
+                if self.cross_stage_fusion_mode in {'concat', 'cross_concat'}:
+                    trans_proj = self.trans_conv[i](trans_features[i + 1])
+                    cnn_proj = self.cnn_conv[i](cnn_features[i + 1])
+                trans_high = F.interpolate(trans_proj, size=target_size, mode='bilinear', align_corners=False)
+                cnn_high = F.interpolate(cnn_proj, size=target_size, mode='bilinear', align_corners=False)
+                if self.cross_stage_fusion_mode == 'cross_concat':
+                    trans_feat = self.trans_cross_stage_fusion[i](
+                        torch.cat((trans_feat, cnn_high), dim=1))
+                    cnn_feat = self.cnn_cross_stage_fusion[i](
+                        torch.cat((cnn_feat, trans_high), dim=1))
+                else:
+                    trans_feat = self.trans_cross_stage_fusion[i](
+                        torch.cat((trans_feat, trans_high), dim=1))
+                    cnn_feat = self.cnn_cross_stage_fusion[i](
+                        torch.cat((cnn_feat, cnn_high), dim=1))
             fused_features.append(self.fusion[i](torch.cat((trans_feat, cnn_feat), dim=1)))
         fused_features.append(self.fusion[3](torch.cat((trans_features[3], cnn_features[3]), dim=1)))
 

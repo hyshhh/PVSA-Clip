@@ -59,7 +59,10 @@ model = dict(
             save_dir='cam/features_imgs4',  # 保存目录
             out_size=512,               # 上采样目标尺寸
             channel_reduce='mean'),     # 通道聚合方式：'mean' | 'max'
-        # 跨层融合消融: 'none' | 'gate' | 'concat' | 'gate_concat'
+        # 同层融合消融: 'conv1x1' | 'conv1x1_bn_gelu' | 'conv1x1_bn_gelu_dwconv'
+        fusion_type='conv1x1',
+        # 跨层融合消融:
+        # 'none' | 'gate' | 'concat' | 'gate_concat' | 'cross_gate' | 'cross_concat'
         cross_stage_fusion_mode='gate',
         # 注意力图保存开关
         attn_vis_config=dict(

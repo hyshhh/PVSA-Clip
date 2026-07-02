@@ -47,6 +47,13 @@ python tools/analysis_tools/pvsa_stage_complexity.py configs-h/biformer/biformer
 python tools/analysis_tools/clip_stage_complexity.py configs-h/biformer/biformer_clip_waterseg.py --shape 256 256
 ```
 
+## 融合消融实验
+```bash
+# 遍历 fusion_type × cross_stage_fusion_mode，并汇总每组 best mIoU
+CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/run_fusion_ablation.py configs-h/biformer/biformer_baseline_camvid.py --work-dir-root work_dirs/fusion_ablation_camvid --skip-existing
+```
+结果汇总会写到：`work_dirs/fusion_ablation_camvid/summary.csv`
+
 ## 特征图和注意力可视化
 ```bash
 # Baseline (gqy)
