@@ -80,6 +80,13 @@ python tools/analysis_tools/pvsa_stage_complexity.py \
   configs-h/clip/waterseg.py --shape 256 256
 ```
 
+## 框架消融
+
+```bash
+export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-Clip:$PYTHONPATH
+CUDA_VISIBLE_DEVICES=0 python ablation/run_framework_ablation.py --work-dir-root ablation/clip-framework --shape 256 256 --skip-existing
+```
+
 ## 自定义 CUDA 核推理
 
 首次运行或修改 CUDA 源码后，建议先清理旧编译缓存：

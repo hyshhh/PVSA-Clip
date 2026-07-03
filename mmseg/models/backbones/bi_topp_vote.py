@@ -7,7 +7,7 @@ from torch.nn.utils.fusion import fuse_conv_bn_eval
 
 from fairscale.nn.checkpoint import checkpoint_wrapper
 from timm.models.layers import DropPath, trunc_normal_
-from ..utils.common import DWConv
+from ..utils.common import DWConv, Attention
 from ..utils.top_p_bra import ToppAttention
 from mmseg.registry import MODELS
 
