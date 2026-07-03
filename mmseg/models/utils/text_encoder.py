@@ -11,7 +11,9 @@ class TextEncoder(nn.Module):
     RepRTA-style refinement.
     """
 
-    def __init__(self, embed_dim=512, num_categories=3, prompts_per_category=10):
+    def __init__(self, embed_dim=512, num_categories=3, prompts_per_category=10,
+                 use_reprta=True, reprta_ffn_type='swiglu',
+                 reprta_zero_init=True):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_categories = num_categories
@@ -21,11 +23,28 @@ class TextEncoder(nn.Module):
         self.attn_pool_query = nn.Parameter(
             torch.randn(num_categories, 1, embed_dim) * 0.02)
 
-        # RepRTA-style refinement (SwiGLU FFN + residual)
-        self.reprta_w12 = nn.Linear(embed_dim, 4 * embed_dim)
-        self.reprta_w3 = nn.Linear(2 * embed_dim, embed_dim)
-        nn.init.zeros_(self.reprta_w3.weight)
-        nn.init.zeros_(self.reprta_w3.bias)
+        # RepRTA-style refinement (FFN + residual)，受三开关控制以支持消融：
+        #   use_reprta      : R0(=False 训期关闭) vs R2(=True 默认)
+        #   reprta_ffn_type : 'swiglu'(门控，R2) vs 'gelu'(普通 FFN，R1)
+        #   reprta_zero_init: w3 零初始化保护 CLIP 原型(R2=True) vs 随机初始化(R3=False)
+        self.use_reprta = use_reprta
+        self.reprta_ffn_type = reprta_ffn_type
+        if use_reprta:
+            if reprta_ffn_type == 'swiglu':
+                # SwiGLU：升 4× 后切两半，w3 输入维 = (4/2)*D = 2D
+                self.reprta_w12 = nn.Linear(embed_dim, 4 * embed_dim)
+                self.reprta_w3 = nn.Linear(2 * embed_dim, embed_dim)
+            elif reprta_ffn_type == 'gelu':
+                # 普通 FFN：升 2× 后 GELU 再降回，参数量与 SwiGLU 对齐
+                # （SwiGLU w12=4D, w3 入=2D; GELU w12=2D 直接 == 2D 故两者
+                #   总参数量同为 D*2D + 2D*D，控制参数量后才能干净比门控贡献）
+                self.reprta_w12 = nn.Linear(embed_dim, 2 * embed_dim)
+                self.reprta_w3 = nn.Linear(2 * embed_dim, embed_dim)
+            else:
+                raise ValueError(f"Unsupported reprta_ffn_type: {reprta_ffn_type}")
+            if reprta_zero_init:
+                nn.init.zeros_(self.reprta_w3.weight)
+                nn.init.zeros_(self.reprta_w3.bias)
 
         self._fused = False
 
@@ -33,6 +52,26 @@ class TextEncoder(nn.Module):
         self.register_buffer(
             'prompt_embeddings',
             torch.zeros(num_categories, prompts_per_category, embed_dim))
+
+    def _reprta_refine(self, pooled):
+        """RepRTA 残差精炼，受 use_reprta/reprta_ffn_type 控制；fuse() 后整体跳过。
+
+        Args:
+            pooled (Tensor): [..., D] 注意力池化结果，最后一维为 embed_dim。
+
+        Returns:
+            Tensor: [..., D] 精炼后的原型（未做 L2 归一化，由调用方处理）。
+        """
+        if not self.use_reprta or self._fused:
+            return pooled
+        x12 = self.reprta_w12(pooled)              # SwiGLU:[...,4D] / GELU:[...,2D]
+        if self.reprta_ffn_type == 'swiglu':
+            x1, x2 = x12.chunk(2, dim=-1)           # 各 [...,2D]
+            hidden = F.silu(x1) * x2                # 门控
+        else:  # 'gelu'
+            hidden = F.gelu(x12)                    # 普通 FFN
+        refined = self.reprta_w3(hidden)           # [...,D]
+        return pooled + refined
 
     def load_prompt_bank(self, path):
         """Load prompt embeddings from .pt file.
@@ -56,6 +95,28 @@ class TextEncoder(nn.Module):
         self.prompts_per_category = K
         self.register_buffer('prompt_embeddings', embeddings)
 
+    def _maybe_augment_prompts(self, prompts):
+        """Training-only prompt augmentation shared by both forward paths.
+
+        - Randomly sample 1..K shared prompt positions across categories.
+        - Add small Gaussian noise to the embeddings.
+
+        Args:
+            prompts (Tensor): [C, K, D].
+
+        Returns:
+            Tensor: [C, K', D] with K' <= K.
+        """
+        C, K, D = prompts.shape
+        if self.training and K > 1:
+            num_sample = torch.randint(1, K + 1, (1,)).item()
+            indices = torch.randperm(K, device=prompts.device)[:num_sample]
+            prompts = prompts[:, indices, :]        # [C, num_sample, D]
+        if self.training:
+            noise = torch.randn_like(prompts) * 0.01
+            prompts = prompts + noise
+        return prompts
+
     def forward(self):
         """Forward pass to produce category prototypes.
 
@@ -65,22 +126,11 @@ class TextEncoder(nn.Module):
         # prompt_embeddings: [C, K, D]
         C, K, D = self.prompt_embeddings.shape
 
-        prompts = self.prompt_embeddings
-
-        # Training augmentation: random sample 2-3 prompts per category
-        if self.training and K > 3:
-            num_sample = torch.randint(2, 4, (1,)).item()
-            indices = torch.randperm(K, device=prompts.device)[:num_sample]
-            prompts = prompts[:, indices, :]  # [C, num_sample, D]
-
-        # Training augmentation: Gaussian noise on embeddings
-        if self.training:
-            noise = torch.randn_like(prompts) * 0.01
-            prompts = prompts + noise
+        prompts = self._maybe_augment_prompts(self.prompt_embeddings)
 
         # Attention pooling across prompts within each category
         q = self.attn_pool_query.expand(C, -1, -1)  # [C, 1, D]
-        k = v = prompts  # [C, K', D]
+        k = v = prompts                              # [C, K', D]
 
         # Attention: [C, 1, K']
         attn = torch.bmm(q, k.transpose(-2, -1)) * (D ** -0.5)
@@ -89,13 +139,58 @@ class TextEncoder(nn.Module):
         # Weighted aggregation: [C, 1, D] -> [C, D]
         pooled = torch.bmm(attn, v).squeeze(1)
 
-        # RepRTA refinement (SwiGLU + residual), skipped after fuse()
-        if not self._fused:
-            x12 = self.reprta_w12(pooled)
-            x1, x2 = x12.chunk(2, dim=-1)
-            hidden = F.silu(x1) * x2
-            refined = self.reprta_w3(hidden)
-            pooled = pooled + refined
+        # RepRTA refinement (FFN + residual), skipped after fuse() or when disabled
+        pooled = self._reprta_refine(pooled)
+
+        # L2 normalize
+        category_prototypes = F.normalize(pooled, dim=-1, p=2)
+
+        return category_prototypes
+
+    def prompt_bank_tensor(self):
+        """Return the raw frozen CLIP prompt embeddings for backbone injection.
+
+        Returns:
+            Tensor: [C, K, D] = [num_categories, prompts_per_category, embed_dim].
+                This is the offline CLIP-encoded prompt bank, never re-encoded
+                at runtime. backbone injects reshape(-1, D) = [C*K, D] of it.
+        """
+        return self.prompt_embeddings
+
+    def pool_with_query(self, image_query):
+        """Image-conditioned prompt pooling (decoder side).
+
+        Each category's fused query (image-derived + learnable prior) attends
+        only to that category's K prompts (grouped attention, K prompts per
+        class), producing per-image prototypes.
+
+        Args:
+            image_query (Tensor): [B, C, D] already L2-normalized & summed
+                with the normalized attn_pool_query prior by the caller.
+
+        Returns:
+            Tensor: [B, C, D] L2-normalized category prototypes.
+        """
+        # prompt_embeddings: [C, K, D]
+        C, K, D = self.prompt_embeddings.shape
+        B = image_query.shape[0]
+
+        prompts = self._maybe_augment_prompts(self.prompt_embeddings)   # [C, K', D]
+
+        # Grouped attention: each class's query attends only to its K prompts
+        q = image_query.unsqueeze(2)                         # [B, C, 1, D]
+        k = v = prompts.unsqueeze(0).expand(B, -1, -1, -1)  # [B, C, K', D]
+
+        # Attention: [B, C, 1, K_eff]
+        attn = (q * (D ** -0.5)) @ k.transpose(-2, -1)
+        attn = F.softmax(attn, dim=-1)
+
+        # Weighted aggregation: [B, C, 1, D] -> [B, C, D]
+        pooled = (attn @ v).squeeze(2)
+
+        # RepRTA refinement (FFN + residual), 自然 batch 广播；
+        # Linears 作用在最后一维，[B,C,D] 直接可处理，fuse() 或 use_reprta=False 时跳过。
+        pooled = self._reprta_refine(pooled)
 
         # L2 normalize
         category_prototypes = F.normalize(pooled, dim=-1, p=2)

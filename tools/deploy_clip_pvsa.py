@@ -2,15 +2,15 @@
 
 Usage:
     python tools/deploy_clip_pvsa.py \
-        --config configs-h/biformer/biformer_clip_waterseg.py \
+        --config configs-h/clip/waterseg.py \
         --checkpoint work_dirs/clip_waterseg/best_mIoU.pth \
         --output work_dirs/deployed/
 
 After deployment:
-- TextEncoder removed (frozen prototypes used instead)
-- Head classification fused into Conv2d
-- Backbone TTRM uses pre-computed frozen K
-- Backbone TextCrossAttention uses pre-computed frozen K/V
+- Backbone text is frozen after TextRefiner
+- Backbone TTRM/TextCrossAttention use pre-computed frozen K/V
+- Head keeps image-conditioned prototype pooling by default
+- Head fusion into Conv2d is only for the legacy fixed-prototype path
 """
 
 import argparse

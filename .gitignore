@@ -1,0 +1,65 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 测试 / 工具缓存
+.pytest_cache/
+.mypy_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache/
+htmlcov/
+nosetests.xml
+coverage.xml
+*.cover
+
+# 训练 / 推理产物
+output/
+work_dirs/
+**/work_dirs/
+
+# 消融脚本结果（保留 ablation/*.py 脚本，忽略训练跑出来的结果子目录）
+ablation/*/
+!ablation/run_*.py
+
+# 模型权重 / 大文件
+*.pt
+*.pth
+*.onnx
+*.engine
+*.plan
+*.bin
+*.safetensors
+
+# 编辑器 / 系统
+.mimocode/
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# 临时 / 散落产物
+image.png
+*.log

@@ -2,178 +2,290 @@
 
 ---
 
-## Core Architecture Design
+## 核心设计
 
-针对水域语义分割任务，定义类别集合：water、ship、land
+任务类别固定为 `water`、`ship`、`land`。每类维护 10 条类别相关提示词，用冻结的 CLIP 文本塔离线编码一次，得到 L2 归一化的提示词库 `[3, 10, 512]`，训练和推理阶段不再调用 CLIP 文本塔。
 
-每个类别构建 **Category-aware Prompt Set**，用于增强语义表达能力与鲁棒性：
 - Water：river、lake、sea、ocean、wave、water surface、water reflection、flood、stream、reservoir
 - Ship：boat、vessel、cargo ship、fishing boat、yacht、sailboat、canoe、barge、ship、small boat
 - Land：shore、coast、vegetation、road、bridge、building、sky、tree、sand、grass
 
-**离线编码（只做一次）：** 30 条 prompt 文本通过冻结 CLIP Text Encoder 批量编码为 `[30, 512]` 的 L2 归一化嵌入，按类别整理为 `[3, 10, 512]` 张量保存为 `.pt` 文件。训练和推理时不再需要 CLIP 模型。
+整体采用**双路解耦文本注入**，避免“骨干需要文本原型、文本原型又依赖骨干特征”的循环依赖：
 
-**部署阶段：** 完全移除 Text Encoder 与 Prompt 流程，仅保留 category prototypes 与分类权重 W_c，实现**零语言计算开销推理**。
+- **backbone 固定文本路**：原始 30 条 CLIP 提示词嵌入 `[30,512]` 经 `TextRefiner` 重构后，作为固定 `backbone_text` 注入 `TTRM` 与 `TextCrossAttention`。该路径与输入图像无关，可在部署时冻结成 K/V 缓存。
+- **CLIPSegHead 动态原型路**：骨干多阶段特征先生成图相关 query，再按类别对提示词库做分组注意力池化，得到每张图不同的类别原型 `[B,3,512]`，供解码头逐像素分类。
 
----
-
-## 模块创新
-
-### 创新 1：可学习 Attention Pooling + RepRTA Prototype 聚合
-
-**设计动机：** CLIP embedding 冻结后，如何把每个类别 10 个 prompt 聚合成 1 个代表性向量？
-
-YOLOE 训练时每个类别随机采样 1 个 prompt 直接使用，无聚合过程。本方案引入**per-category 可学习 attention pooling**，每个类别有独立的 query 向量，学习类别特定的 prompt 加权策略，再经 SwiGLU FFN 精炼。
-
-**Attention Pooling：**
-```
-q = per_category_query[C, 1, 512]     # 每个类别独立的可学习查询向量
-k = v = prompt_embeddings[C, 10, 512]  # 10 个 prompt 嵌入
-attn = softmax(q @ k.T / sqrt(512))   # [C, 1, 10] 注意力权重
-prototype = attn @ v                   # [C, 512] 加权聚合结果
-```
-
-每个类别有独立 query，water 的 query 学到"river、lake 权重高"，ship 的 query 学到"boat、vessel 权重高"，互不干扰。加载 prompt bank 时 query 数量自动适配类别数，换数据集无需改配置。
-
-**训练增强（关键，防止 query 过拟合）：**
-
-每次训练前向，对 prompt 做两步增强后再送入 attention pooling：
-
-1. **随机采样 2-3 个 prompt**：从 10 个 prompt 中随机抽 2-3 个，迫使 query 学会对**任意子集**都能产出稳定的 prototype，不能依赖固定的 10 个 prompt 组合。效果类似 Dropout。
-2. **高斯噪声扰动（σ=0.01）**：对采样后的 prompt embedding 加微小噪声，防止 query 过拟合到某个 prompt 的精确向量值，学到的是"方向"而不是"坐标"。
-
-推理时使用全部 10 个 prompt，不加噪声，attention pooling 输出更稳定。
-
-**RepRTA 精炼：**
-```
-SwiGLU FFN：x12 = Linear(prototype) → chunk → SiLU(x1) × x2 → Linear → refined
-残差：prototype = prototype + refined
-L2 归一化 → category_prototype [512]
-```
-
-RepRTA 权重零初始化，训练初期近似恒等映射，推理时设置 `_fused=True` 跳过计算。
-
-**从 Prototype 到卷积核：** 3 个类别 `[3, 512]` × head proj 权重 `[512, 256]` = Conv2d 权重 `[3, 256, 1, 1]`。推理时等价于固定 1×1 卷积。
+最终推理形态：backbone 段文本注入可冻结为查表式 K/V；head 段保留图相关原型生成与实时点积分类，不默认折叠成单个 `Conv2d`。
 
 ---
 
-### 创新 2：Text-guided Top-P Routing Module（TTRM）
+## 1. Backbone：固定文本语义注入
 
-**设计动机：** 原 PVSA-Net 的 Top-P Routing 仅基于视觉 token 相似度做路由，无法感知语义类别。TTRM 在路由器中注入文本语义，让路由过程具备类别感知能力。
+backbone 只使用固定的 30 条文本向量，不接收 head 侧动态图相关原型。这样路由级文本注入、特征级文本注入、head 侧图相关原型生成三者互不阻塞。
 
-**作用位置：** Backbone **全部 4 个阶段**的 ToppAttention 内部路由器
+### 1.1 TextRefiner：固定提示词重构
 
-**原理：** 输入图像被切成 7×7=49 个窗口，路由器决定"每个窗口应该和哪些其他窗口做注意力"。原版只看视觉特征像不像，不知道"这个窗口是水还是地"。
+**作用对象**：原始提示词库 reshape 后的 `[30,512]`。
 
-**核心机制 — 交叉注意力增强 Q：**
+**动机**：CLIP 文本向量来自通用图文预训练，直接注入水域分割骨干可能存在域偏差。`TextRefiner` 用轻量残差前馈网络对固定文本向量做可学习重构，但不引入图像依赖，保持部署可缓存。
 
-在路由计算之前，窗口池化后的视觉 Q 先与文本 prototypes 做一次轻量交叉注意力，将文本语义注入 Q 中，再用增强后的 Q 进行 Top-P 路由：
+```
+x12 = Linear(512 → 4*512)
+x1, x2 = chunk(x12)
+refined = Linear(SiLU(x1) * x2)
+backbone_text = x + refined
+```
+
+`w3` 零初始化，训练初期严格近似恒等映射；训练后学到对水域分割更友好的文本方向。该模块和 head 路的 `RepRTA` 结构相似，但参数独立、作用对象不同。
+
+### 1.2 TTRM：路由级文本引导
+
+**作用位置**：Stage 0-2 的 `ToppAttention` 路由器。当前配置 `ttrm_stages=[0,1,2]`，Stage 3 通过 `use_plain_attn_last_stage=True` 改为普通 self-attention，因此最后阶段不使用 Top-P 路由，也不加 TTRM。
+
+**设计动机**：原 PVSA-Net 的 Top-P 路由只看视觉窗口相似度，不知道窗口语义。TTRM 在路由计算前把固定文本语义注入窗口级 Q/K，使“水域窗口更倾向于路由到水域窗口”。
 
 ```
 窗口池化后：
-  Q_visual = 视觉窗口特征 [49, qk_dim]
-  K_text = text_prototypes 投影 [3, qk_dim]     ← 3 个类别 prototype
-  V_text = text_prototypes 投影 [3, qk_dim]
+  Q_visual, K_visual = window tokens            # [49, qk_dim]
+  K_text, V_text = proj(backbone_text)          # [30, qk_dim]
 
-交叉注意力：
-  cross_attn = softmax(Q_visual @ K_text.T / sqrt(D))  # [49, 3]
-  text_info = cross_attn @ V_text                       # [49, qk_dim]
+文本交叉注意力：
+  q_text_attn = softmax(Q_visual @ K_text.T / sqrt(D))
+  k_text_attn = softmax(K_visual @ K_text.T / sqrt(D))
+  q_text = out_proj(q_text_attn @ V_text)
+  k_text = out_proj(k_text_attn @ V_text)
 
-残差注入：
-  Q_enriched = normalize(Q_visual + gate × text_info)   # [49, qk_dim]
-  gate = sigmoid(learnable), 初始 ≈ 0.12
+门控残差：
+  Q_enriched = Q_visual + sigmoid(gate) * q_text
+  K_enriched = K_visual + sigmoid(gate) * k_text
 
 Top-P 路由：
-  attn = Q_enriched @ K_visual.T                         # [49, 49]
-  → Top-P 剪枝 → 选 top-k 窗口
+  route_score = Q_enriched @ K_enriched.T
+  route_score → Top-P 剪枝 → top-k 窗口
 ```
 
-**效果：** 经过交叉注意力后，水域窗口的 Q 携带了"这是水"的语义信息，路由时水域窗口之间更容易被选中聚合。
+`gate` 初始为 `sigmoid(-2)≈0.12`，训练早期以视觉路由为主，逐步引入文本语义。相比在每层做重型视觉-文本交叉注意力，TTRM 只在窗口池化后的路由 token 上计算，开销较小。
 
-**与 SAM3 的区别：** SAM3 在编码器/解码器每层都做视觉-文本交叉注意力（6层×2），计算量大。TTRM 只在路由器的窗口池化后做一次轻量交叉注意力，且 gate 初始值很小（≈0.12），训练初期以原始视觉 Q 为主，逐步注入文本信息。
+### 1.3 TextCrossAttention：特征级文本融合
 
-**部署融合：** TTRM 使用预计算 frozen K，无需 TextEncoder，仍有文本语义引导路由。
+**作用位置**：Stage 2-3，配置为 `cross_attn_stages=[2,3]`。每个 block 拥有独立的 `TextCrossAttention`，插入在注意力模块输出之后、MLP 之前。
+
+**设计动机**：TTRM 改变“哪些窗口被选中”，但不直接修改视觉特征内容。深层特征已有更强语义表达，适合直接与固定文本做特征级融合。
+
+```
+Q = visual_features                    # [B, H*W, C]
+K = text_proj_k(backbone_text)          # [30, C]
+V = text_proj_v(backbone_text)          # [30, C]
+
+attn = softmax(Q @ K.T / sqrt(D))       # [B, H*W, 30]
+text_info = out_proj(attn @ V)          # [B, H*W, C]
+enhanced = LayerNorm(visual + sigmoid(gate) * text_info)
+```
+
+Stage 2 同时有 TTRM 与 TextCrossAttention：既让路由选择带文本语义，也让深层特征显式吸收文本信息。Stage 3 不再做 TTRM，只保留普通 self-attention + TextCrossAttention，用于最终全局语义整合。
+
+### 1.4 Backbone 部署缓存
+
+`fuse_for_deployment(fuse_head=False)` 中，backbone 段可完全冻结文本计算：
+
+1. `TextRefiner` 对 30 条提示词跑一次，结果写入 `frozen_backbone_text`。
+2. `TextCrossAttention.freeze_for_deployment` 预计算 `_frozen_k/_frozen_v [30,C]`，并把 `out_proj` 融入 V。
+3. Stage 0-2 的 `TopkRouting` 预计算或首次推理 lazy 注册 `_frozen_tc_k/_frozen_tc_v [30,qk_dim]`。
+4. 推理时 backbone 不再执行文本塔或文本重构，只查缓存 K/V。
 
 ---
 
-### 创新 3：渐进式文本注入 — TTRM + TextCrossAttention
+## 2. CLIPSegHead：动态图相关原型解码
 
-**设计动机：** TTRM 只影响路由选择（哪些窗口被选中），不改变视觉特征本身。深层特征已经具备语义信息，可以直接和文本做交叉注意力来增强特征，让视觉特征本身携带"这是水"的语义。
+CLIPSegHead 侧负责“生成图相关类别文本原型”并“用这些原型做像素分类”。这里的文本原型每张图都不同，因此和 backbone 固定文本路完全解耦。
 
-**渐进式注入策略：**
+### 2.1 图相关分组注意力池化
 
-| Stage | 注入方式 | 作用层面 | 理由 |
-|-------|---------|---------|------|
-| Stage 0-1（浅层） | TTRM | 路由级 | 浅层特征是纹理/边缘，语义弱，改路由就够了 |
-| Stage 2-3（深层） | TTRM + TextCrossAttention | 路由级 + 特征级 | 深层特征有语义，直接融合文本能对齐 |
-
-**TextCrossAttention 模块：**
+**设计动机**：每类 10 条提示词代表不同场景语义，例如 water 下有 river、lake、wave 等。固定平均会损失场景适应性；图相关 query 能让每张图自己选择更相关的提示词。
 
 ```
-Q = visual_features [B, H*W, C]     ← backbone 深层特征
-K = text_prototypes 投影 [K, C]      ← 3 个类别 prototype
-V = text_prototypes 投影 [K, C]
+多阶段骨干特征：
+  feats = [B,64,H/4,W/4], [B,128,...], [B,256,...], [B,512,...]
 
-cross_attn = softmax(Q @ K.T / sqrt(D))   # [B, H*W, K]
-text_info = cross_attn @ V                  # [B, H*W, C]
+生成图相关 query：
+  pooled = concat(global_avg_pool(feats))        # [B, 960]
+  img_q = image_query_proj(pooled)               # [B, 3*512] → [B,3,512]
+  prior = attn_pool_query                        # [3,1,512] → [B,3,512]
+  fused_q = L2norm(img_q) + L2norm(prior)         # [B,3,512]
 
-gate = sigmoid(learnable), 初始 ≈ 0.12
-enhanced_visual = LayerNorm(visual + gate × text_info)
+按类别分组池化：
+  q = fused_q.unsqueeze(2)                       # [B,3,1,512]
+  k = v = prompt_embeddings[:, sample_idx]       # [3,K_eff,512] → [B,3,K_eff,512]
+  attn = softmax(q @ k.T / sqrt(512))            # [B,3,1,K_eff]
+  prototype = (attn @ v).squeeze(2)              # [B,3,512]
 ```
 
-每个 Block 拥有独立的 TextCrossAttention 实例（不共享），插入在 ToppAttention 输出之后、MLP 之前。通过配置 `cross_attn_stages=[2, 3]` 控制作用阶段。
+其中 `K_eff` 是当前前向实际参与池化的提示词数量：训练时先随机 `K_eff ∈ [1,K]`，再随机采样对应提示词位置；当前水域配置 `K=10`，即每次随机使用 1-10 条。推理时 `K_eff=10`，使用完整提示词集合。关键点是**分组注意力**：water 的 query 只看 water 的 `K_eff` 条提示词，ship 与 land 同理，不把 30 条文本展平成一个混合池。这样类别边界稳定，场景选择又保持图相关。
 
-**与 SAM3 的区别：** SAM3 在编码器全部 6 层都做 cross-attention，计算量大。本方案只在 Stage 2、3 做（共 9 个 Block），且 gate 初始值很小（≈0.12），训练初期以原始视觉特征为主，逐步注入文本信息。
+### 2.2 提示词增强与 RepRTA 原型精炼
 
-**与 TTRM 的区别：** TTRM 在路由器内部做，影响"选哪些窗口"；TextCrossAttention 在 ToppAttention 之后做，直接修改视觉特征本身。两者互补。
+训练时，动态原型池化前会对提示词做轻量增强：
 
-**部署融合：** TextCrossAttention 使用预计算 frozen K/V，out_proj 融合进 V 投影，无需 TextEncoder。
+- 先随机采样数量 `K_eff ∈ [1,K]`，再随机采样对应提示词位置；当前 `K=10`，即随机 1-10 条。所有类别共享同一组位置索引，避免 query 依赖固定提示词组合。
+- 对采样后的 embedding 加高斯噪声 `σ=0.01`，降低对精确坐标的过拟合。
+- 推理时使用全部 10 条提示词，不加噪声。
+
+池化得到 `[B,3,512]` 后，进入 `RepRTA` 精炼。这里的 `RepRTA` 可理解为 **Residual Text Adapter**：一个零初始化末层的 SwiGLU 残差适配器，用来微调动态图相关文本原型。
+
+```
+x12 = Linear(prototype)
+x1, x2 = chunk(x12)
+refined = Linear(SiLU(x1) * x2)
+prototype = L2norm(prototype + refined)
+```
+
+`RepRTA` 位于 `TextEncoder` 内，不在 `CLIPSegHead` 类本体里；但它属于 head 侧动态原型路径，作用对象是 `[B,3,512]`，不是 backbone 的固定 `[30,512]`。
+
+### 2.3 文本原型驱动的解码分类头
+
+`CLIPSegHead` 将四阶段视觉特征融合后投影到 512 维文本空间，再与动态类别原型做逐像素点积分类。
+
+```
+# 输入来自 backbone 的 4 个 stage，空间分辨率以 stage0 为对齐目标
+x0, x1, x2, x3 = feats
+# x0: [B,  64, H0, W0]
+# x1: [B, 128, H1, W1]
+# x2: [B, 256, H2, W2]
+# x3: [B, 512, H3, W3]
+
+# 每个 stage 先通过独立 1×1 ConvModule 映射到统一通道数 256
+y0 = convs[0](x0)                                # [B,256,H0,W0]
+y1 = resize(convs[1](x1), size=(H0,W0))          # [B,256,H0,W0]
+y2 = resize(convs[2](x2), size=(H0,W0))          # [B,256,H0,W0]
+y3 = resize(convs[3](x3), size=(H0,W0))          # [B,256,H0,W0]
+
+# 多尺度融合
+y = concat([y0,y1,y2,y3], dim=channel)           # [B,1024,H0,W0]
+y = fusion_conv(y)                               # [B,256,H0,W0]
+
+# 投影到 CLIP 文本空间
+feat = proj_norm(y)                              # [B,256,H0,W0]
+feat = proj(feat)                                # [B,512,H0,W0]
+
+# prototype 主路径为图相关 [B,3,512]；旧 fallback 可为 [3,512]
+w = prototype
+if w.dim() == 2:
+    w = w.unsqueeze(0)                           # [1,3,512]，按 batch 广播
+
+# 严格余弦消融分支
+if normalize_visual:
+    feat = L2norm(feat, dim=channel)             # [B,512,H0,W0]
+
+# 逐像素文本原型分类
+logits = einsum("bchw,bkc->bkhw", feat, w)       # [B,3,H0,W0]
+# 等价理解：对每张图 b，w[b,k,c] × feat[b,c,h,w] 沿 c=512 求和，
+# 即 [K,C] × [C,H,W] → [K,H,W]，相当于逐图动态 1×1 分类卷积。
+logits = logits * exp(logit_scale) + bias
+
+# CLIPSegHead.forward 到这里返回的是 stage0 分辨率 logits。
+# 训练时 BaseDecodeHead.loss_by_feat 会 resize 到 gt_sem_seg 尺寸；
+# 推理时 BaseDecodeHead.predict_by_feat 会 resize 到 img_shape/pad_shape。
+# 当前 backbone 的 stage0 通常是输入的 1/4，因此常见情况是再上采样 4 倍。
+seg_logits = resize(logits, target_size)         # [B,3,H_img,W_img]
+```
+
+**参考：SAM3/DETR 式 cross-attention decoder 思路**
+
+当前 `einsum` 只做相似度分类，可理解为 `QK^T`：像素视觉特征作为 `Q`，类别文本原型作为 `K`，直接得到每个像素对每个类别的分数。若改成 cross-attention decoder，则会多出 `softmax(QK^T)V` 的信息聚合步骤，先让视觉 token 和文本/查询 token 交互，再输出 mask 或类别 logits。
+
+一种简化的像素级 cross-attention 写法如下：
+
+```
+# 视觉 token：来自 head 投影后的 feat
+X = flatten(feat)                                # [B,H0*W0,512]
+
+# 文本 token：来自动态图相关类别原型
+T = prototype                                    # [B,3,512]
+K_text = text_k(T)                               # [B,3,512]
+V_text = text_v(T)                               # [B,3,512]
+
+# 像素作为 query 去读取文本 value
+Q_pix = pix_q(X)                                 # [B,H0*W0,512]
+A = softmax(Q_pix @ K_text.T / sqrt(512), dim=class)
+text_ctx = A @ V_text                            # [B,H0*W0,512]
+
+# 文本上下文回写到像素特征
+X_enhanced = LayerNorm(X + gate * text_ctx)
+X_enhanced = FFN(X_enhanced) + X_enhanced
+
+# 分类方式 A：继续使用文本原型点积分类（分类权重来自 T，不是独立 Linear 参数）
+logits = X_enhanced @ T.T                        # [B,H0*W0,3]
+
+# 分类方式 B：也可改成普通线性分类头（分类权重为可学习参数 W_cls）
+# logits = Linear(512, num_classes)(X_enhanced)  # [B,H0*W0,3]
+logits = reshape(logits, [B,3,H0,W0])
+```
+
+更接近 DETR/SAM3 detector 的写法会引入一组 object/mask queries：
+
+```
+image_tokens = pixel_features.flatten()           # [B, H0*W0, 512]
+text_tokens  = prototype                          # [B, 3, 512]
+Q_obj = learned_or_prompt_queries                 # [B, Nq, 512]，Nq 远小于像素数
+Q_obj = SelfAttention(Q_obj)                      # [B, Nq, 512]，query 间通信，学分工
+Q_obj = CrossAttention(Q_obj, image_tokens)       # [B, Nq, 512]，图像作 KV，query 圈定区域
+Q_obj = CrossAttention(Q_obj, text_tokens)        # [B, Nq, 512]，文本作 KV，query 对齐语义
+mask_embed = MLP(Q_obj)                           # [B, Nq, 512]
+mask_logits = mask_embed @ pixel_features         # [B, Nq, H0, W0]，每 query 出一张 mask
+class_or_presence = Head(Q_obj)                   # [B, Nq, num_classes(+1)]，query 级分类
+```
+
+区别在于：当前方案没有 decoder query 迭代，也没有 `V` 聚合，计算更轻，输出直接是 3 类语义 logits；cross-attention decoder 更强但更重，适合开放词汇、多实例或需要 object query 的场景。
+
+当前默认 `normalize_visual=False`，文本原型已 L2 归一化，但视觉特征不归一化：
+
+```
+logits = ||visual_feat|| × cos(theta) × scale + bias
+```
+
+这保留了视觉特征范数作为置信度。若做严格余弦消融，配置 `normalize_visual=True`，head 会先对 `feat` 做通道维 L2 归一化，再与文本原型点积。对应消融配置：
+
+- `configs-h/clip/waterseg.py`：默认点积形式
+- `configs-h/clip/waterseg_cosine.py`：严格余弦形式
+- `configs-h/clip/attn_waterseg.py`：BRG 注意力消融 + 默认点积
+- `configs-h/clip/attn_waterseg_cosine.py`：BRG 注意力消融 + 严格余弦
+
+### 2.4 Head 部署边界
+
+动态图相关原型 `[B,3,512]` 每张图不同，因此默认部署不把 head 折叠成单个固定 `Conv2d`。推理仍实时执行：
+
+```
+image_query_proj + pool_with_query + RepRTA + einsum
+```
+
+这部分相对 backbone 开销较小，且保留图相关选择能力。只有旧固定原型 fallback 才允许 `fuse_head=True`，把固定 `[3,512]` 原型与 BN、proj、scale、bias 近似融合成 `Conv2d(256,3,1×1)`；该路径会丢失图相关原型选择。若 `normalize_visual=True`，由于逐像素 L2 归一化是非线性操作，不能融合成单个卷积。
 
 ---
 
-### 创新 4：CLIPSegHead — 文本原型驱动的对比分类头
+## 训练与部署摘要
 
-**设计动机：** 普通 SegformerHead 用 `nn.Conv2d(channels, num_classes)` 做分类，权重随机初始化，每个类别之间的关系完全由训练数据隐式学习。CLIPSegHead 用冻结的 CLIP text prototype 替代分类权重，将分类问题转化为"视觉特征和哪个文本原型最像"的对比问题，继承 CLIP 的跨模态语义先验。
+**训练前准备**
 
-**与普通 SegformerHead 的对比：**
+1. 使用冻结 CLIP 文本塔生成 `tools/prompt_bank_water.pt`，形状为 `[3,10,512]`。
+2. `backbone_text` 始终来自完整 30 条提示词，不做随机增强。
+3. head 动态原型池化训练时启用提示词采样与噪声增强。
 
-| | SegformerHead | CLIPSegHead |
-|---|---|---|
-| 分类器 | `nn.Conv2d(256, 3)` 随机初始化 | cosine(visual_feat, text_prototypes) 冻结 |
-| 类别关系 | 训练后隐式学到 | 由 CLIP 语义空间预定义 |
-| 新增类别 | 重新训练分类头 | 只需添加 prompt embedding |
-| 梯度 | 流过分类权重 + backbone | 只流过 backbone（text 嵌入冻结） |
-| 推理 | 标准 Conv2d | 融合后等价 Conv2d |
+**训练前向**
 
-**前向计算：**
 ```
-4 stage 特征 → 各 1×1 Conv(→256) → 上采样 → concat → [B, 1024, 64, 64]
-→ fusion_conv(1024→256) → BN → proj(256→512) → [B, 512, H, W]
-→ einsum("bchw,bkc->bkhw", feat, prototypes[3,512]) × scale + bias → [B, 3, H, W]
+输入图像
+→ backbone(inputs, category_prototypes=backbone_text)
+→ 多阶段视觉特征 feats
+→ image_query_proj(feats) 得 fused_q
+→ pool_with_query(fused_q) 得 prototype [B,3,512]
+→ CLIPSegHead(feats, prototype) 得 logits [B,3,H,W]
+→ CrossEntropyLoss
 ```
 
-**损失函数：** 单一 CrossEntropyLoss，logits 来自 cosine similarity × scale + bias。
+**部署前向**
 
-**部署融合：** BN + proj + einsum + scale + bias 全部折叠进单个 `Conv2d(256, 3, 1×1)`，推理时等价于普通分类头。
-
----
-
-### Prompt Bank 增强策略
-
-- 训练时每个类别**随机采样 2-3 个 prompt**（非全部使用），防止 attention pooling query 过拟合
-- 对 text embedding 施加**高斯噪声扰动**（σ=0.01），模拟 CLIP 编码器的不确定性
-- 语义分割场景所有像素都有明确类别标签（water/ship/land），无需负样本 prompt bank
-
----
-
-## 部署阶段重参数化
-
-**Step 1：** Text Encoder 移除 — 所有 text embedding 预计算并固化
-
-**Step 2：** RepRTA 跳过 — 设置 `_fused=True` 标志，forward 跳过 RepRTA 计算
-
-**Step 3：** 分类头融合 — BN + einsum + scale + bias 融合进 1x1 Conv2d
-
-**Step 4：** TTRM frozen K + TextCrossAttention frozen K/V — 预计算文本投影，推理时无需 TextEncoder
-
-**最终模型：TextEncoder 移除，Head 融合为 Conv2d，TTRM/Cross-Attn 使用预计算 frozen K/V 交互，零 TextEncoder 开销。**
+```
+backbone 段：TextRefiner / TTRM / TextCrossAttention 文本投影全部缓存
+head 段：动态图相关原型实时生成，默认不融合成固定 Conv2d
+CLIP 文本塔：全程离线，不进入训练或推理图
+```

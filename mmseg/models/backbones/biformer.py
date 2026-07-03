@@ -9,6 +9,7 @@ Variants:
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from mmengine.runner import load_checkpoint
 from timm.models.layers import DropPath, trunc_normal_
 from ..utils.bra_legacy import BiLevelRoutingAttention
@@ -30,9 +31,12 @@ class Block(nn.Module):
                  topk=4, param_attention="qkvo", param_routing=False,
                  diff_routing=False, soft_routing=False, mlp_ratio=4,
                  mlp_dwconv=False, side_dwconv=5, before_attn_dwconv=3,
-                 pre_norm=True, auto_pad=False):
+                 pre_norm=True, auto_pad=False,
+                 use_ttrm=False, cross_attn_module=None,
+                 use_plain_attn=False):
         super().__init__()
         qk_dim = qk_dim or dim
+        self._use_plain_attn = use_plain_attn
 
         if before_attn_dwconv > 0:
             self.pos_embed = nn.Conv2d(dim, dim, kernel_size=before_attn_dwconv,
@@ -40,6 +44,8 @@ class Block(nn.Module):
         else:
             self.pos_embed = lambda x: 0
         self.norm1 = nn.LayerNorm(dim, eps=1e-6)
+        # 仅 BiLevelRoutingAttention 接受 category_prototypes（TTRM 注入路由）；
+        # Attention / AttentionLePE / 卷积分支 forward 仅 (x)，不透传 prototypes
         if topk > 0:
             self.attn = BiLevelRoutingAttention(
                 dim=dim, num_heads=num_heads, n_win=n_win, qk_dim=qk_dim,
@@ -50,11 +56,15 @@ class Block(nn.Module):
                 topk=topk, param_attention=param_attention,
                 param_routing=param_routing, diff_routing=diff_routing,
                 soft_routing=soft_routing, side_dwconv=side_dwconv,
-                auto_pad=auto_pad)
+                auto_pad=auto_pad,
+                use_ttrm=use_ttrm)
+            self._attn_takes_prototypes = True
         elif topk == -1:
             self.attn = Attention(dim=dim)
+            self._attn_takes_prototypes = False
         elif topk == -2:
             self.attn = AttentionLePE(dim=dim, side_dwconv=side_dwconv)
+            self._attn_takes_prototypes = False
         elif topk == 0:
             from einops.layers.torch import Rearrange
             self.attn = nn.Sequential(
@@ -63,6 +73,10 @@ class Block(nn.Module):
                 nn.Conv2d(dim, dim, 5, padding=2, groups=dim),
                 nn.Conv2d(dim, dim, 1),
                 Rearrange('n c h w -> n h w c'))
+            self._attn_takes_prototypes = False
+
+        # Cross-attention module（与 bi_topp_vote.Block 一致，仅在配置的 stage 构造）
+        self.cross_attn = cross_attn_module
 
         self.norm2 = nn.LayerNorm(dim, eps=1e-6)
         self.mlp = nn.Sequential(
@@ -82,23 +96,36 @@ class Block(nn.Module):
             self.use_layer_scale = False
         self.pre_norm = pre_norm
 
-    def forward(self, x):
+    def forward(self, x, category_prototypes=None):
         x = x + self.pos_embed(x)
         x = x.permute(0, 2, 3, 1)  # NCHW -> NHWC
 
+        def call_attn(inp):
+            if self._attn_takes_prototypes:
+                return self.attn(inp, category_prototypes=category_prototypes)
+            return self.attn(inp)
+
         if self.pre_norm:
             if self.use_layer_scale:
-                x = x + self.drop_path(self.gamma1 * self.attn(self.norm1(x)))
+                x = x + self.drop_path(self.gamma1 * call_attn(self.norm1(x)))
+                if self.cross_attn is not None and category_prototypes is not None:
+                    x = self.cross_attn(x, category_prototypes)
                 x = x + self.drop_path(self.gamma2 * self.mlp(self.norm2(x)))
             else:
-                x = x + self.drop_path(self.attn(self.norm1(x)))
+                x = x + self.drop_path(call_attn(self.norm1(x)))
+                if self.cross_attn is not None and category_prototypes is not None:
+                    x = self.cross_attn(x, category_prototypes)
                 x = x + self.drop_path(self.mlp(self.norm2(x)))
         else:
             if self.use_layer_scale:
-                x = self.norm1(x + self.drop_path(self.gamma1 * self.attn(x)))
+                x = self.norm1(x + self.drop_path(self.gamma1 * call_attn(x)))
+                if self.cross_attn is not None and category_prototypes is not None:
+                    x = self.cross_attn(x, category_prototypes)
                 x = self.norm2(x + self.drop_path(self.gamma2 * self.mlp(x)))
             else:
-                x = self.norm1(x + self.drop_path(self.attn(x)))
+                x = self.norm1(x + self.drop_path(call_attn(x)))
+                if self.cross_attn is not None and category_prototypes is not None:
+                    x = self.cross_attn(x, category_prototypes)
                 x = self.norm2(x + self.drop_path(self.mlp(x)))
 
         x = x.permute(0, 3, 1, 2)  # NHWC -> NCHW
@@ -121,9 +148,18 @@ class BiFormer(nn.Module):
                  kv_downsample_kernels=[4, 2, 1, 1],
                  kv_downsample_ratios=[4, 2, 1, 1],
                  mlp_ratios=[4, 4, 4, 4],
-                 param_attention='qkvo', mlp_dwconv=False):
+                 param_attention='qkvo', mlp_dwconv=False,
+                 # 文本路径默认全关，让 BiFormer_standalone（纯视觉 baseline）行为等价于改动前；
+                 # clip 消融配置（clip-brg.py）会显式开启这些参数
+                 use_ttrm=False, ttrm_stages=[],
+                 cross_attn_stages=[],
+                 use_plain_attn_last_stage=False):
         super().__init__()
         self.embed_dim = embed_dim
+        self.use_ttrm = use_ttrm
+        self.ttrm_stages = ttrm_stages
+        self.cross_attn_stages = cross_attn_stages
+        self.use_plain_attn_last_stage = use_plain_attn_last_stage
 
         # ---- patch embedding (stem + 3 downsample layers) ----
         self.downsample_layers = nn.ModuleList()
@@ -152,12 +188,22 @@ class BiFormer(nn.Module):
         nheads = [dim // head_dim for dim in qk_dims]
         dp_rates = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depth))]
         cur = 0
+
+        from ..utils.text_cross_attn import TextCrossAttention
+
         for i in range(4):
+            use_ca = i in cross_attn_stages
+            use_ttrm_stage = (use_ttrm and i in ttrm_stages)
+            # 末层 stage 用 plain Attention（而非 BRG），与 topp 版 use_plain_attn_last_stage 对齐
+            topk_i = topks[i]
+            if self.use_plain_attn_last_stage and i == 3 and topk_i > 0:
+                # 把末层强制切到标准 AttentionLePE（topk=-2），保留 BiFormer 末层语义
+                topk_i = -2
             stage = nn.Sequential(
                 *[Block(
                     dim=embed_dim[i], drop_path=dp_rates[cur + j],
                     layer_scale_init_value=layer_scale_init_value,
-                    topk=topks[i], num_heads=nheads[i], n_win=n_win,
+                    topk=topk_i, num_heads=nheads[i], n_win=n_win,
                     qk_dim=qk_dims[i], qk_scale=qk_scale,
                     kv_per_win=kv_per_wins[i],
                     kv_downsample_ratio=kv_downsample_ratios[i],
@@ -169,7 +215,11 @@ class BiFormer(nn.Module):
                     mlp_ratio=mlp_ratios[i], mlp_dwconv=mlp_dwconv,
                     side_dwconv=side_dwconv,
                     before_attn_dwconv=before_attn_dwconv,
-                    pre_norm=pre_norm, auto_pad=auto_pad)
+                    pre_norm=pre_norm, auto_pad=auto_pad,
+                    use_ttrm=use_ttrm_stage,
+                    cross_attn_module=TextCrossAttention(
+                        visual_dim=embed_dim[i], text_dim=512,
+                        num_heads=nheads[i]) if use_ca else None)
                   for j in range(depth[i])])
             self.stages.append(stage)
             cur += depth[i]
@@ -195,16 +245,18 @@ class BiFormer(nn.Module):
         if isinstance(pretrained, str):
             load_checkpoint(self, pretrained, strict=False)
 
-    def forward_features(self, x):
+    def forward_features(self, x, category_prototypes=None):
         out = []
         for i in range(4):
             x = self.downsample_layers[i](x)
-            x = self.stages[i](x)
+            # 手动展开 stage，向每个 Block 透传 category_prototypes
+            for block in self.stages[i]:
+                x = block(x, category_prototypes=category_prototypes)
             out.append(self.extra_norms[i](x))
         return tuple(out)
 
-    def forward(self, x):
-        return self.forward_features(x)
+    def forward(self, x, category_prototypes=None):
+        return self.forward_features(x, category_prototypes=category_prototypes)
 
 
 # =========================================================================
@@ -244,3 +296,57 @@ class BiFormer_standalone(BiFormer):
     def init_weights(self, pretrained=None):
         if isinstance(pretrained, str):
             load_checkpoint(self, pretrained, strict=False)
+
+
+@MODELS.register_module()
+class BiFormer_fusion_clip(BiFormer):
+    """CLIP 路径的 BiFormer Attention backbone 包装。
+
+    与 BiFormer_fusion（topp 版）平行存在，区别仅是注意力主路径用标准
+    BiLevelRoutingAttention 而非 ToppAttention；其余完全一致：
+      - 继承 BiFormer（已含 TTRM 路由级文本注入 + TextCrossAttention 特征级注入）
+      - 额外加跨层自门控融合（conv11 + bn + sigmoid + 上采样），供 CLIPSegHead 多尺度解码
+      - forward(x, category_prototypes) 返回 (feats_tuple, category_prototypes)，
+        与 CLIPEncoderDecoder.extract_feat 接口对齐
+    """
+
+    def __init__(self, pretrained=None, **kwargs):
+        super().__init__(**kwargs)
+        # 父类 BiFormer 已建好 self.extra_norms（4 个 LayerNorm2d），这里直接复用，
+        # 只补跨层自门控融合所需的 bn / conv11（仅前 3 个 stage 用到）
+        self.bn = nn.ModuleList()
+        self.conv11 = nn.ModuleList()
+        for i in range(3):
+            self.bn.append(nn.BatchNorm2d(self.embed_dim[i]))
+            self.conv11.append(nn.Conv2d(self.embed_dim[i + 1], self.embed_dim[i], 1, 1, 0))
+
+        nn.SyncBatchNorm.convert_sync_batchnorm(self)
+        self.sigmoid = nn.Sigmoid()
+
+    def init_weights(self, pretrained=None):
+        if isinstance(pretrained, str):
+            print(f'Loading pretrained weights from {pretrained}')
+            load_checkpoint(self, pretrained, strict=False)
+
+    def forward_features(self, x, category_prototypes=None):
+        """返回 (feats_tuple, category_prototypes)，与 CLIPEncoderDecoder 接口对齐。"""
+        out = []
+        stage_features = []
+        for i in range(4):
+            x = self.downsample_layers[i](x)
+            for block in self.stages[i]:
+                x = block(x, category_prototypes=category_prototypes)
+            stage_features.append(x)
+        # 跨层自门控融合：深层特征上采样后调制浅层
+        for i in range(3):
+            gate_visual = self.sigmoid(
+                self.bn[i](self.conv11[i](stage_features[i + 1])))
+            target_size = stage_features[i].shape[2:]
+            gate_up = F.interpolate(gate_visual, size=target_size, mode='bilinear', align_corners=False)
+            stage_features[i] = stage_features[i] + gate_up * stage_features[i]
+        for i in range(4):
+            out.append(self.extra_norms[i](stage_features[i]))
+        return tuple(out), category_prototypes
+
+    def forward(self, x, category_prototypes=None):
+        return self.forward_features(x, category_prototypes=category_prototypes)

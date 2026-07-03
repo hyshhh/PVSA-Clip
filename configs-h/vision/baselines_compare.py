@@ -5,10 +5,10 @@
 切换模型：取消注释对应的 _base_ 行，注释掉其余的。
 
 训练：
-  CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/baselines_compare.py --work-dir work_dirs/<model_name>
+  CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/vision/baselines_compare.py --work-dir work_dirs/<model_name>
 
 测试：
-  CUDA_VISIBLE_DEVICES=0 python tools/test.py configs-h/biformer/baselines_compare.py work_dirs/<model_name>/best_mIoU.pth
+  CUDA_VISIBLE_DEVICES=0 python tools/test.py configs-h/vision/baselines_compare.py work_dirs/<model_name>/best_mIoU.pth
 """
 
 _base_ = [

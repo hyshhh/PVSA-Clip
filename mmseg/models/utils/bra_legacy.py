@@ -30,7 +30,8 @@ class TopkRouting(nn.Module):
         diff_routing: bool, wether make routing differentiable
         soft_routing: bool, wether make output value multiplied by routing weights
     """
-    def __init__(self, qk_dim, topk=4, qk_scale=None, param_routing=False, diff_routing=False):
+    def __init__(self, qk_dim, topk=4, qk_scale=None, param_routing=False, diff_routing=False,
+                 use_ttrm=False):
         super().__init__()
         self.topk = topk
         self.qk_dim = qk_dim
@@ -40,21 +41,60 @@ class TopkRouting(nn.Module):
         self.emb = nn.Linear(qk_dim, qk_dim) if param_routing else nn.Identity()
         # routing activation
         self.routing_act = nn.Softmax(dim=-1)
-    
-    def forward(self, query:Tensor, key:Tensor)->Tuple[Tensor]:
+
+        # TTRM: Text-guided routing injection（与 top_p_bra.TopkRouting 同款注入）
+        self.use_ttrm = use_ttrm
+        if use_ttrm:
+            text_dim = 512  # CLIP embedding dimension
+            self.ttrm_text_proj = nn.Linear(text_dim, qk_dim)
+            self.ttrm_text_v_proj = nn.Linear(text_dim, qk_dim)
+            self.ttrm_out_proj = nn.Linear(qk_dim, qk_dim)
+            self.ttrm_norm = nn.LayerNorm(text_dim)
+            self.ttrm_gate = nn.Parameter(torch.tensor([-2.0]))
+
+    def forward(self, query:Tensor, key:Tensor, category_prototypes=None)->Tuple[Tensor]:
         """
         Args:
             q, k: (n, p^2, c) tensor
+            category_prototypes: (K, 512) text prototypes, optional TTRM injection
         Return:
             r_weight, topk_index: (n, p^2, topk) tensor
         """
         if not self.diff_routing:
             query, key = query.detach(), key.detach()
-        query_hat, key_hat = self.emb(query), self.emb(key) # per-window pooling -> (n, p^2, c) 
-        attn_logit = (query_hat*self.scale) @ key_hat.transpose(-2, -1) # (n, p^2, p^2)
+        query_hat, key_hat = self.emb(query), self.emb(key) # per-window pooling -> (n, p^2, c)
+        visual_attn_logit = (query_hat*self.scale) @ key_hat.transpose(-2, -1) # (n, p^2, p^2)
+        attn_logit = visual_attn_logit
+
+        # TTRM: cross-attention with text before routing（含 eval frozen cache）
+        if self.use_ttrm and category_prototypes is not None:
+            has_frozen_kv = (
+                hasattr(self, '_frozen_tc_k')
+                and self._frozen_tc_k is not None
+                and hasattr(self, '_frozen_tc_v')
+                and self._frozen_tc_v is not None)
+            if has_frozen_kv:
+                tc_k = self._frozen_tc_k
+                tc_v = self._frozen_tc_v
+            else:
+                tc = self.ttrm_norm(category_prototypes)
+                tc_k = self.ttrm_text_proj(tc)
+                tc_v = self.ttrm_text_v_proj(tc)
+                if not self.training:
+                    self.register_buffer('_frozen_tc_k', tc_k)
+                    self.register_buffer('_frozen_tc_v', tc_v)
+            gate = torch.sigmoid(self.ttrm_gate)
+            q_text_attn = torch.softmax((query_hat * self.scale) @ tc_k.transpose(-2, -1), dim=-1)
+            k_text_attn = torch.softmax((key_hat * self.scale) @ tc_k.transpose(-2, -1), dim=-1)
+            q_text = self.ttrm_out_proj(q_text_attn @ tc_v)
+            k_text = self.ttrm_out_proj(k_text_attn @ tc_v)
+            q_aug = query_hat + gate * q_text
+            k_aug = key_hat + gate * k_text
+            attn_logit = (q_aug * self.scale) @ k_aug.transpose(-2, -1)
+
         topk_attn_logit, topk_index = torch.topk(attn_logit, k=self.topk, dim=-1) # (n, p^2, k), (n, p^2, k)
-        r_weight = self.routing_act(topk_attn_logit) # (n, p^2, k)
-        
+        r_weight = self.routing_act(topk_attn_logit) # (n, p^2, topk)
+
         return r_weight, topk_index
         
 
@@ -118,7 +158,7 @@ class BiLevelRoutingAttention(nn.Module):
     def __init__(self, dim, num_heads=8, n_win=7, qk_dim=None, qk_scale=None,
                  kv_per_win=4, kv_downsample_ratio=4, kv_downsample_kernel=None, kv_downsample_mode='identity',
                  topk=4, param_attention="qkvo", param_routing=False, diff_routing=False, soft_routing=False, side_dwconv=3,
-                 auto_pad=False):
+                 auto_pad=False, use_ttrm=False):
         super().__init__()
         # local attention setting
         self.dim = dim
@@ -144,7 +184,8 @@ class BiLevelRoutingAttention(nn.Module):
                                   qk_scale=self.scale,
                                   topk=self.topk,
                                   diff_routing=self.diff_routing,
-                                  param_routing=self.param_routing)
+                                  param_routing=self.param_routing,
+                                  use_ttrm=use_ttrm)
         if self.soft_routing: # soft routing, always diffrentiable (if no detach)
             mul_weight = 'soft'
         elif self.diff_routing: # hard differentiable routing
@@ -199,10 +240,12 @@ class BiLevelRoutingAttention(nn.Module):
         self.attn_act = nn.Softmax(dim=-1)
 
         self.auto_pad=auto_pad
+        self.use_ttrm = use_ttrm
 
-    def forward(self, x, ret_attn_mask=False):
+    def forward(self, x, ret_attn_mask=False, category_prototypes=None):
         """
         x: NHWC tensor
+        category_prototypes: (K, 512) text prototypes, optional TTRM routing injection
 
         Return:
             NHWC tensor
@@ -250,7 +293,7 @@ class BiLevelRoutingAttention(nn.Module):
 
         ############ gather q dependent k/v #################
 
-        r_weight, r_idx = self.router(q_win, k_win) # both are (n, p^2, topk) tensors
+        r_weight, r_idx = self.router(q_win, k_win, category_prototypes=category_prototypes) # both are (n, p^2, topk) tensors
 
         kv_pix_sel = self.kv_gather(r_idx=r_idx, r_weight=r_weight, kv=kv_pix) #(n, p^2, topk, h_kv*w_kv, c_qk+c_v)
         k_pix_sel, v_pix_sel = kv_pix_sel.split([self.qk_dim, self.dim], dim=-1)

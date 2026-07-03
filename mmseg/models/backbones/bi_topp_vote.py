@@ -334,7 +334,7 @@ class VTFormer(nn.Module):
                  cnn_dwconv_layers=[2, 1, 2, 1],
                  feature_vis_config=None,
                  use_ttrm=False,
-                 ttrm_stages=[0, 1, 2, 3],
+                 ttrm_stages=[0, 1, 2],
                  cross_attn_stages=[2, 3],
                  remove_cnn_branch=False,
                  soft_kv_weight=0.5,

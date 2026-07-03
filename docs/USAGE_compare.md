@@ -10,26 +10,26 @@
 | BiFormer-S | BiFormer-Small | SegformerHead | ❌ |
 | BiFormer-B | BiFormer-Base | SegformerHead | ❌ |
 
-切换模型：编辑 `configs-h/biformer/baselines_compare.py`，取消注释对应的 `_base_` 行。
+切换模型：编辑 `configs-h/vision/baselines_compare.py`，取消注释对应的 `_base_` 行。
 
 ## 训练
 ```bash
-CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/baselines_compare.py --work-dir work_dirs/<model_name>
+CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/vision/baselines_compare.py --work-dir work_dirs/<model_name>
 # 示例
-CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/baselines_compare.py --work-dir work_dirs/deeplabv3plus_r18
-CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/baselines_compare.py --work-dir work_dirs/swin_t_upernet
-CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/baselines_compare.py --work-dir work_dirs/segformer_b2
+CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/vision/baselines_compare.py --work-dir work_dirs/deeplabv3plus_r18
+CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/vision/baselines_compare.py --work-dir work_dirs/swin_t_upernet
+CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/vision/baselines_compare.py --work-dir work_dirs/segformer_b2
 ```
 
 ## 测试
 ```bash
-CUDA_VISIBLE_DEVICES=0 python tools/test.py configs-h/biformer/baselines_compare.py work_dirs/<model_name>/best_mIoU.pth
+CUDA_VISIBLE_DEVICES=0 python tools/test.py configs-h/vision/baselines_compare.py work_dirs/<model_name>/best_mIoU.pth
 ```
 
 ## 参数量与 FLOPs
 ```bash
-python tools/analysis_tools/get_flops.py configs-h/biformer/baselines_compare.py --shape 256 256
-python tools/analysis_tools/pvsa_stage_complexity.py configs-h/biformer/baselines_compare.py --shape 256 256
+python tools/analysis_tools/get_flops.py configs-h/vision/baselines_compare.py --shape 256 256
+python tools/analysis_tools/pvsa_stage_complexity.py configs-h/vision/baselines_compare.py --shape 256 256
 ```
 
 ## 预训练权重

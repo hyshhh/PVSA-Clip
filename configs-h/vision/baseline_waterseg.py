@@ -1,12 +1,13 @@
 _base_ = [
-    '../_base_/models/VTFormer-s-baseline.py',
-    '../_base_/datasets/gqy.py',
+    '../_base_/models/vision-topp-cnn.py',
+    # '../_base_/datasets/gqy.py',
+    '../_base_/datasets/KAKA.py',
     '../_base_/default_runtime.py',
     '../_base_/schedules/schedule_20k.py'
 ]
 
 # Baseline PVSA-Net training (gqy/KAKA dataset, 200 epochs)
-# CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_baseline_waterseg.py --work-dir work_dirs/baseline
+# CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/vision/baseline_waterseg.py --work-dir work_dirs/baseline
 
 train_dataloader = dict(
     batch_size=16,

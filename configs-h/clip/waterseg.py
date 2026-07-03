@@ -1,12 +1,23 @@
 _base_ = [
-    '../_base_/models/VTFormer-s-baseline.py',
-    '../_base_/datasets/camvid.py',
+    '../_base_/models/clip-topp.py',
+    # '../_base_/datasets/gqy.py',
+    '../_base_/datasets/KAKA.py',
     '../_base_/default_runtime.py',
     '../_base_/schedules/schedule_20k.py'
 ]
 
-# Baseline PVSA-Net training (CamVid dataset, 400 epochs)
-# CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_baseline_camvid.py --work-dir work_dirs/baseline_camvid
+# CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/clip/waterseg.py --work-dir work_dirs/clip_waterseg
+
+crop_size = (256, 256)
+data_preprocessor = dict(
+    type='SegDataPreProcessor',
+    mean=[123.675, 116.28, 103.53],
+    std=[58.395, 57.12, 57.375],
+    bgr_to_rgb=True,
+    pad_val=0,
+    seg_pad_val=255,
+    size=crop_size
+)
 
 train_dataloader = dict(
     batch_size=16,
@@ -17,10 +28,28 @@ val_dataloader = dict(batch_size=4, num_workers=2)
 test_dataloader = dict(batch_size=1, num_workers=1)
 
 param_scheduler = [
-    dict(type='LinearLR', start_factor=0.001, by_epoch=True, begin=0, end=20),
-    dict(type='PolyLR', eta_min=1e-6, power=1.0, by_epoch=True, begin=20, end=400)
+    dict(
+        type='LinearLR',
+        start_factor=0.001,
+        by_epoch=True,
+        begin=0,
+        end=10
+    ),
+    dict(
+        type='PolyLR',
+        eta_min=1e-6,
+        power=1.0,
+        by_epoch=True,
+        begin=10,
+        end=200
+    )
 ]
-train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=400, val_interval=40)
+
+train_cfg = dict(
+    type='EpochBasedTrainLoop',
+    max_epochs=200,
+    val_interval=10
+)
 
 optim_wrapper = dict(
     _delete_=True,
@@ -31,6 +60,8 @@ optim_wrapper = dict(
             'pos_block': dict(decay_mult=0.0),
             'norm': dict(decay_mult=0.0),
             'head': dict(lr_mult=10.0),
+            'text_encoder': dict(lr_mult=1.0),
+            'ttrm': dict(lr_mult=1.0),
             # 路由器降学习率：验证「路由器是否训练过猛」
             'PA.router': dict(lr_mult=0.2, decay_mult=1.0),
         })
@@ -48,6 +79,7 @@ val_evaluator = dict(
 test_evaluator = val_evaluator
 
 model = dict(
+    data_preprocessor=data_preprocessor,
     test_cfg=dict(mode='whole')
 )
 

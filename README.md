@@ -1,9 +1,11 @@
 # PVSA-Net
 
-基于 MMSegmentation 的语义分割项目，支持三条路径：
+基于 MMSegmentation 的语义分割项目，支持四条路径：
 
-1. **CLIP 增强路径**：注入 CLIP 文本语义，部署时零额外开销。
-2. **Baseline 路径**：非 CLIP，soft routing，用于对比实验。
+1. **CLIP 增强路径**：注入 CLIP 文本语义（TTRM 路由级 + Cross-Attn 特征级），部署时零额外开销。
+2. **PVSA-Net Baseline 路径**：CLIP 版 backbone 的纯视觉对照，移除全部文本信号，仅保留 ToppAttention / 普通 attention block 切换。
+3. **标准 BiFormer Attention 消融**：保留完整 CLIP 文本路径，仅将 backbone 注意力从 ToppAttention 替换为 BiLevelRoutingAttention。
+4. **Baseline 路径**（原始）：非 CLIP，含 CNN 分支 + 融合，soft routing，用于跨模型对比实验。
 
 ## 环境
 
@@ -26,14 +28,14 @@ python tools/generate_water_prompt_bank.py --output tools/prompt_bank_water.pt -
 CLIP 增强训练：
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tools/train.py \
-  configs-h/biformer/biformer_clip_waterseg.py \
+  configs-h/clip/waterseg.py \
   --work-dir work_dirs/clip_waterseg
 ```
 
 Baseline 训练（非 CLIP，soft routing）：
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tools/train.py \
-  configs-h/biformer/biformer_baseline_waterseg.py \
+  configs-h/vision/baseline_waterseg.py \
   --work-dir work_dirs/baseline
 ```
 
@@ -42,8 +44,8 @@ CUDA_VISIBLE_DEVICES=0 python tools/train.py \
 ```bash
 export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA/PVSA-Clip:$PYTHONPATH
 CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
-  configs-h/biformer/biformer_clip_waterseg.py \
-  work_dirs/clip_waterseg/best_mIoU_epoch.pth \
+  configs-h/clip/waterseg.py \
+  work_dirs/clip_waterseg/best_mIoU.pth \
   --cfg-options model.backbone.topp_flash_backend=None
 ```
 
@@ -52,8 +54,8 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
 ```bash
 export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA/PVSA-Clip:$PYTHONPATH
 CUDA_VISIBLE_DEVICES=0 python tools/test.py \
-  configs-h/biformer/biformer_clip_waterseg.py \
-  checkpoint.pth \
+  configs-h/clip/waterseg.py \
+  work_dirs/clip_waterseg/best_mIoU.pth \
   --show-dir vis_results/
 ```
 
@@ -61,8 +63,8 @@ CUDA_VISIBLE_DEVICES=0 python tools/test.py \
 
 ```bash
 python tools/deploy_clip_pvsa.py \
-  --config configs-h/biformer/biformer_clip_waterseg.py \
-  --checkpoint work_dirs/clip_waterseg/best_mIoU_epoch.pth \
+  --config configs-h/clip/waterseg.py \
+  --checkpoint work_dirs/clip_waterseg/best_mIoU.pth \
   --output work_dirs/deployed/
 ```
 
@@ -73,9 +75,9 @@ python tools/deploy_clip_pvsa.py \
 ```bash
 export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA/PVSA-Clip:$PYTHONPATH
 python tools/analysis_tools/get_flops.py \
-  configs-h/biformer/biformer_clip_waterseg.py --shape 224 224
+  configs-h/clip/waterseg.py --shape 256 256
 python tools/analysis_tools/pvsa_stage_complexity.py \
-  configs-h/biformer/biformer_clip_waterseg.py --shape 224 224
+  configs-h/clip/waterseg.py --shape 256 256
 ```
 
 ## 自定义 CUDA 核推理
@@ -95,7 +97,7 @@ export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA/PVSA-Clip:$PYTHONPATH
 export CC=/usr/bin/gcc-11
 export CXX=/usr/bin/g++-11
 CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
-  configs-h/biformer/biformer_clip_waterseg.py \
+  configs-h/clip/waterseg.py \
   checkpoint.pth \
   --cfg-options model.backbone.topp_flash_backend=cuda \
   model.backbone.topp_flash_debug=False
@@ -110,12 +112,27 @@ export PVSA_TOPP_FLASH_ARCH="8.6"
 
 ## 配置文件
 
+### 模型定义（`_base_/models/`）
 | 文件 | 说明 |
 |------|------|
-| `configs-h/_base_/models/VTFormer-s-baseline.py` | Baseline 模型 |
-| `configs-h/_base_/models/VTFormer-clip.py` | CLIP 增强模型 |
-| `configs-h/biformer/biformer_baseline_waterseg.py` | Baseline 训练 |
-| `configs-h/biformer/biformer_clip_waterseg.py` | CLIP 训练 |
+| `configs-h/_base_/models/clip-topp.py` | CLIP 增强模型（ToppAttention + 全套文本） |
+| `configs-h/_base_/models/clip-brg.py` | CLIP + 标准 BiFormer Attention 消融 |
+| `configs-h/_base_/models/vision-topp.py` | PVSA-Net Baseline（CLIP 版 backbone 纯视觉） |
+| `configs-h/_base_/models/vision-brg.py` | 纯视觉 + 标准 BiFormer Attention 消融 |
+| `configs-h/_base_/models/vision-topp-cnn.py` | 原 Baseline 模型（含 CNN 分支） |
+
+### 训练入口
+| 文件 | 说明 |
+|------|------|
+| `configs-h/clip/waterseg.py` | CLIP 增强训练 |
+| `configs-h/clip/attn_waterseg.py` | CLIP + 标准 BiFormer Attention 消融 |
+| `configs-h/vision/pvsa_net_baseline.py` | PVSA-Net Baseline 训练（CLIP 版 backbone 纯视觉对照） |
+| `configs-h/vision/attn_ablation_waterseg.py` | 纯视觉 + 标准 BiFormer Attention 消融 |
+| `configs-h/vision/baseline_waterseg.py` | 原 Baseline 训练（gqy） |
+| `configs-h/vision/baseline_camvid.py` | 原 Baseline 训练（CamVid） |
+| `configs-h/vision/baselines_compare.py` | 对比实验（切换 deeplabv3plus/swin_t/segformer_b2） |
+
+详细命令见 [docs/USAGE.md](docs/USAGE.md)（纯视觉路径）与 [docs/USAGE-clip.md](docs/USAGE-clip.md)（CLIP 路径）。
 
 ## 注意事项
 

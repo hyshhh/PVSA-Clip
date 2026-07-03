@@ -14,19 +14,25 @@ class CLIPSegHead(BaseDecodeHead):
     """CLIP-based segmentation head with contrastive classification.
 
     Combines multi-scale feature fusion (SegformerHead style) with
-    BNContrastiveHead-style cosine similarity classification against
-    text category prototypes.
+    BNContrastiveHead-style prototype classification against text category
+    prototypes.
 
     Args:
         embed_dim (int): Text embedding dimension. Default: 512
         interpolate_mode (str): Upsample mode. Default: 'bilinear'
+        normalize_visual (bool): Whether to L2-normalize visual features
+            before prototype matching. If False, logits keep visual feature
+            norm as a confidence term. If True, logits become strict cosine
+            similarity. Default: False.
     """
 
-    def __init__(self, embed_dim=512, interpolate_mode='bilinear', **kwargs):
+    def __init__(self, embed_dim=512, interpolate_mode='bilinear',
+                 normalize_visual=False, **kwargs):
         super().__init__(input_transform='multiple_select', **kwargs)
 
         self.embed_dim = embed_dim
         self.interpolate_mode = interpolate_mode
+        self.normalize_visual = normalize_visual
         num_inputs = len(self.in_channels)
 
         assert num_inputs == len(self.in_index)
@@ -100,7 +106,15 @@ class CLIPSegHead(BaseDecodeHead):
             prototypes = self._inference_prototypes
 
         if prototypes is not None:
-            w = prototypes.unsqueeze(0)  # [1, K, D]
+            # 兼容两种原型形态：
+            #   [C, D]            —— 冻结部署 / 旧固定原型路径（无 batch 维）
+            #   [B, C, D]         —— 图相关路径（每图不同）
+            w = prototypes
+            if w.dim() == 2:
+                w = w.unsqueeze(0)            # [1, C, D]，broadcast 到 batch
+            # out: [B, D, H, W]; w: [B, C, D]
+            if self.normalize_visual:
+                out = F.normalize(out, dim=1, p=2)
             seg_logits = torch.einsum("bchw,bkc->bkhw", out, w)
             seg_logits = seg_logits * self.logit_scale.exp() + self.bias
         else:
@@ -109,7 +123,11 @@ class CLIPSegHead(BaseDecodeHead):
         return seg_logits
 
     def fuse_for_deployment(self, category_prototypes):
-        """Fuse BN + proj + cosine + scale + bias into single Conv2d."""
+        """Fuse BN + proj + dot-product + scale + bias into single Conv2d."""
+        if self.normalize_visual:
+            raise RuntimeError(
+                'normalize_visual=True adds per-pixel L2 normalization and '
+                'cannot be fused into a single Conv2d.')
         with torch.no_grad():
             w = category_prototypes  # [K, D]
             scale = self.logit_scale.exp()
