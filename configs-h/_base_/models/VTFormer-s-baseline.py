@@ -46,7 +46,7 @@ model = dict(
         # CNN block 类型:
         # 'dwconv' | 'dwconv_act' | 'mbconv' | 'mbconv_no_se'
         # 'c2f' | 'c3k2' | 'convnext'
-        cnn_block_type='dwconv',
+        cnn_block_type='mbconv_no_se',
         # CUDA 推理后端
         topp_flash_backend=None,
         topp_flash_block_windows=64,
@@ -65,7 +65,7 @@ model = dict(
         fusion_type='conv1x1_bn_gelu_dwconv',
         # 跨层融合消融:
         # 'none' | 'gate' | 'concat' | 'gate_concat' | 'cross_gate' | 'cross_concat'
-        cross_stage_fusion_mode='gate',
+        cross_stage_fusion_mode='cross_concat',
         # 注意力图保存开关
         attn_vis_config=dict(
             enabled=False,              # True 开启保存
