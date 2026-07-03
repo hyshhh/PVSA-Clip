@@ -85,7 +85,12 @@ class BiFormer_fusion(VTFormer):
             _load_cuda_extension()
 
     def forward(self, x: torch.Tensor, category_prototypes=None):
-        return self.forward_features(x, category_prototypes=category_prototypes)
+        feats, prototypes = self.forward_features(x, category_prototypes=category_prototypes)
+        # 纯视觉路径（EncoderDecoder，未传 category_prototypes）只期望特征 tuple；
+        # CLIP 路径（CLIPEncoderDecoder）显式传 prototypes，需连同原型一并返回。
+        if category_prototypes is None:
+            return feats
+        return feats, prototypes
 
     def train(self, mode=True):
         super(VTFormer, self).train(mode)
