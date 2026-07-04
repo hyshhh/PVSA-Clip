@@ -34,9 +34,11 @@ class CLIPEncoderDecoder(EncoderDecoder):
     """
 
     def __init__(self, text_encoder: dict, text_refiner: dict = None,
-                 image_query_proj: dict = None, **kwargs):
+                 image_query_proj: dict = None,
+                 use_backbone_text_injection: bool = True, **kwargs):
         super().__init__(**kwargs)
         self.text_encoder_cfg = text_encoder
+        self.use_backbone_text_injection = use_backbone_text_injection
 
         embed_dim = text_encoder.get('embed_dim', 512)
         num_categories = text_encoder.get('num_categories', 3)
@@ -135,6 +137,8 @@ class CLIPEncoderDecoder(EncoderDecoder):
         present) receives gradients; during fused inference the cached
         _frozen_backbone_text buffer is returned instead.
         """
+        if not self.use_backbone_text_injection:
+            return None
         if self._backbone_text_frozen:
             return self.frozen_backbone_text
         raw = self.text_encoder.prompt_bank_tensor().reshape(-1, self.text_encoder.embed_dim)
@@ -183,7 +187,7 @@ class CLIPEncoderDecoder(EncoderDecoder):
                 conditioned pooling when image_query_proj is present);
                 [C, D] for the frozen-deployment branch.
         """
-        backbone_text = self.get_backbone_text()                  # [N, D] 固定
+        backbone_text = self.get_backbone_text()                  # [N, D] 固定或 None
 
         # backbone 仅注入固定 backbone_text（与每图原型解耦）；feats 同一来源只取一次
         backbone_out = self.backbone(inputs, category_prototypes=backbone_text)
@@ -313,17 +317,18 @@ class CLIPEncoderDecoder(EncoderDecoder):
         """
         # 1. Freeze backbone text：把重构后的固定 30 条缓存进 buffer，
         #    extract_feat.get_backbone_text() 之后再返回这份缓存。
-        with torch.no_grad():
-            if self.text_refiner is not None:
-                self.text_refiner.eval()
-            refined = self.get_backbone_text()              # [N, D] 实时算一次
-            self.frozen_backbone_text.copy_(refined)
-            self._backbone_text_frozen = True
+        if self.use_backbone_text_injection:
+            with torch.no_grad():
+                if self.text_refiner is not None:
+                    self.text_refiner.eval()
+                refined = self.get_backbone_text()              # [N, D] 实时算一次
+                self.frozen_backbone_text.copy_(refined)
+                self._backbone_text_frozen = True
 
-        # 2. Freeze backbone TTRM and TextCrossAttention（注入源用 frozen_backbone_text）
-        for name, module in self.backbone.named_modules():
-            if hasattr(module, 'freeze_for_deployment'):
-                module.freeze_for_deployment(self.frozen_backbone_text)
+            # 2. Freeze backbone TTRM and TextCrossAttention（注入源用 frozen_backbone_text）
+            for name, module in self.backbone.named_modules():
+                if hasattr(module, 'freeze_for_deployment'):
+                    module.freeze_for_deployment(self.frozen_backbone_text)
 
         # 3. Head 段融合：仅当显式请求 fuse_head（旧固定原型场景）
         if fuse_head:

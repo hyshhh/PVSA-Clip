@@ -1,6 +1,7 @@
 # model settings - CLIP-enhanced PVSA-Net for water segmentation
 norm_cfg = dict(type='SyncBN', requires_grad=True)
 use_clip_decode_head = True
+use_backbone_text_injection = True
 
 clip_decode_head = dict(
     type='CLIPSegHead',
@@ -32,6 +33,7 @@ seg_decode_head = dict(
 model = dict(
     type='CLIPEncoderDecoder',
     pretrained=None,
+    use_backbone_text_injection=use_backbone_text_injection,
     backbone=dict(
         type='BiFormer_fusion',
         embed_dim=[64, 128, 256, 512],
@@ -57,10 +59,10 @@ model = dict(
         remove_cnn_branch=True,
         # TTRM: routing-level text injection (Stage 0-2 only;
         # Stage 3 uses plain self-attention and has no TTRM)
-        use_ttrm=True,
-        ttrm_stages=[0, 1, 2],
+        use_ttrm=use_backbone_text_injection,
+        ttrm_stages=[0, 1, 2] if use_backbone_text_injection else [],
         # Cross-attention: feature-level text injection (deep stages only)
-        cross_attn_stages=[2, 3],
+        cross_attn_stages=[2, 3] if use_backbone_text_injection else [],
         # CUDA inference backend
         topp_flash_backend=None,
         use_route_mask=True,
@@ -78,7 +80,9 @@ model = dict(
         use_reprta=True,                  # 是否启用 RepRTA 文本原型精炼
         reprta_ffn_type='swiglu',         # 'swiglu'(门控) | 'gelu'(普通 FFN)
         reprta_zero_init=True),           # w3 是否零初始化（保护 CLIP 原型）
-    text_refiner=dict(in_dim=512, hidden_mult=4),
+    text_refiner=(
+        dict(in_dim=512, hidden_mult=4)
+        if use_backbone_text_injection else None),
     image_query_proj=dict(stage_channels=[64, 128, 256, 512], hidden_dim=512),
     train_cfg=dict(),
     test_cfg=dict(mode='whole')
