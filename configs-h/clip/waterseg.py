@@ -8,11 +8,14 @@ _base_ = [
 import os as _os
 
 attention_type = 'topp'
+_config_dir = (
+    _os.path.dirname(__file__)
+    if '__file__' in globals() else '{{ fileDirname }}')
 _model_base = _os.path.join(
-    _os.path.dirname(__file__), '../_base_/models/clip-topp.py')
+    _config_dir, '../_base_/models/clip-topp.py')
 with open(_model_base, 'r', encoding='utf-8') as _f:
     exec(compile(_f.read(), _model_base, 'exec'))
-del _os, _model_base, _f
+del _os, _config_dir, _model_base, _f
 
 # ToppAttention 入口：
 # CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/clip/waterseg.py --work-dir work_dirs/clip_waterseg
