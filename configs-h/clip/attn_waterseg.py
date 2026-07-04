@@ -1,15 +1,20 @@
 _base_ = [
-    '../_base_/models/clip-brg.py',
     # '../_base_/datasets/gqy.py',
     '../_base_/datasets/KAKA.py',
     '../_base_/default_runtime.py',
     '../_base_/schedules/schedule_20k.py'
 ]
 
-# 标准 BiFormer Attention 消融 - 保留完整 CLIP 文本路径（gqy 水面数据集, 3 类, 200 epochs）
-# 与 clip/waterseg.py 的唯一变量：backbone 注意力
-#   ToppAttention(top-p 投票路由)  vs  BiLevelRoutingAttention(原版双层路由) + 末层 AttentionLePE
-# 文本注入（TTRM + Cross-Attn + text_encoder + CLIPSegHead）完全保留
+import os as _os
+
+attention_type = 'brg'
+_model_base = _os.path.join(
+    _os.path.dirname(__file__), '../_base_/models/clip-topp.py')
+with open(_model_base, 'r', encoding='utf-8') as _f:
+    exec(compile(_f.read(), _model_base, 'exec'))
+del _os, _model_base, _f
+
+# 标准 BiFormer Attention 入口：
 # CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/clip/attn_waterseg.py --work-dir work_dirs/clip_biformer_attn
 
 crop_size = (256, 256)
@@ -66,7 +71,7 @@ optim_wrapper = dict(
             'head': dict(lr_mult=10.0),
             'text_encoder': dict(lr_mult=1.0),
             'ttrm': dict(lr_mult=1.0),
-            # 路由器降学习率：命中 BiLevelRoutingAttention.router(=TopkRouting)，含其内 ttrm_* 子模块
+            # BiLevelRoutingAttention 路由器降学习率
             'attn.router': dict(lr_mult=0.2, decay_mult=1.0),
         })
 )
@@ -82,10 +87,9 @@ val_evaluator = dict(
 )
 test_evaluator = val_evaluator
 
-model = dict(
+model.update(
     data_preprocessor=data_preprocessor,
-    test_cfg=dict(mode='whole')
-)
+    test_cfg=dict(mode='whole'))
 
 default_hooks = dict(
     checkpoint=dict(type='CheckpointHook', by_epoch=True, interval=10, save_best='mIoU')

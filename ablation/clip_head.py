@@ -1,3 +1,26 @@
+"""Run CLIP head ablations and summarize best mIoU.
+
+前四组固定使用 BRG + CLIP 入口 configs-h/clip/attn_waterseg.py，消融图相关
+query 的两个二值参数；第五组使用纯视觉 BRG 入口，不引入任何文本：
+    image_query_source:    backbone_pool / decode_fusion
+    image_query_head_type: joint / separate
+
+五组变体：
+    Q0  backbone_pool + joint
+    Q1  backbone_pool + separate
+    Q2  decode_fusion + joint
+    Q3  decode_fusion + separate
+    Q4  纯视觉 BiFormer，无文本、无图相关 query
+
+用法（从仓库根目录运行）：
+    CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py \
+        --work-dir-root ablation/clip_head \
+        --shape 256 256 \
+        --skip-existing
+
+只打印命令：
+    python ablation/clip_head.py --dry-run
+"""
 
 import argparse
 import csv
@@ -12,26 +35,24 @@ from mmengine.logging import MMLogger
 from tools.analysis_tools.get_flops import inference as get_flops_inference
 
 
-# 变体名列表（与 CNN_BLOCK_TYPES 同款）；具体 cfg-options 在 get_variant 内查表。
-# 三个开关含义：
-#   use_reprta      : True(默认启用) | False(训期关闭，退化为纯注意力池化原型)
-#   reprta_ffn_type : 'swiglu'(默认门控) | 'gelu'(普通 FFN，参数量与 SwiGLU 对齐)
-#   reprta_zero_init: True(默认 w3 零初始化，保护 CLIP 原型) | False(随机初始化)
-REPRTA_VARIANTS = [
-    'reprta-R0-no',        # use_reprta=False       — 无适配器，纯注意力池化原型
-    'reprta-R1-gelu',      # reprta_ffn_type=gelu   — 普通 FFN 残差适配器（对照门控贡献）
-    'reprta-R2-default',   # 无覆盖                  — 当前默认 RepRTA（SwiGLU + 零初始化，主结果）
-    'reprta-R3-no-zero',   # reprta_zero_init=False — SwiGLU 但不零初始化（对照保护 CLIP 原型）
+CLIP_BRG_CONFIG = 'configs-h/clip/attn_waterseg.py'
+VISION_BRG_CONFIG = 'configs-h/vision/attn_ablation_waterseg.py'
+
+QUERY_VARIANTS = [
+    'brg-query-Q0-backbone-joint',      # 骨干多阶段池化 + 单个联合输出头
+    'brg-query-Q1-backbone-separate',   # 骨干多阶段池化 + 每类独立输出头
+    'brg-query-Q2-decode-joint',        # 解码融合特征池化 + 单个联合输出头
+    'brg-query-Q3-decode-separate',     # 解码融合特征池化 + 每类独立输出头
+    'brg-query-Q4-no-text',             # 纯视觉 BiFormer，不引入任何文本
 ]
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description='Run CLIP RepRTA ablations and summarize best mIoU.')
-    parser.add_argument('config', help='Base config file path.')
+        description='Run CLIP head image-query ablations.')
     parser.add_argument(
         '--work-dir-root',
-        default='ablation/clip-RepRTA',
+        default='ablation/clip_head',
         help='Root directory for ablation runs.')
     parser.add_argument(
         '--python',
@@ -40,9 +61,9 @@ def parse_args():
     parser.add_argument(
         '--variants',
         nargs='+',
-        choices=REPRTA_VARIANTS,
-        default=REPRTA_VARIANTS,
-        help='Variant names to run (subset of the four R0-R3 groups).')
+        choices=QUERY_VARIANTS,
+        default=QUERY_VARIANTS,
+        help='Variant names to run.')
     parser.add_argument(
         '--extra-cfg-options',
         nargs='*',
@@ -59,8 +80,7 @@ def parse_args():
     parser.add_argument(
         '--summary-only',
         action='store_true',
-        help='Do not launch training, only refresh summary.csv from existing '
-             'work_dirs.')
+        help='Do not launch training, only refresh summary.csv.')
     parser.add_argument(
         '--shape',
         type=int,
@@ -71,46 +91,33 @@ def parse_args():
 
 
 def get_variant(variant_name):
-    """按变体名查表返回该组的 cfg-options dict。
-
-    对照矩阵：
-        R0  无 RepRTA              use_reprta=False
-        R1  GELU 普通 FFN          reprta_ffn_type=gelu
-        R2  当前默认 RepRTA        (无覆盖)
-        R3  SwiGLU 但不零初始化    reprta_zero_init=False
-    """
-    if variant_name == 'reprta-R0-no':
-        return {'model.text_encoder.use_reprta': False}
-    if variant_name == 'reprta-R1-gelu':
-        return {'model.text_encoder.reprta_ffn_type': 'gelu'}
-    if variant_name == 'reprta-R2-default':
-        return {}
-    if variant_name == 'reprta-R3-no-zero':
-        return {'model.text_encoder.reprta_zero_init': False}
+    """Return (base_config, image_query_source, image_query_head_type)."""
+    if variant_name == 'brg-query-Q0-backbone-joint':
+        return CLIP_BRG_CONFIG, 'backbone_pool', 'joint'
+    if variant_name == 'brg-query-Q1-backbone-separate':
+        return CLIP_BRG_CONFIG, 'backbone_pool', 'separate'
+    if variant_name == 'brg-query-Q2-decode-joint':
+        return CLIP_BRG_CONFIG, 'decode_fusion', 'joint'
+    if variant_name == 'brg-query-Q3-decode-separate':
+        return CLIP_BRG_CONFIG, 'decode_fusion', 'separate'
+    if variant_name == 'brg-query-Q4-no-text':
+        return VISION_BRG_CONFIG, 'none', 'none'
     raise ValueError(f'Unknown variant: {variant_name}. '
-                     f'Valid: {REPRTA_VARIANTS}')
+                     f'Valid: {QUERY_VARIANTS}')
 
 
-def build_cfg_options(opts_dict):
-    """返回 dict 与 list 两种形式：dict 给 get_flops，list 给 --cfg-options。"""
-    cfg_list = []
-    for key, value in opts_dict.items():
-        if isinstance(value, bool):
-            value = 'True' if value else 'False'
-        cfg_list.append(f'{key}={value}')
-    return opts_dict, cfg_list
-
-
-def cfg_options_to_str(opts_dict):
-    """summary.csv 用的人读字符串，如 'use_reprta=False'；空字典作 'default'。"""
-    if not opts_dict:
-        return 'default'
-    parts = []
-    for key, value in opts_dict.items():
-        if isinstance(value, bool):
-            value = 'True' if value else 'False'
-        parts.append(f'{key.split(".")[-1]}={value}')
-    return ','.join(parts)
+def build_cfg_options(image_query_source, image_query_head_type):
+    if image_query_source == 'none':
+        return {}, []
+    cfg_dict = {
+        'model.image_query_proj.source': image_query_source,
+        'model.image_query_proj.query_head_type': image_query_head_type,
+    }
+    cfg_list = [
+        f'model.image_query_proj.source={image_query_source}',
+        f'model.image_query_proj.query_head_type={image_query_head_type}',
+    ]
+    return cfg_dict, cfg_list
 
 
 def parse_best_miou(work_dir: Path):
@@ -121,7 +128,7 @@ def parse_best_miou(work_dir: Path):
     candidates.extend(sorted(work_dir.rglob('scalars.json')))
     candidates.extend(sorted(
         json_file for json_file in work_dir.rglob('*.json')
-        if json_file.name != 'summary.csv' and json_file.name != 'scalars.json'))
+        if json_file.name not in ('summary.csv', 'scalars.json')))
 
     best = None
     for json_file in candidates:
@@ -154,7 +161,7 @@ def parse_best_miou_from_json(json_file: Path):
 
 
 def compute_model_complexity(config_path: Path, cfg_options: dict, shape):
-    logger = MMLogger.get_instance(name='clip_reprta_ablation_complexity')
+    logger = MMLogger.get_instance(name='clip_head_ablation_complexity')
     args = SimpleNamespace(
         config=str(config_path),
         shape=list(shape),
@@ -166,25 +173,36 @@ def compute_model_complexity(config_path: Path, cfg_options: dict, shape):
 
 def main():
     args = parse_args()
-    config_path = Path(args.config).resolve()
+    repo_root = Path(__file__).resolve().parents[1]
     work_dir_root = Path(args.work_dir_root).resolve()
     work_dir_root.mkdir(parents=True, exist_ok=True)
 
     summary_rows = []
 
     for variant_name in args.variants:
-        cfg_options = get_variant(variant_name)
+        base_config, image_query_source, image_query_head_type = get_variant(
+            variant_name)
+        config_path = (repo_root / base_config).resolve()
+        cfg_dict, cfg_list = build_cfg_options(
+            image_query_source, image_query_head_type)
+        if cfg_list:
+            cfg_opts_str = (
+                f'image_query_source={image_query_source};'
+                f'image_query_head_type={image_query_head_type}')
+        else:
+            cfg_opts_str = 'no_text_biformer'
+
         work_dir = work_dir_root / variant_name
         best_existing = parse_best_miou(work_dir)
-        cfg_dict, cfg_list = build_cfg_options(cfg_options)
         flops, params = compute_model_complexity(
             config_path, cfg_dict, args.shape)
-
-        cfg_opts_str = cfg_options_to_str(cfg_options)
 
         if args.skip_existing and best_existing is not None:
             summary_rows.append({
                 'run_name': variant_name,
+                'base_config': base_config,
+                'image_query_source': image_query_source,
+                'image_query_head_type': image_query_head_type,
                 'cfg_options': cfg_opts_str,
                 'flops': flops,
                 'params': params,
@@ -196,6 +214,9 @@ def main():
         if args.summary_only:
             summary_rows.append({
                 'run_name': variant_name,
+                'base_config': base_config,
+                'image_query_source': image_query_source,
+                'image_query_head_type': image_query_head_type,
                 'cfg_options': cfg_opts_str,
                 'flops': flops,
                 'params': params,
@@ -212,15 +233,18 @@ def main():
             str(config_path),
             '--work-dir',
             str(work_dir),
-            '--cfg-options',
-            *cfg_list,
-            *args.extra_cfg_options,
         ]
+        all_cfg_options = [*cfg_list, *args.extra_cfg_options]
+        if all_cfg_options:
+            command.extend(['--cfg-options', *all_cfg_options])
 
         print(' '.join(command))
         if args.dry_run:
             summary_rows.append({
                 'run_name': variant_name,
+                'base_config': base_config,
+                'image_query_source': image_query_source,
+                'image_query_head_type': image_query_head_type,
                 'cfg_options': cfg_opts_str,
                 'flops': flops,
                 'params': params,
@@ -233,11 +257,13 @@ def main():
         best_miou = parse_best_miou(work_dir)
         summary_rows.append({
             'run_name': variant_name,
+            'base_config': base_config,
+            'image_query_source': image_query_source,
+            'image_query_head_type': image_query_head_type,
             'cfg_options': cfg_opts_str,
             'flops': flops,
             'params': params,
-            'best_mIoU': '' if best_miou is None
-            else f'{best_miou:.6f}',
+            'best_mIoU': '' if best_miou is None else f'{best_miou:.6f}',
             'status':
             'ok' if result.returncode == 0 else f'failed({result.returncode})',
         })
@@ -251,7 +277,8 @@ def write_summary(path: Path, rows):
         writer = csv.DictWriter(
             f,
             fieldnames=[
-                'run_name', 'cfg_options', 'flops', 'params',
+                'run_name', 'base_config', 'image_query_source',
+                'image_query_head_type', 'cfg_options', 'flops', 'params',
                 'best_mIoU', 'status'
             ])
         writer.writeheader()

@@ -150,7 +150,7 @@ class BiFormer(nn.Module):
                  mlp_ratios=[4, 4, 4, 4],
                  param_attention='qkvo', mlp_dwconv=False,
                  # 文本路径默认全关，让 BiFormer_standalone（纯视觉 baseline）行为等价于改动前；
-                 # clip 消融配置（clip-brg.py）会显式开启这些参数
+                 # clip 消融配置会显式开启这些参数
                  use_ttrm=False, ttrm_stages=[],
                  cross_attn_stages=[],
                  use_plain_attn_last_stage=False):
@@ -320,6 +320,7 @@ class BiFormer_fusion_clip(BiFormer):
             self.bn.append(nn.BatchNorm2d(self.embed_dim[i]))
             self.conv11.append(nn.Conv2d(self.embed_dim[i + 1], self.embed_dim[i], 1, 1, 0))
 
+        self.init_weights(pretrained)
         nn.SyncBatchNorm.convert_sync_batchnorm(self)
         self.sigmoid = nn.Sigmoid()
 
@@ -349,4 +350,8 @@ class BiFormer_fusion_clip(BiFormer):
         return tuple(out), category_prototypes
 
     def forward(self, x, category_prototypes=None):
-        return self.forward_features(x, category_prototypes=category_prototypes)
+        feats, prototypes = self.forward_features(
+            x, category_prototypes=category_prototypes)
+        if category_prototypes is None:
+            return feats
+        return feats, prototypes

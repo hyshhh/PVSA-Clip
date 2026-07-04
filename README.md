@@ -122,8 +122,7 @@ export PVSA_TOPP_FLASH_ARCH="8.6"
 ### 模型定义（`_base_/models/`）
 | 文件 | 说明 |
 |------|------|
-| `configs-h/_base_/models/clip-topp.py` | CLIP 增强模型（ToppAttention + 全套文本） |
-| `configs-h/_base_/models/clip-brg.py` | CLIP + 标准 BiFormer Attention 消融 |
+| `configs-h/_base_/models/clip-topp.py` | CLIP 增强统一模型配置（`attention_type` 支持 ToppAttention / 标准 BiFormer Attention） |
 | `configs-h/_base_/models/vision-topp.py` | PVSA-Net Baseline（CLIP 版 backbone 纯视觉） |
 | `configs-h/_base_/models/vision-brg.py` | 纯视觉 + 标准 BiFormer Attention 消融 |
 | `configs-h/_base_/models/vision-topp-cnn.py` | 原 Baseline 模型（含 CNN 分支） |

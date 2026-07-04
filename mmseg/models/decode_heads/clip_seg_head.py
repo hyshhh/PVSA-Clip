@@ -78,8 +78,8 @@ class CLIPSegHead(BaseDecodeHead):
             self._inference_prototypes = category_prototypes
         return self(inputs)
 
-    def forward(self, inputs, category_prototypes=None):
-        """Forward pass."""
+    def extract_fusion_feat(self, inputs):
+        """Build the fused multi-scale visual feature before text matching."""
         inputs = self._transform_inputs(inputs)
         outs = []
         for idx in range(len(inputs)):
@@ -92,8 +92,10 @@ class CLIPSegHead(BaseDecodeHead):
                     mode=self.interpolate_mode,
                     align_corners=self.align_corners))
 
-        out = self.fusion_conv(torch.cat(outs, dim=1))
+        return self.fusion_conv(torch.cat(outs, dim=1))
 
+    def classify_fusion_feat(self, out, category_prototypes=None):
+        """Classify fused visual features with optional text prototypes."""
         out = self.proj_norm(out)
         out = self.proj(out)  # [B, embed_dim, H, W] or [B, channels, H, W] if fused
 
@@ -121,6 +123,11 @@ class CLIPSegHead(BaseDecodeHead):
             seg_logits = self.cls_seg(out)
 
         return seg_logits
+
+    def forward(self, inputs, category_prototypes=None):
+        """Forward pass."""
+        out = self.extract_fusion_feat(inputs)
+        return self.classify_fusion_feat(out, category_prototypes)
 
     def fuse_for_deployment(self, category_prototypes):
         """Fuse BN + proj + dot-product + scale + bias into single Conv2d."""

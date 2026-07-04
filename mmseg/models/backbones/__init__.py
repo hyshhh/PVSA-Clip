@@ -7,9 +7,10 @@ from .biformer_fusion_baseline import BiFormer_fusion_baseline
 from .resnet import ResNet
 from .swin import SwinTransformer
 from .mit import MixVisionTransformer
-from .biformer import BiFormer_standalone
+from .biformer import BiFormer_fusion_clip, BiFormer_standalone
 
 __all__ = [
     'VTFormer', 'BiFormer_fusion', 'VTFormer_baseline', 'BiFormer_fusion_baseline',
     'ResNet', 'SwinTransformer', 'MixVisionTransformer', 'BiFormer_standalone',
+    'BiFormer_fusion_clip',
 ]

@@ -70,23 +70,61 @@ class CLIPEncoderDecoder(EncoderDecoder):
                 in_dim=text_refiner.get('in_dim', embed_dim),
                 hidden_mult=text_refiner.get('hidden_mult', 4))
 
-        # image_query_proj: 骨干多 stage 特征 -> 图相关 query [B, C, D]
-        # stage 通道由 decode_head.in_channels 决定（与 backbone embed_dim 对齐）
+        # image_query_proj: 图像特征 -> 图相关 query [B, C, D]
+        # source='backbone_pool': 池化骨干多 stage 特征（默认旧路径）
+        # source='decode_fusion': 池化 decode head 融合后的特征
         self.image_query_proj = None
+        self.image_query_heads = None
+        self.image_query_head_type = 'joint'
+        self.image_query_source = 'backbone_pool'
         if image_query_proj is not None:
-            stage_channels = image_query_proj.get(
-                'stage_channels',
-                getattr(self.decode_head, 'in_channels', None))
-            if stage_channels is None:
+            self.image_query_source = image_query_proj.get(
+                'source', 'backbone_pool')
+            if self.image_query_source not in ('backbone_pool',
+                                               'decode_fusion'):
                 raise ValueError(
-                    'image_query_proj.stage_channels not given and '
-                    'decode_head.in_channels unavailable')
-            in_dim = sum(stage_channels)
+                    'image_query_proj.source must be "backbone_pool" or '
+                    '"decode_fusion"')
+            if self.image_query_source == 'decode_fusion':
+                in_dim = image_query_proj.get(
+                    'in_dim', getattr(self.decode_head, 'channels', None))
+                if in_dim is None:
+                    raise ValueError(
+                        'image_query_proj.in_dim not given and '
+                        'decode_head.channels unavailable')
+                if not hasattr(self.decode_head, 'extract_fusion_feat'):
+                    raise ValueError(
+                        'image_query_proj.source="decode_fusion" requires '
+                        'a decode_head with extract_fusion_feat')
+            else:
+                stage_channels = image_query_proj.get(
+                    'stage_channels',
+                    getattr(self.decode_head, 'in_channels', None))
+                if stage_channels is None:
+                    raise ValueError(
+                        'image_query_proj.stage_channels not given and '
+                        'decode_head.in_channels unavailable')
+                in_dim = sum(stage_channels)
             hidden_dim = image_query_proj.get('hidden_dim', embed_dim)
-            self.image_query_proj = nn.Sequential(
-                nn.Linear(in_dim, hidden_dim),
-                nn.GELU(),
-                nn.Linear(hidden_dim, num_categories * embed_dim))
+            self.image_query_head_type = image_query_proj.get(
+                'query_head_type', 'joint')
+            if self.image_query_head_type not in ('joint', 'separate'):
+                raise ValueError(
+                    'image_query_proj.query_head_type must be "joint" or '
+                    '"separate"')
+            if self.image_query_head_type == 'joint':
+                self.image_query_proj = nn.Sequential(
+                    nn.Linear(in_dim, hidden_dim),
+                    nn.GELU(),
+                    nn.Linear(hidden_dim, num_categories * embed_dim))
+            else:
+                self.image_query_proj = nn.Sequential(
+                    nn.Linear(in_dim, hidden_dim),
+                    nn.GELU())
+                self.image_query_heads = nn.ModuleList([
+                    nn.Linear(hidden_dim, embed_dim)
+                    for _ in range(num_categories)
+                ])
 
         # Frozen prototypes for inference (loaded from .pt)
         self.register_buffer(
@@ -146,24 +184,42 @@ class CLIPEncoderDecoder(EncoderDecoder):
             raw = self.text_refiner(raw)
         return raw
 
-    def _make_image_query(self, feats):
-        """Pool multi-stage features -> per-image query [B, C, D].
+    def _use_decode_fusion_query(self):
+        """Whether image query should be made from decode-head fusion."""
+        return (self.image_query_source == 'decode_fusion'
+                and self.image_query_proj is not None
+                and not self._prototypes_frozen)
 
-        Each stage is globally pooled, concatenated, then mapped by the
-        image_query_proj MLP to [B, C*D] -> [B, C, D]. Combined with the
-        learnable attn_pool_query prior (each normalized then summed) to
-        form the fused query fed to TextEncoder.pool_with_query. If the
-        projection module is absent, falls back to broadcasting the
-        learnable prior (no image conditioning).
+    def _make_image_query(self, image_query_input):
+        """Pool visual features -> per-image query [B, C, D].
+
+        The input is either backbone multi-stage features (old path) or the
+        decode-head fused feature map. The pooled vector is mapped to
+        [B, C, D] by either a joint output layer or per-category heads, then
+        fused with the learnable attn_pool_query prior.
         """
-        B = feats[0].shape[0]
+        if isinstance(image_query_input, (list, tuple)):
+            B = image_query_input[0].shape[0]
+        else:
+            B = image_query_input.shape[0]
         D = self.text_encoder.embed_dim
         C = self.text_encoder.num_categories
         if self.image_query_proj is not None:
-            pooled = [F.adaptive_avg_pool2d(f, 1).flatten(1) for f in feats]
-            cat = torch.cat(pooled, dim=1)               # [B, sum_channels]
-            img_q = self.image_query_proj(cat)            # [B, C*D]
-            img_q = img_q.view(B, C, D)
+            if isinstance(image_query_input, (list, tuple)):
+                pooled = [
+                    F.adaptive_avg_pool2d(f, 1).flatten(1)
+                    for f in image_query_input
+                ]
+                cat = torch.cat(pooled, dim=1)           # [B, sum_channels]
+            else:
+                cat = F.adaptive_avg_pool2d(
+                    image_query_input, 1).flatten(1)     # [B, channels]
+            img_q = self.image_query_proj(cat)
+            if self.image_query_heads is not None:
+                img_q = torch.stack(
+                    [head(img_q) for head in self.image_query_heads], dim=1)
+            else:
+                img_q = img_q.view(B, C, D)               # [B, C*D] -> [B, C, D]
         else:
             # 无图像投影：退化为仅用可学先验（仍走图相关接口，但 q 与图像无关）
             img_q = self.text_encoder.attn_pool_query.squeeze(1)        # [C, D]
@@ -174,6 +230,23 @@ class CLIPEncoderDecoder(EncoderDecoder):
         # Fuse: each L2 normalized then added
         fused = F.normalize(img_q, dim=-1, p=2) + F.normalize(prior, dim=-1, p=2)
         return fused
+
+    def _make_category_prototypes(self, image_query_input):
+        """Build category prototypes from the configured query source."""
+        if self._prototypes_frozen:
+            return self.frozen_prototypes
+        fused_q = self._make_image_query(image_query_input)
+        return self.text_encoder.pool_with_query(fused_q)
+
+    def _extract_backbone_feats(self, inputs: Tensor):
+        """Extract backbone features with optional fixed text injection."""
+        backbone_text = self.get_backbone_text()                  # [N, D] 固定或 None
+
+        # backbone 仅注入固定 backbone_text（与每图原型解耦）；feats 同一来源只取一次
+        backbone_out = self.backbone(inputs, category_prototypes=backbone_text)
+        if isinstance(backbone_out, tuple) and len(backbone_out) == 2:
+            return backbone_out[0]
+        return backbone_out
 
     def extract_feat(self, inputs: Tensor):
         """Extract features from images and produce text prototypes.
@@ -187,24 +260,20 @@ class CLIPEncoderDecoder(EncoderDecoder):
                 conditioned pooling when image_query_proj is present);
                 [C, D] for the frozen-deployment branch.
         """
-        backbone_text = self.get_backbone_text()                  # [N, D] 固定或 None
-
-        # backbone 仅注入固定 backbone_text（与每图原型解耦）；feats 同一来源只取一次
-        backbone_out = self.backbone(inputs, category_prototypes=backbone_text)
-        if isinstance(backbone_out, tuple) and len(backbone_out) == 2:
-            feats = backbone_out[0]
+        feats = self._extract_backbone_feats(inputs)
+        if self._use_decode_fusion_query():
+            category_prototypes = None
         else:
-            feats = backbone_out
-
-        if self._prototypes_frozen:
-            # 部署近似分支：用冻结原型作 head 分类（不再算图相关）
-            category_prototypes = self.frozen_prototypes        # [C, D]
-        else:
-            # 图相关分支：用骨干特征算 query 并池化得 per-image 原型
-            fused_q = self._make_image_query(feats)             # [B, C, D]
-            category_prototypes = self.text_encoder.pool_with_query(fused_q)
+            category_prototypes = self._make_category_prototypes(feats)
 
         return feats, category_prototypes
+
+    def _decode_head_forward_with_decode_query(self, feats):
+        """Run CLIP head while making queries from its fused feature map."""
+        fusion_feat = self.decode_head.extract_fusion_feat(feats)
+        category_prototypes = self._make_category_prototypes(fusion_feat)
+        return self.decode_head.classify_fusion_feat(
+            fusion_feat, category_prototypes=category_prototypes)
 
     def loss(self, inputs: Tensor, data_samples: SampleList) -> dict:
         """Calculate losses from a batch of inputs and data samples.
@@ -219,8 +288,14 @@ class CLIPEncoderDecoder(EncoderDecoder):
         feats, category_prototypes = self.extract_feat(inputs)
 
         losses = dict()
-        loss_decode = self._decode_head_forward_train(
-            feats, data_samples, category_prototypes=category_prototypes)
+        if self._use_decode_fusion_query():
+            seg_logits = self._decode_head_forward_with_decode_query(feats)
+            loss_decode = self.decode_head.loss_by_feat(
+                seg_logits, data_samples)
+            loss_decode = add_prefix(loss_decode, 'decode')
+        else:
+            loss_decode = self._decode_head_forward_train(
+                feats, data_samples, category_prototypes=category_prototypes)
         losses.update(loss_decode)
 
         if self.with_auxiliary_head:
@@ -277,7 +352,9 @@ class CLIPEncoderDecoder(EncoderDecoder):
     def inference(self, feats, batch_img_metas,
                   category_prototypes=None, rescale=True):
         """Inference with augmented test time."""
-        if self._decode_head_supports_prototypes():
+        if self._use_decode_fusion_query():
+            seg_logits = self._decode_head_forward_with_decode_query(feats)
+        elif self._decode_head_supports_prototypes():
             seg_logits = self.decode_head.predict(
                 feats, batch_img_metas, self.test_cfg,
                 category_prototypes=category_prototypes)
@@ -291,6 +368,8 @@ class CLIPEncoderDecoder(EncoderDecoder):
                  data_samples: Optional[SampleList] = None) -> Tensor:
         """Network forward process."""
         feats, category_prototypes = self.extract_feat(inputs)
+        if self._use_decode_fusion_query():
+            return self._decode_head_forward_with_decode_query(feats)
         if self._decode_head_supports_prototypes():
             return self.decode_head.forward(
                 feats, category_prototypes=category_prototypes)
