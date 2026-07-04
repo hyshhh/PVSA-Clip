@@ -237,6 +237,10 @@ class CLIPEncoderDecoder(EncoderDecoder):
         losses.update(add_prefix(loss_decode, 'decode'))
         return losses
 
+    def _decode_head_supports_prototypes(self) -> bool:
+        """Whether current decode head consumes CLIP category prototypes."""
+        return hasattr(self.decode_head, 'set_category_prototypes')
+
     def predict(self, inputs: Tensor,
                 data_samples: Optional[SampleList] = None) -> SampleList:
         """Predict segmentation results.
@@ -269,9 +273,13 @@ class CLIPEncoderDecoder(EncoderDecoder):
     def inference(self, feats, batch_img_metas,
                   category_prototypes=None, rescale=True):
         """Inference with augmented test time."""
-        seg_logits = self.decode_head.predict(
-            feats, batch_img_metas, self.test_cfg,
-            category_prototypes=category_prototypes)
+        if self._decode_head_supports_prototypes():
+            seg_logits = self.decode_head.predict(
+                feats, batch_img_metas, self.test_cfg,
+                category_prototypes=category_prototypes)
+        else:
+            seg_logits = self.decode_head.predict(
+                feats, batch_img_metas, self.test_cfg)
 
         return seg_logits
 
@@ -279,8 +287,10 @@ class CLIPEncoderDecoder(EncoderDecoder):
                  data_samples: Optional[SampleList] = None) -> Tensor:
         """Network forward process."""
         feats, category_prototypes = self.extract_feat(inputs)
-        return self.decode_head.forward(
-            feats, category_prototypes=category_prototypes)
+        if self._decode_head_supports_prototypes():
+            return self.decode_head.forward(
+                feats, category_prototypes=category_prototypes)
+        return self.decode_head.forward(feats)
 
     @torch.no_grad()
     def fuse_for_deployment(self, fuse_head: bool = False):
