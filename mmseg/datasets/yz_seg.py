@@ -6,12 +6,11 @@ from .basesegdataset import BaseSegDataset
 
 @DATASETS.register_module()
 class YZSegDataset(BaseSegDataset):
-    """YZ Segmentation Dataset for water, ground and object classes."""
+    """YZ/GQY water-scene segmentation dataset."""
 
     METAINFO = dict(
-        # 三类：水、地面、物体
+        # YZ/GQY 原始标签顺序：水、地面、物体
         classes=('water', 'ground', 'object'),
-        # 为每个类别分配颜色：水-蓝色，地面-绿色，物体-红色
         palette=[[0, 0, 255],  # water - blue
                  [0, 255, 0],  # ground - green
                  [255, 0, 0]]  # object - red

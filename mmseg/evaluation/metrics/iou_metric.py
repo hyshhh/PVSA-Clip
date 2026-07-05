@@ -52,6 +52,7 @@ class IoUMetric(BaseMetric):
                  output_dir: Optional[str] = None,
                  format_only: bool = False,
                  prefix: Optional[str] = None,
+                 classwise: bool = False,
                  **kwargs) -> None:
         super().__init__(collect_device=collect_device, prefix=prefix)
 
@@ -60,6 +61,7 @@ class IoUMetric(BaseMetric):
         self.nan_to_num = nan_to_num
         self.beta = beta
         self.output_dir = output_dir
+        self.classwise = classwise
         if self.output_dir and is_main_process():
             mkdir_or_exist(self.output_dir)
         self.format_only = format_only
@@ -155,8 +157,16 @@ class IoUMetric(BaseMetric):
         for key, val in ret_metrics_class.items():
             class_table_data.add_column(key, val)
 
-        print_log('per class results:', logger)
-        print_log('\n' + class_table_data.get_string(), logger=logger)
+        if self.classwise:
+            print_log('per class results:', logger)
+            print_log('\n' + class_table_data.get_string(), logger=logger)
+            for class_idx, class_name in enumerate(class_names):
+                clean_name = str(class_name).replace(' ', '_')
+                for metric_name, metric_values in ret_metrics_class.items():
+                    if metric_name == 'Class':
+                        continue
+                    metrics[f'{metric_name}.{clean_name}'] = metric_values[
+                        class_idx]
 
         return metrics
 
