@@ -64,7 +64,7 @@ Top-P 路由：
   route_score → Top-P 剪枝 → top-k 窗口
 ```
 
-`gate` 初始为 `sigmoid(-2)≈0.12`，训练早期以视觉路由为主，逐步引入文本语义。相比在每层做重型视觉-文本交叉注意力，TTRM 只在窗口池化后的路由 token 上计算，开销较小。
+这里的 `gate` 不是由当前图像特征临时算出来的，而是 **TTRM 模块内部的一个可学习标量参数**。实现上它先以参数形式初始化为 `-2`，前向时再经过 `sigmoid` 变成 `(0,1)` 内的门控系数，因此初始值约为 `sigmoid(-2)≈0.12`。这意味着训练早期仍以视觉路由为主，文本只做弱残差修正；随着训练推进，模型会自己学到“这一层该引入多少文本语义”。相比在每层做重型视觉-文本交叉注意力，TTRM 只在窗口池化后的路由 token 上计算，开销较小。
 
 ### 1.3 TextCrossAttention：特征级文本融合
 
@@ -73,14 +73,28 @@ Top-P 路由：
 **设计动机**：TTRM 改变“哪些窗口被选中”，但不直接修改视觉特征内容。深层特征已有更强语义表达，适合直接与固定文本做特征级融合。
 
 ```
-Q = visual_features                    # [B, H*W, C]
-K = text_proj_k(backbone_text)          # [30, C]
-V = text_proj_v(backbone_text)          # [30, C]
+visual = reshape(visual_features)         # [B, H*W, C]
+Q = visual_q(visual)                      # [B, H*W, C]
+K = text_proj_k(backbone_text)            # [30, C]
+V = text_proj_v(backbone_text)            # [30, C]
 
-attn = softmax(Q @ K.T / sqrt(D))       # [B, H*W, 30]
-text_info = out_proj(attn @ V)          # [B, H*W, C]
-enhanced = LayerNorm(visual + sigmoid(gate) * text_info)
+多头拆分后：
+  attn = softmax(Q @ K.T / sqrt(head_dim))  # [B, heads, H*W, 30]
+  text_info = out_proj(attn @ V)            # [B, H*W, C]
+
+门控残差：
+  enhanced = LayerNorm(visual + sigmoid(gate) * text_info)
 ```
+
+这里的 `gate` 同样不是由 `Q/K/V` 即时回归出来的，而是 **每个 `TextCrossAttention` 模块内部单独维护的一个可学习标量参数**。实现上：
+
+```
+gate_param = nn.Parameter([-2.0])
+gate = sigmoid(gate_param)                # 初始约 0.12
+enhanced = LayerNorm(visual + gate * text_info)
+```
+
+含义是：文本分支先作为一个较弱的残差项注回视觉特征，避免训练一开始就让固定文本语义过强地覆盖视觉表征；后续该系数完全由训练自动学习。注意它是 **整个模块共享的单标量**，不是每个 token、每个通道、每个像素各算一个 gate。
 
 Stage 2 同时有 TTRM 与 TextCrossAttention：既让路由选择带文本语义，也让深层特征显式吸收文本信息。Stage 3 不再做 TTRM，只保留普通 self-attention + TextCrossAttention，用于最终全局语义整合。
 
@@ -280,75 +294,91 @@ image_query_proj + pool_with_query + RepRTA + einsum
 ### 3.2 前向流程
 
 ```
-feats
-→ SegFormer 式多尺度融合
-→ fusion_feat                         # [B,256,H/4,W/4]
+# 输入：backbone 四阶段特征
+feats = [x1, x2, x3, x4]
+# x1:[B,64,H/4,W/4], x2:[B,128,H/8,W/8],
+# x3:[B,256,H/16,W/16], x4:[B,512,H/32,W/32]
 
-base_logits = Conv(fusion_feat)        # [B,3,H/4,W/4]
-activation = softmax(base_logits)      # [B,3,H/4,W/4]
+# 1. 多尺度融合，得到解码特征
+fusion_feat = segformer_fusion(feats)              # [B,256,H/4,W/4]
 
-visual_feat = Conv(BN(fusion_feat))    # [B,512,H/4,W/4]
-visual_prompt = class_weighted_avg(
-    visual_feat, activation)           # [B,3,512]
+# 2. 普通视觉分支，提供稳定分割结果
+base_logits = Conv1x1(fusion_feat)                 # [B,3,H/4,W/4]
 
-base_proto = TextEncoder()             # [3,512]
-delta = Linear(LayerNorm(visual_prompt))
-adapted_proto = L2norm(
-    base_proto + lambda * delta)        # [B,3,512]
+# 3. 类激活图，作为每类视觉提示的空间权重
+activation = softmax(base_logits, dim=1)           # [B,3,H/4,W/4]
 
-clip_logits = BNContrastive(
-    visual_feat, adapted_proto)         # [B,3,H/4,W/4]
+# 4. 将视觉特征投影到 CLIP 文本维度
+visual_feat = Conv1x1(BN(fusion_feat))             # [B,512,H/4,W/4]
 
-logits = base_logits + gamma * clip_logits
+# 5. 按类别激活区域聚合视觉提示
+visual_prompt = weighted_avg(visual_feat, activation)
+# visual_prompt[:, c, :] 表示第 c 类在当前图像中的视觉摘要
+visual_prompt                                      # [B,3,512]
+
+# 6. 生成每类文本原型的视觉增量
+base_proto = TextEncoder()                         # [3,512]
+delta = visual_delta_proj(LN(visual_prompt))       # [B,3,512]
+
+# 7. 轻微调整文本原型，保持 CLIP 语义方向
+adapted_proto = L2norm(base_proto + lambda * delta)
+adapted_proto                                      # [B,3,512]
+
+# 8. BN 对比分类，得到文本分支分割分数
+clip_logits = BNContrastive(visual_feat, adapted_proto)
+clip_logits                                        # [B,3,H/4,W/4]
+
+# 9. 融合视觉分支和文本分支，作为最终输出
+logits = base_logits + gamma * clip_logits         # [B,3,H/4,W/4]
 ```
 
 其中 `gamma` 为可学习标量，初始值为 `0.1`；`lambda` 也是可学习标量，初始值为 `0.1`。视觉增量投影的最后一层零初始化，因此训练初期 `adapted_proto` 基本等价于原始文本原型，避免一开始破坏 CLIP 语义。
 
-### 3.3 文本增量接口
-
-`TextEncoder` 新增 `adapt_with_visual_prompt(visual_prompt, delta_scale)`：
+这里的视觉提示和文本原型不是通过语义自动匹配，而是按类别下标硬绑定：
 
 ```
-base_proto = TextEncoder.forward()                  # [3,512]
-delta = visual_delta_proj(visual_delta_norm(prompt))
-adapted_proto = L2norm(base_proto + delta_scale * delta)
+visual_prompt[:, 0, :]  <->  base_proto[0]
+visual_prompt[:, 1, :]  <->  base_proto[1]
+visual_prompt[:, 2, :]  <->  base_proto[2]
 ```
 
-该接口只在 `CLIPSegHeadV2` 中启用。旧版 `CLIPSegHead` 和 `v1` 消融不会创建这部分参数，避免参数统计被未使用模块污染。
+因此 prompt bank 的类别顺序必须和训练标签通道顺序一致。`prompt_bank_water.pt` 原始保存顺序为 `water / ship / land`，配置中通过 `prompt_category_order` 在加载时重排文本原型。三套数据集的对应关系为：
+
+```
+KAKA: background / boat / free-space -> ['land',  'ship',  'water']
+gqy : water      / ground / object   -> ['water', 'land',  'ship']
+GBA : object     / water  / ground   -> ['ship',  'water', 'land']
+```
 
 ### 3.4 损失设计
 
-训练时同时约束三路输出：
+`CLIPSegHeadV2` 训练时不是只监督最终输出，而是同时监督 `base_logits`、`clip_logits` 和二者融合后的 `logits`。这样做的核心原因是：如果只监督融合结果，模型很容易把 `gamma` 学小，继续退化成普通视觉头；如果只监督 CLIP 分支，又可能牺牲 `KAKA` 同域稳定性。因此这里让普通视觉分支负责兜底，让文本分支必须具备独立分类能力，最后再由融合输出学习二者如何互补。
 
-- 主损失：最终融合 `logits` 的交叉熵，权重 `1.0`。
-- 辅助损失：`base_logits` 交叉熵，权重 `0.4`，保证同域精度稳定。
-- 辅助损失：`clip_logits` 交叉熵，权重 `0.4`，强迫文本分支参与。
-- 文本漂移约束：`1 - cos(adapted_proto, base_proto)`，权重 `0.02`，防止视觉提示把文本原型完全改成普通分类器。
-
-### 3.5 配置与消融
-
-模型配置新增：
+最终训练目标为：
 
 ```
-clip_head_type = 'v1' | 'v2'
-visual_prompt_mode = 'class_activation'
-clip_logit_weight_init = 0.1
-text_delta_scale_init = 0.1
+loss =
+  CE(logits, label)
+  + 0.4 * CE(base_logits, label)
+  + 0.4 * CE(clip_logits, label)
+  + 0.02 * mean(1 - cos(adapted_proto, base_proto))
 ```
 
-默认主实验使用 `clip_head_type='v2'`。`v1` 仍保留旧的 `decode_fusion + separate` 路线，用于对照。
+第一项 `CE(logits, label)` 是主损失，对应日志里的 `decode.loss_ce`。这里的 `logits = base_logits + gamma * clip_logits` 是最终用于验证和推理的输出，因此主损失直接优化最终分割结果。它决定 `base` 分支和 `clip` 分支融合后的真实表现。
 
-`ablation/clip_head.py` 的核心三组为：
+第二项 `CE(base_logits, label)` 是普通视觉分支辅助损失，对应日志里的 `decode.loss_base_ce`，权重为 `0.4`。`base_logits` 来自 `Conv(fusion_feat)`，结构上接近纯视觉 `SegFormerHead`。这一路的作用是保证模型即使在文本分支训练不充分、视觉提示还不稳定的早期，也能维持可靠的同域分割能力。同时，`base_logits` 还会生成 `softmax` 类激活图，用来聚合每类 `visual_prompt`；如果 base 分支本身学得很差，后续视觉提示的位置也会不准。
 
-- `brg-query-Q4-no-text`：纯视觉基线。
-- `clip-v1-best`：旧版 `decode_fusion + separate`。
-- `clip-v2-actprompt`：新版类激活视觉提示文本原型。
+第三项 `CE(clip_logits, label)` 是文本对比分支辅助损失，对应日志里的 `decode.loss_clip_ce`，权重同样为 `0.4`。这项损失要求 `adapted_proto` 与 BN 标定后的视觉特征点积后，单独也能完成像素分类。没有这项约束时，文本分支可能只作为很弱的残差被主分支掩盖，训练结束后看似引入了 CLIP head，但实际预测几乎仍由 `base_logits` 决定。
 
-泛化测试继续输出简表：
+第四项是文本漂移约束，对应日志里的 `decode.loss_text_drift`。它计算 `adapted_proto` 和原始 `base_proto` 的余弦距离：
 
 ```
-dataset,mIoU,IoU_background,IoU_boat,IoU_free_space,mACC,ablation,status
+drift = mean(1 - cos(adapted_proto, base_proto))
 ```
+
+这项损失的权重很小，只设为 `0.02`。它不是为了阻止视觉提示调整文本原型，而是给调整幅度加一个软约束：允许每类原型根据当前图像做轻微偏移，但不希望它完全脱离 CLIP 文本语义，退化成普通可学习分类权重。由于视觉增量投影最后一层零初始化，训练早期 `loss_text_drift` 通常接近 `0`，这是正常现象；随着视觉增量开始学习，它会缓慢变大，但不应该成为主导损失。
+
+因此训练日志里看到多项损失是预期行为。总损失就是这几项加权后的和，例如 `decode.loss_base_ce` 和 `decode.loss_clip_ce` 已经是乘过 `0.4` 的值，`decode.loss_text_drift` 也已经乘过 `0.02`。
 
 **训练前准备**
 

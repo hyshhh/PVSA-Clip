@@ -23,6 +23,22 @@ image_query_source = 'decode_fusion'
 # 'separate' = 共享前层 + 每类独立线性输出头
 image_query_head_type = 'separate'
 
+# prompt bank 原始顺序为 water / ship / land。
+# 这里记录“训练标签通道顺序 -> prompt 语义顺序”的映射：
+#   KAKA: background / boat / free-space -> land / ship / water
+#   gqy : water / ground / object       -> water / land / ship
+#   GBA : object / water / ground       -> ship / water / land
+prompt_category_orders = dict(
+    kaka=['land', 'ship', 'water'],
+    gqy=['water', 'land', 'ship'],
+    gba=['ship', 'water', 'land'])
+prompt_dataset = globals().get('prompt_dataset', 'kaka')
+if prompt_dataset not in prompt_category_orders:
+    raise ValueError(
+        f'prompt_dataset must be one of {tuple(prompt_category_orders)}')
+prompt_category_order = globals().get(
+    'prompt_category_order', prompt_category_orders[prompt_dataset])
+
 clip_decode_head_v1 = dict(
     type='CLIPSegHead',
     in_channels=[64, 128, 256, 512],
@@ -129,6 +145,7 @@ model = dict(
         num_categories=3,
         prompts_per_category=10,
         prompt_bank_path='tools/prompt_bank_water.pt',
+        prompt_category_order=prompt_category_order,
         use_reprta=True,                  # 是否启用 RepRTA 文本原型精炼
         reprta_ffn_type='swiglu',         # 'swiglu'(门控) | 'gelu'(普通 FFN)
         reprta_zero_init=True),           # w3 是否零初始化（保护 CLIP 原型）

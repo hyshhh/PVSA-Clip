@@ -60,7 +60,10 @@ class CLIPEncoderDecoder(EncoderDecoder):
         prompt_bank_path = text_encoder.get('prompt_bank_path', None)
         if prompt_bank_path:
             if os.path.exists(prompt_bank_path):
-                self.text_encoder.load_prompt_bank(prompt_bank_path)
+                self.text_encoder.load_prompt_bank(
+                    prompt_bank_path,
+                    category_order=text_encoder.get(
+                        'prompt_category_order', None))
             else:
                 raise FileNotFoundError(
                     f'Prompt bank not found: {prompt_bank_path}. '

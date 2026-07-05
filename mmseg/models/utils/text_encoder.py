@@ -82,7 +82,7 @@ class TextEncoder(nn.Module):
         refined = self.reprta_w3(hidden)           # [...,D]
         return pooled + refined
 
-    def load_prompt_bank(self, path):
+    def load_prompt_bank(self, path, category_order=None):
         """Load prompt embeddings from .pt file.
 
         Automatically adapts attn_pool_query to match the loaded
@@ -92,8 +92,23 @@ class TextEncoder(nn.Module):
         data = torch.load(path, map_location='cpu')
         if isinstance(data, dict):
             embeddings = data['embeddings']
+            categories = data.get('categories', None)
         else:
             embeddings = data
+            categories = None
+
+        if category_order is not None:
+            if categories is None:
+                raise ValueError(
+                    'prompt_category_order requires prompt bank metadata '
+                    '"categories", but this prompt bank only stores a tensor.')
+            missing = [cat for cat in category_order if cat not in categories]
+            if missing:
+                raise ValueError(
+                    f'prompt_category_order contains categories not found in '
+                    f'prompt bank: {missing}. Available: {categories}')
+            order = [categories.index(cat) for cat in category_order]
+            embeddings = embeddings[order]
 
         C, K, D = embeddings.shape
         # Auto-resize query if category count differs

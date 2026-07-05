@@ -1,36 +1,3 @@
-"""Run CLIP head ablations and summarize best mIoU.
-
-固定使用 BRG 入口，对比纯视觉、旧版 CLIP head 和新版类激活提示 CLIP head。
-旧版消融仍可通过 --variants 显式指定，消融图相关 query 的两个二值参数：
-    image_query_source:    backbone_pool / decode_fusion
-    image_query_head_type: joint / separate
-
-旧版五组变体：
-    Q0  backbone_pool + joint
-    Q1  backbone_pool + separate
-    Q2  decode_fusion + joint
-    Q3  decode_fusion + separate
-    Q4  纯视觉 BiFormer，无文本、无图相关 query
-
-默认核心三组：
-    Q4-no-text        纯视觉基线
-    clip-v1-best      旧版 decode_fusion + separate
-    clip-v2-actprompt 新版类激活视觉提示文本原型
-
-用法（从仓库根目录运行）：
-    CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py \
-        --work-dir-root ablation/clip_head \
-        --shape 256 256 \
-        --skip-existing
-
-泛化测试（单独命令启动，不训练）：
-    CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py \
-        --generalization-test \
-        --work-dir-root ablation/clip_head
-
-只打印命令：
-    python ablation/clip_head.py --dry-run
-"""
 
 import argparse
 import csv
@@ -43,9 +10,38 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-
+# 训练 KAKA：background / boat / free-space -> land / ship / water
+# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt --train-dataset kaka
+# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants brg-query-Q4-no-text clip-v1-best clip-v2-actprompt --train-dataset kaka
+#
+# 训练 gqy：water / ground / object -> water / land / ship
+# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt --train-dataset gqy
+# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants brg-query-Q4-no-text clip-v1-best clip-v2-actprompt --train-dataset gqy
+#
+# 训练 GBA：object / water / ground -> ship / water / land
+# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt --train-dataset gba
+# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants brg-query-Q4-no-text clip-v1-best clip-v2-actprompt --train-dataset gba
 CLIP_BRG_CONFIG = 'configs-h/clip/attn_waterseg.py'
 VISION_BRG_CONFIG = 'configs-h/vision/attn_ablation_waterseg.py'
+
+PROMPT_CATEGORY_ORDERS = dict(
+    # KAKA: background / boat / free-space -> land / ship / water
+    kaka=['land', 'ship', 'water'],
+    # gqy: water / ground / object -> water / land / ship
+    gqy=['water', 'land', 'ship'],
+    # GBA: object / water / ground -> ship / water / land
+    gba=['ship', 'water', 'land'])
+
+TRAIN_DATASETS = dict(
+    kaka=dict(
+        dataset_candidates=[
+            'configs-h/_base_/datasets/KAKA.py',
+            'configs-h/_base_/datasets/kaka.py',
+        ]),
+    gqy=dict(
+        dataset_candidates=['configs-h/_base_/datasets/gqy.py']),
+    gba=dict(
+        dataset_candidates=['configs-h/_base_/datasets/GBA.py']))
 
 GENERALIZATION_TARGETS = [
     dict(
@@ -134,6 +130,17 @@ def parse_args():
         default=[],
         help='Additional cfg-options passed through to tools/train.py.')
     parser.add_argument(
+        '--train-dataset',
+        choices=sorted(TRAIN_DATASETS),
+        default='kaka',
+        help='Dataset config used for training.')
+    parser.add_argument(
+        '--prompt-dataset',
+        choices=sorted(PROMPT_CATEGORY_ORDERS),
+        default=None,
+        help='Label order used to align prompt prototypes. Defaults to '
+        '--train-dataset.')
+    parser.add_argument(
         '--skip-existing',
         action='store_true',
         help='Skip runs that already have a best mIoU result.')
@@ -187,6 +194,10 @@ def get_variant_display_name(variant_name):
     return variant_name.replace('brg-query-', '')
 
 
+def get_work_dir(work_dir_root: Path, variant_name: str, train_dataset: str):
+    return work_dir_root / f'{variant_name}__{train_dataset}'
+
+
 def decode_head_type_for_variant(variant_name):
     if variant_name == 'clip-v2-actprompt':
         return 'CLIPSegHeadV2'
@@ -196,13 +207,17 @@ def decode_head_type_for_variant(variant_name):
 
 
 def build_cfg_options(image_query_source, image_query_head_type,
-                      variant_name=None):
+                      variant_name=None, prompt_dataset='kaka'):
     decode_head_type = decode_head_type_for_variant(variant_name)
     cfg_dict = {}
     cfg_list = []
     if decode_head_type is not None:
         cfg_dict['model.decode_head.type'] = decode_head_type
         cfg_list.append(f'model.decode_head.type={decode_head_type}')
+        prompt_order = PROMPT_CATEGORY_ORDERS[prompt_dataset]
+        cfg_dict['model.text_encoder.prompt_category_order'] = prompt_order
+        cfg_list.append(
+            f'model.text_encoder.prompt_category_order={prompt_order!r}')
 
     if image_query_source in ('none', 'class_activation'):
         return cfg_dict, cfg_list
@@ -259,11 +274,66 @@ def relpath_for_config(path: Path, start: Path):
         return Path(path).resolve().as_posix()
 
 
+def make_train_config(repo_root: Path, work_dir_root: Path,
+                      base_config: str, train_dataset: str):
+    """Return a config path whose dataset matches --train-dataset."""
+    base_path = (repo_root / base_config).resolve()
+    if train_dataset == 'kaka':
+        return base_path
+
+    dataset_config, dataset_path = resolve_dataset_config(
+        repo_root, TRAIN_DATASETS[train_dataset]['dataset_candidates'])
+    if dataset_path is None:
+        candidates = TRAIN_DATASETS[train_dataset]['dataset_candidates']
+        raise FileNotFoundError(
+            f'Missing dataset config for {train_dataset}: {candidates}')
+
+    train_config_root = work_dir_root / '_train_configs'
+    train_config_root.mkdir(parents=True, exist_ok=True)
+    train_config_path = train_config_root / (
+        f'{Path(base_config).stem}__{train_dataset}.py')
+    base_rel = relpath_for_config(base_path, train_config_path.parent)
+    dataset_abs = dataset_path.as_posix()
+
+    text = f'''# Auto-generated by ablation/clip_head.py.
+_base_ = [
+    '{base_rel}',
+]
+
+_dataset_config = '{dataset_abs}'
+with open(_dataset_config, 'r', encoding='utf-8') as _f:
+    exec(compile(_f.read(), _dataset_config, 'exec'))
+del _dataset_config, _f
+
+data_preprocessor = dict(
+    type='SegDataPreProcessor',
+    mean=[123.675, 116.28, 103.53],
+    std=[58.395, 57.12, 57.375],
+    bgr_to_rgb=True,
+    pad_val=0,
+    seg_pad_val=255,
+    size=crop_size)
+
+val_evaluator = dict(
+    type='IoUMetric',
+    iou_metrics=['mIoU', 'mDice'],
+    ignore_index=255,
+    classwise=True)
+test_evaluator = val_evaluator
+
+model.update(
+    data_preprocessor=data_preprocessor,
+    test_cfg=dict(mode='whole'))
+'''
+    train_config_path.write_text(text, encoding='utf-8')
+    return train_config_path
+
+
 def write_eval_config(eval_config_path: Path, repo_root: Path,
                       base_config: str, dataset_config: str,
                       image_query_source: str, image_query_head_type: str,
                       split: str, target_metainfo: dict,
-                      variant_name: str):
+                      variant_name: str, prompt_dataset: str):
     base_rel = relpath_for_config(repo_root / base_config,
                                   eval_config_path.parent)
     dataset_path = (repo_root / dataset_config).resolve().as_posix()
@@ -275,9 +345,12 @@ def write_eval_config(eval_config_path: Path, repo_root: Path,
     ]
     decode_head_type = decode_head_type_for_variant(variant_name)
     if decode_head_type is not None:
+        prompt_order = PROMPT_CATEGORY_ORDERS[prompt_dataset]
         model_lines.extend([
             '    decode_head=dict(',
             f'        type="{decode_head_type}"),',
+            '    text_encoder=dict(',
+            f'        prompt_category_order={prompt_order!r}),',
         ])
     if image_query_source not in ('none', 'class_activation'):
         model_lines.extend([
@@ -461,13 +534,16 @@ def run_generalization_tests(args):
     for variant_name in args.variants:
         base_config, image_query_source, image_query_head_type = get_variant(
             variant_name)
-        checkpoint = find_checkpoint(work_dir_root / variant_name)
+        checkpoint = find_checkpoint(
+            get_work_dir(work_dir_root, variant_name, args.train_dataset))
 
         for target in GENERALIZATION_TARGETS:
             dataset_config, dataset_path = resolve_dataset_config(
                 repo_root, target['dataset_candidates'])
             ablation_name = get_variant_display_name(variant_name)
-            run_name = f'{target["display_name"]}__{ablation_name}'
+            run_name = (
+                f'{target["display_name"]}__{ablation_name}'
+                f'__trained-{args.train_dataset}')
             eval_work_dir = eval_work_root / run_name
 
             row = {
@@ -494,7 +570,7 @@ def run_generalization_tests(args):
             write_eval_config(
                 eval_config, repo_root, base_config, dataset_config,
                 image_query_source, image_query_head_type, target['split'],
-                target['metainfo'], variant_name)
+                target['metainfo'], variant_name, args.prompt_dataset)
 
             command = [
                 args.python,
@@ -570,6 +646,8 @@ def write_generalization_summary(path: Path, rows):
 
 def main():
     args = parse_args()
+    if args.prompt_dataset is None:
+        args.prompt_dataset = args.train_dataset
     if args.generalization_test:
         run_generalization_tests(args)
         return
@@ -583,17 +661,24 @@ def main():
     for variant_name in args.variants:
         base_config, image_query_source, image_query_head_type = get_variant(
             variant_name)
-        config_path = (repo_root / base_config).resolve()
+        config_path = make_train_config(
+            repo_root, work_dir_root, base_config, args.train_dataset)
         cfg_dict, cfg_list = build_cfg_options(
-            image_query_source, image_query_head_type, variant_name)
+            image_query_source, image_query_head_type, variant_name,
+            args.prompt_dataset)
         if cfg_list:
+            prompt_order = PROMPT_CATEGORY_ORDERS[args.prompt_dataset]
             cfg_opts_str = (
+                f'train_dataset={args.train_dataset};'
                 f'image_query_source={image_query_source};'
-                f'image_query_head_type={image_query_head_type}')
+                f'image_query_head_type={image_query_head_type};'
+                f'prompt_dataset={args.prompt_dataset};'
+                f'prompt_category_order={prompt_order}')
         else:
-            cfg_opts_str = 'no_text_biformer'
+            cfg_opts_str = f'train_dataset={args.train_dataset};no_text_biformer'
 
-        work_dir = work_dir_root / variant_name
+        work_dir = get_work_dir(
+            work_dir_root, variant_name, args.train_dataset)
         best_existing = parse_best_miou(work_dir)
         try:
             flops, params = compute_model_complexity(
@@ -605,8 +690,8 @@ def main():
 
         if args.skip_existing and best_existing is not None:
             summary_rows.append({
-                'run_name': variant_name,
-                'base_config': base_config,
+                'run_name': work_dir.name,
+                'base_config': relpath_for_config(config_path, repo_root),
                 'image_query_source': image_query_source,
                 'image_query_head_type': image_query_head_type,
                 'cfg_options': cfg_opts_str,
@@ -619,8 +704,8 @@ def main():
 
         if args.summary_only:
             summary_rows.append({
-                'run_name': variant_name,
-                'base_config': base_config,
+                'run_name': work_dir.name,
+                'base_config': relpath_for_config(config_path, repo_root),
                 'image_query_source': image_query_source,
                 'image_query_head_type': image_query_head_type,
                 'cfg_options': cfg_opts_str,
@@ -647,8 +732,8 @@ def main():
         print(' '.join(command))
         if args.dry_run:
             summary_rows.append({
-                'run_name': variant_name,
-                'base_config': base_config,
+                'run_name': work_dir.name,
+                'base_config': relpath_for_config(config_path, repo_root),
                 'image_query_source': image_query_source,
                 'image_query_head_type': image_query_head_type,
                 'cfg_options': cfg_opts_str,
@@ -662,8 +747,8 @@ def main():
         result = subprocess.run(command, check=False)
         best_miou = parse_best_miou(work_dir)
         summary_rows.append({
-            'run_name': variant_name,
-            'base_config': base_config,
+            'run_name': work_dir.name,
+            'base_config': relpath_for_config(config_path, repo_root),
             'image_query_source': image_query_source,
             'image_query_head_type': image_query_head_type,
             'cfg_options': cfg_opts_str,
