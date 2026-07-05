@@ -29,7 +29,6 @@ query 的两个二值参数；第五组使用纯视觉 BRG 入口，不引入任
 
 import argparse
 import csv
-import itertools
 import json
 import os
 import re
@@ -43,15 +42,6 @@ from types import SimpleNamespace
 CLIP_BRG_CONFIG = 'configs-h/clip/attn_waterseg.py'
 VISION_BRG_CONFIG = 'configs-h/vision/attn_ablation_waterseg.py'
 
-CLASS_PALETTE = {
-    'background': [0, 0, 0],
-    'boat': [128, 0, 128],
-    'free-space': [0, 0, 255],
-    'water': [0, 0, 255],
-    'ground': [0, 255, 0],
-    'object': [255, 0, 0],
-}
-
 GENERALIZATION_TARGETS = [
     dict(
         name='gqy_val',
@@ -59,16 +49,15 @@ GENERALIZATION_TARGETS = [
         dataset_candidates=['configs-h/_base_/datasets/gqy.py'],
         split='val',
         # KAKA 训练输出顺序为：背景/船/可航行水域。
-        # gqy 原始类为 water/ground/object，这里重排成对应语义：
-        # ground -> background，object -> boat，water -> free-space。
+        # gqy 原始类为 water/ground/object；类别顺序搜索显示最优对应为：
+        # water -> background，object -> boat，ground -> free-space。
         metainfo=dict(
-            classes=('ground', 'object', 'water'),
-            palette=[[0, 255, 0], [255, 0, 0], [0, 0, 255]]),
+            classes=('water', 'object', 'ground'),
+            palette=[[0, 0, 255], [255, 0, 0], [0, 255, 0]]),
         iou_map=dict(
-            background='ground',
+            background='water',
             boat='object',
-            free_space='water'),
-        sweep_classes=('water', 'ground', 'object')),
+            free_space='ground')),
     dict(
         name='kaka_test',
         display_name='kaka',
@@ -97,8 +86,7 @@ GENERALIZATION_TARGETS = [
         iou_map=dict(
             background='ground',
             boat='object',
-            free_space='water'),
-        sweep_classes=('object', 'water', 'ground')),
+            free_space='water')),
 ]
 
 QUERY_VARIANTS = [
@@ -149,10 +137,6 @@ def parse_args():
         action='store_true',
         help='Test trained variants on gqy val, kaka test, and GBA val.')
     parser.add_argument(
-        '--label-order-sweep',
-        action='store_true',
-        help='Try all 3-class label orders for generalization debugging.')
-    parser.add_argument(
         '--extra-test-args',
         nargs='*',
         default=[],
@@ -184,35 +168,6 @@ def get_variant(variant_name):
 
 def get_variant_display_name(variant_name):
     return variant_name.replace('brg-query-', '')
-
-
-def metainfo_for_order(classes):
-    return dict(
-        classes=tuple(classes),
-        palette=[CLASS_PALETTE[class_name] for class_name in classes])
-
-
-def build_generalization_targets(label_order_sweep):
-    if not label_order_sweep:
-        return GENERALIZATION_TARGETS
-
-    targets = []
-    for target in GENERALIZATION_TARGETS:
-        sweep_classes = target.get('sweep_classes')
-        if sweep_classes is None:
-            targets.append(dict(target, label_order='default'))
-            continue
-        for order in itertools.permutations(sweep_classes):
-            targets.append(dict(
-                target,
-                name=f'{target["name"]}__{"-".join(order)}',
-                metainfo=metainfo_for_order(order),
-                iou_map=dict(
-                    background=order[0],
-                    boat=order[1],
-                    free_space=order[2]),
-                label_order='-'.join(order)))
-    return targets
 
 
 def build_cfg_options(image_query_source, image_query_head_type):
@@ -460,7 +415,6 @@ def run_generalization_tests(args):
     eval_config_root = work_dir_root / '_generalization_configs'
     eval_work_root = work_dir_root / 'generalization'
     eval_work_root.mkdir(parents=True, exist_ok=True)
-    targets = build_generalization_targets(args.label_order_sweep)
 
     summary_rows = []
 
@@ -469,16 +423,11 @@ def run_generalization_tests(args):
             variant_name)
         checkpoint = find_checkpoint(work_dir_root / variant_name)
 
-        for target in targets:
+        for target in GENERALIZATION_TARGETS:
             dataset_config, dataset_path = resolve_dataset_config(
                 repo_root, target['dataset_candidates'])
             ablation_name = get_variant_display_name(variant_name)
-            if args.label_order_sweep and 'label_order' in target:
-                run_name = (
-                    f'{target["display_name"]}__{target["label_order"]}'
-                    f'__{ablation_name}')
-            else:
-                run_name = f'{target["display_name"]}__{ablation_name}'
+            run_name = f'{target["display_name"]}__{ablation_name}'
             eval_work_dir = eval_work_root / run_name
 
             row = {
@@ -491,8 +440,6 @@ def run_generalization_tests(args):
                 'ablation': ablation_name,
                 'status': '',
             }
-            if args.label_order_sweep:
-                row['label_order'] = target.get('label_order', 'default')
 
             if dataset_path is None:
                 row['status'] = 'missing_dataset_config'
@@ -541,12 +488,10 @@ def run_generalization_tests(args):
                 else f'failed({result.returncode})')
             summary_rows.append(row)
             write_generalization_summary(
-                generalization_summary_path(work_dir_root, args),
-                summary_rows, args.label_order_sweep)
+                work_dir_root / 'generalization_summary.csv', summary_rows)
 
     write_generalization_summary(
-        generalization_summary_path(work_dir_root, args), summary_rows,
-        args.label_order_sweep)
+        work_dir_root / 'generalization_summary.csv', summary_rows)
 
 
 def first_metric(metrics, pattern):
@@ -571,28 +516,21 @@ def class_iou(metrics, class_name):
     return ''
 
 
-def generalization_summary_path(work_dir_root: Path, args):
-    if args.label_order_sweep:
-        return work_dir_root / 'generalization_label_order_sweep.csv'
-    return work_dir_root / 'generalization_summary.csv'
-
-
-def write_generalization_summary(path: Path, rows, label_order_sweep=False):
-    fieldnames = [
-        'dataset', 'mIoU', 'IoU_background', 'IoU_boat',
-        'IoU_free_space', 'mACC', 'ablation', 'status'
-    ]
-    if label_order_sweep:
-        fieldnames.insert(1, 'label_order')
+def write_generalization_summary(path: Path, rows):
     with path.open('w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                'dataset', 'mIoU', 'IoU_background', 'IoU_boat',
+                'IoU_free_space', 'mACC', 'ablation', 'status'
+            ])
         writer.writeheader()
         writer.writerows(rows)
 
 
 def main():
     args = parse_args()
-    if args.generalization_test or args.label_order_sweep:
+    if args.generalization_test:
         run_generalization_tests(args)
         return
 
