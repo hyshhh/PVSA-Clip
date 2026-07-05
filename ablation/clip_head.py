@@ -1,16 +1,21 @@
 """Run CLIP head ablations and summarize best mIoU.
 
-前四组固定使用 BRG + CLIP 入口 configs-h/clip/attn_waterseg.py，消融图相关
-query 的两个二值参数；第五组使用纯视觉 BRG 入口，不引入任何文本：
+固定使用 BRG 入口，对比纯视觉、旧版 CLIP head 和新版类激活提示 CLIP head。
+旧版消融仍可通过 --variants 显式指定，消融图相关 query 的两个二值参数：
     image_query_source:    backbone_pool / decode_fusion
     image_query_head_type: joint / separate
 
-五组变体：
+旧版五组变体：
     Q0  backbone_pool + joint
     Q1  backbone_pool + separate
     Q2  decode_fusion + joint
     Q3  decode_fusion + separate
     Q4  纯视觉 BiFormer，无文本、无图相关 query
+
+默认核心三组：
+    Q4-no-text        纯视觉基线
+    clip-v1-best      旧版 decode_fusion + separate
+    clip-v2-actprompt 新版类激活视觉提示文本原型
 
 用法（从仓库根目录运行）：
     CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py \
@@ -95,6 +100,14 @@ QUERY_VARIANTS = [
     'brg-query-Q2-decode-joint',        # 解码融合特征池化 + 单个联合输出头
     'brg-query-Q3-decode-separate',     # 解码融合特征池化 + 每类独立输出头
     'brg-query-Q4-no-text',             # 纯视觉 BiFormer，不引入任何文本
+    'clip-v1-best',                     # 旧版最佳：decode_fusion + separate
+    'clip-v2-actprompt',                # 新版：类激活视觉提示 + 文本原型增量
+]
+
+DEFAULT_VARIANTS = [
+    'brg-query-Q4-no-text',
+    'clip-v1-best',
+    'clip-v2-actprompt',
 ]
 
 
@@ -113,7 +126,7 @@ def parse_args():
         '--variants',
         nargs='+',
         choices=QUERY_VARIANTS,
-        default=QUERY_VARIANTS,
+        default=DEFAULT_VARIANTS,
         help='Variant names to run.')
     parser.add_argument(
         '--extra-cfg-options',
@@ -162,6 +175,10 @@ def get_variant(variant_name):
         return CLIP_BRG_CONFIG, 'decode_fusion', 'separate'
     if variant_name == 'brg-query-Q4-no-text':
         return VISION_BRG_CONFIG, 'none', 'none'
+    if variant_name == 'clip-v1-best':
+        return CLIP_BRG_CONFIG, 'decode_fusion', 'separate'
+    if variant_name == 'clip-v2-actprompt':
+        return CLIP_BRG_CONFIG, 'class_activation', 'v2'
     raise ValueError(f'Unknown variant: {variant_name}. '
                      f'Valid: {QUERY_VARIANTS}')
 
@@ -170,17 +187,33 @@ def get_variant_display_name(variant_name):
     return variant_name.replace('brg-query-', '')
 
 
-def build_cfg_options(image_query_source, image_query_head_type):
-    if image_query_source == 'none':
-        return {}, []
-    cfg_dict = {
+def decode_head_type_for_variant(variant_name):
+    if variant_name == 'clip-v2-actprompt':
+        return 'CLIPSegHeadV2'
+    if variant_name == 'brg-query-Q4-no-text':
+        return None
+    return 'CLIPSegHead'
+
+
+def build_cfg_options(image_query_source, image_query_head_type,
+                      variant_name=None):
+    decode_head_type = decode_head_type_for_variant(variant_name)
+    cfg_dict = {}
+    cfg_list = []
+    if decode_head_type is not None:
+        cfg_dict['model.decode_head.type'] = decode_head_type
+        cfg_list.append(f'model.decode_head.type={decode_head_type}')
+
+    if image_query_source in ('none', 'class_activation'):
+        return cfg_dict, cfg_list
+    cfg_dict.update({
         'model.image_query_proj.source': image_query_source,
         'model.image_query_proj.query_head_type': image_query_head_type,
-    }
-    cfg_list = [
+    })
+    cfg_list.extend([
         f'model.image_query_proj.source={image_query_source}',
         f'model.image_query_proj.query_head_type={image_query_head_type}',
-    ]
+    ])
     return cfg_dict, cfg_list
 
 
@@ -229,7 +262,8 @@ def relpath_for_config(path: Path, start: Path):
 def write_eval_config(eval_config_path: Path, repo_root: Path,
                       base_config: str, dataset_config: str,
                       image_query_source: str, image_query_head_type: str,
-                      split: str, target_metainfo: dict):
+                      split: str, target_metainfo: dict,
+                      variant_name: str):
     base_rel = relpath_for_config(repo_root / base_config,
                                   eval_config_path.parent)
     dataset_path = (repo_root / dataset_config).resolve().as_posix()
@@ -239,7 +273,13 @@ def write_eval_config(eval_config_path: Path, repo_root: Path,
         '    data_preprocessor=data_preprocessor,',
         '    test_cfg=dict(mode="whole"),',
     ]
-    if image_query_source != 'none':
+    decode_head_type = decode_head_type_for_variant(variant_name)
+    if decode_head_type is not None:
+        model_lines.extend([
+            '    decode_head=dict(',
+            f'        type="{decode_head_type}"),',
+        ])
+    if image_query_source not in ('none', 'class_activation'):
         model_lines.extend([
             '    image_query_proj=dict(',
             f'        source="{image_query_source}",',
@@ -454,7 +494,7 @@ def run_generalization_tests(args):
             write_eval_config(
                 eval_config, repo_root, base_config, dataset_config,
                 image_query_source, image_query_head_type, target['split'],
-                target['metainfo'])
+                target['metainfo'], variant_name)
 
             command = [
                 args.python,
@@ -545,7 +585,7 @@ def main():
             variant_name)
         config_path = (repo_root / base_config).resolve()
         cfg_dict, cfg_list = build_cfg_options(
-            image_query_source, image_query_head_type)
+            image_query_source, image_query_head_type, variant_name)
         if cfg_list:
             cfg_opts_str = (
                 f'image_query_source={image_query_source};'
@@ -555,8 +595,13 @@ def main():
 
         work_dir = work_dir_root / variant_name
         best_existing = parse_best_miou(work_dir)
-        flops, params = compute_model_complexity(
-            config_path, cfg_dict, args.shape)
+        try:
+            flops, params = compute_model_complexity(
+                config_path, cfg_dict, args.shape)
+        except Exception:
+            if not args.dry_run:
+                raise
+            flops, params = 'unavailable', 'unavailable'
 
         if args.skip_existing and best_existing is not None:
             summary_rows.append({

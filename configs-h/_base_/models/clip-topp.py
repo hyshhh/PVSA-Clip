@@ -10,6 +10,10 @@ if attention_type not in ('topp', 'brg'):
 
 use_clip_decode_head = True
 use_backbone_text_injection = False
+clip_head_type = globals().get('clip_head_type', 'v2')
+if clip_head_type not in ('v1', 'v2'):
+    raise ValueError('clip_head_type must be "v1" or "v2"')
+
 # 图相关 query 来源：
 # 'backbone_pool'  = 池化骨干多 stage 特征（旧路径）
 # 'decode_fusion'  = 池化 decode head 上采样拼接后的融合特征
@@ -19,7 +23,7 @@ image_query_source = 'decode_fusion'
 # 'separate' = 共享前层 + 每类独立线性输出头
 image_query_head_type = 'separate'
 
-clip_decode_head = dict(
+clip_decode_head_v1 = dict(
     type='CLIPSegHead',
     in_channels=[64, 128, 256, 512],
     in_index=[0, 1, 2, 3],
@@ -32,6 +36,28 @@ clip_decode_head = dict(
     align_corners=False,
     loss_decode=dict(
         type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0))
+
+clip_decode_head_v2 = dict(
+    type='CLIPSegHeadV2',
+    in_channels=[64, 128, 256, 512],
+    in_index=[0, 1, 2, 3],
+    channels=256,
+    embed_dim=512,
+    visual_prompt_mode='class_activation',
+    clip_logit_weight_init=0.1,
+    text_delta_scale_init=0.1,
+    base_loss_weight=0.4,
+    clip_loss_weight=0.4,
+    text_drift_loss_weight=0.02,
+    dropout_ratio=0.1,
+    num_classes=3,
+    norm_cfg=norm_cfg,
+    align_corners=False,
+    loss_decode=dict(
+        type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0))
+
+clip_decode_head = (
+    clip_decode_head_v2 if clip_head_type == 'v2' else clip_decode_head_v1)
 
 # 消融用普通 seg head：仅替换解码头，保留 CLIP 文本路径与 backbone 文本注入。
 seg_decode_head = dict(

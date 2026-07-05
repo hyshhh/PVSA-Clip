@@ -42,6 +42,8 @@ class CLIPEncoderDecoder(EncoderDecoder):
 
         embed_dim = text_encoder.get('embed_dim', 512)
         num_categories = text_encoder.get('num_categories', 3)
+        self.use_activation_prompt_head = hasattr(
+            self.decode_head, 'loss_with_text')
 
         # Build TextEncoder
         self.text_encoder = TextEncoder(
@@ -50,7 +52,9 @@ class CLIPEncoderDecoder(EncoderDecoder):
             prompts_per_category=text_encoder.get('prompts_per_category', 10),
             use_reprta=text_encoder.get('use_reprta', True),
             reprta_ffn_type=text_encoder.get('reprta_ffn_type', 'swiglu'),
-            reprta_zero_init=text_encoder.get('reprta_zero_init', True))
+            reprta_zero_init=text_encoder.get('reprta_zero_init', True),
+            use_visual_delta=text_encoder.get(
+                'use_visual_delta', self.use_activation_prompt_head))
 
         # Load prompt bank
         prompt_bank_path = text_encoder.get('prompt_bank_path', None)
@@ -69,6 +73,10 @@ class CLIPEncoderDecoder(EncoderDecoder):
             self.text_refiner = TextRefiner(
                 in_dim=text_refiner.get('in_dim', embed_dim),
                 hidden_mult=text_refiner.get('hidden_mult', 4))
+
+        # V2 head 自己用类激活生成视觉提示，不再需要旧的全局 image query。
+        if self.use_activation_prompt_head:
+            image_query_proj = None
 
         # image_query_proj: 图像特征 -> 图相关 query [B, C, D]
         # source='backbone_pool': 池化骨干多 stage 特征（默认旧路径）
@@ -261,7 +269,9 @@ class CLIPEncoderDecoder(EncoderDecoder):
                 [C, D] for the frozen-deployment branch.
         """
         feats = self._extract_backbone_feats(inputs)
-        if self._use_decode_fusion_query():
+        if self.use_activation_prompt_head:
+            category_prototypes = None
+        elif self._use_decode_fusion_query():
             category_prototypes = None
         else:
             category_prototypes = self._make_category_prototypes(feats)
@@ -288,7 +298,11 @@ class CLIPEncoderDecoder(EncoderDecoder):
         feats, category_prototypes = self.extract_feat(inputs)
 
         losses = dict()
-        if self._use_decode_fusion_query():
+        if self.use_activation_prompt_head:
+            loss_decode = self.decode_head.loss_with_text(
+                feats, data_samples, self.text_encoder)
+            loss_decode = add_prefix(loss_decode, 'decode')
+        elif self._use_decode_fusion_query():
             seg_logits = self._decode_head_forward_with_decode_query(feats)
             loss_decode = self.decode_head.loss_by_feat(
                 seg_logits, data_samples)
@@ -352,7 +366,10 @@ class CLIPEncoderDecoder(EncoderDecoder):
     def inference(self, feats, batch_img_metas,
                   category_prototypes=None, rescale=True):
         """Inference with augmented test time."""
-        if self._use_decode_fusion_query():
+        if self.use_activation_prompt_head:
+            seg_logits = self.decode_head.predict_with_text(
+                feats, batch_img_metas, self.test_cfg, self.text_encoder)
+        elif self._use_decode_fusion_query():
             seg_logits = self._decode_head_forward_with_decode_query(feats)
         elif self._decode_head_supports_prototypes():
             seg_logits = self.decode_head.predict(
@@ -368,6 +385,8 @@ class CLIPEncoderDecoder(EncoderDecoder):
                  data_samples: Optional[SampleList] = None) -> Tensor:
         """Network forward process."""
         feats, category_prototypes = self.extract_feat(inputs)
+        if self.use_activation_prompt_head:
+            return self.decode_head.forward(feats, text_encoder=self.text_encoder)
         if self._use_decode_fusion_query():
             return self._decode_head_forward_with_decode_query(feats)
         if self._decode_head_supports_prototypes():

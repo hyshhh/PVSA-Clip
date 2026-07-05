@@ -264,6 +264,92 @@ image_query_proj + pool_with_query + RepRTA + einsum
 
 ## 训练与部署摘要
 
+---
+
+## 3. CLIPSegHeadV2：类激活引导的视觉条件文本原型
+
+当前旧版 `CLIPSegHead` 保留为 `v1` 消融对照；新的主路线为 `CLIPSegHeadV2`。它不再用全局图像向量生成图相关 query，而是先让普通视觉分割头产生每类空间激活，再用每类激活区域生成对应类别的视觉提示，从而让文本原型知道“这一类应该看图中哪里”。
+
+### 3.1 设计目标
+
+- 同域 `KAKA` 精度不低于纯视觉头。
+- 文本分支不只增加参数，而是真正参与分类。
+- 优先观察 `gqy`、`GBA` 泛化是否超过纯视觉 `Q4-no-text`。
+- 不整套搬 `YOLOE` 检测头，只借鉴三点：视觉特征归一化/标定、文本原型残差精炼、训练后可解释为文本分类核。
+
+### 3.2 前向流程
+
+```
+feats
+→ SegFormer 式多尺度融合
+→ fusion_feat                         # [B,256,H/4,W/4]
+
+base_logits = Conv(fusion_feat)        # [B,3,H/4,W/4]
+activation = softmax(base_logits)      # [B,3,H/4,W/4]
+
+visual_feat = Conv(BN(fusion_feat))    # [B,512,H/4,W/4]
+visual_prompt = class_weighted_avg(
+    visual_feat, activation)           # [B,3,512]
+
+base_proto = TextEncoder()             # [3,512]
+delta = Linear(LayerNorm(visual_prompt))
+adapted_proto = L2norm(
+    base_proto + lambda * delta)        # [B,3,512]
+
+clip_logits = BNContrastive(
+    visual_feat, adapted_proto)         # [B,3,H/4,W/4]
+
+logits = base_logits + gamma * clip_logits
+```
+
+其中 `gamma` 为可学习标量，初始值为 `0.1`；`lambda` 也是可学习标量，初始值为 `0.1`。视觉增量投影的最后一层零初始化，因此训练初期 `adapted_proto` 基本等价于原始文本原型，避免一开始破坏 CLIP 语义。
+
+### 3.3 文本增量接口
+
+`TextEncoder` 新增 `adapt_with_visual_prompt(visual_prompt, delta_scale)`：
+
+```
+base_proto = TextEncoder.forward()                  # [3,512]
+delta = visual_delta_proj(visual_delta_norm(prompt))
+adapted_proto = L2norm(base_proto + delta_scale * delta)
+```
+
+该接口只在 `CLIPSegHeadV2` 中启用。旧版 `CLIPSegHead` 和 `v1` 消融不会创建这部分参数，避免参数统计被未使用模块污染。
+
+### 3.4 损失设计
+
+训练时同时约束三路输出：
+
+- 主损失：最终融合 `logits` 的交叉熵，权重 `1.0`。
+- 辅助损失：`base_logits` 交叉熵，权重 `0.4`，保证同域精度稳定。
+- 辅助损失：`clip_logits` 交叉熵，权重 `0.4`，强迫文本分支参与。
+- 文本漂移约束：`1 - cos(adapted_proto, base_proto)`，权重 `0.02`，防止视觉提示把文本原型完全改成普通分类器。
+
+### 3.5 配置与消融
+
+模型配置新增：
+
+```
+clip_head_type = 'v1' | 'v2'
+visual_prompt_mode = 'class_activation'
+clip_logit_weight_init = 0.1
+text_delta_scale_init = 0.1
+```
+
+默认主实验使用 `clip_head_type='v2'`。`v1` 仍保留旧的 `decode_fusion + separate` 路线，用于对照。
+
+`ablation/clip_head.py` 的核心三组为：
+
+- `brg-query-Q4-no-text`：纯视觉基线。
+- `clip-v1-best`：旧版 `decode_fusion + separate`。
+- `clip-v2-actprompt`：新版类激活视觉提示文本原型。
+
+泛化测试继续输出简表：
+
+```
+dataset,mIoU,IoU_background,IoU_boat,IoU_free_space,mACC,ablation,status
+```
+
 **训练前准备**
 
 1. 使用冻结 CLIP 文本塔生成 `tools/prompt_bank_water.pt`，形状为 `[3,10,512]`。

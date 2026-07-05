@@ -13,7 +13,7 @@ class TextEncoder(nn.Module):
 
     def __init__(self, embed_dim=512, num_categories=3, prompts_per_category=10,
                  use_reprta=True, reprta_ffn_type='swiglu',
-                 reprta_zero_init=True):
+                 reprta_zero_init=True, use_visual_delta=False):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_categories = num_categories
@@ -45,6 +45,15 @@ class TextEncoder(nn.Module):
             if reprta_zero_init:
                 nn.init.zeros_(self.reprta_w3.weight)
                 nn.init.zeros_(self.reprta_w3.bias)
+
+        # 类激活视觉提示 -> 文本原型增量。只在 V2 中启用，避免旧消融
+        # 统计到未使用参数；最后一层零初始化，初始等价于原文本原型。
+        self.use_visual_delta = use_visual_delta
+        if use_visual_delta:
+            self.visual_delta_norm = nn.LayerNorm(embed_dim)
+            self.visual_delta_proj = nn.Linear(embed_dim, embed_dim)
+            nn.init.zeros_(self.visual_delta_proj.weight)
+            nn.init.zeros_(self.visual_delta_proj.bias)
 
         self._fused = False
 
@@ -196,6 +205,29 @@ class TextEncoder(nn.Module):
         category_prototypes = F.normalize(pooled, dim=-1, p=2)
 
         return category_prototypes
+
+    def adapt_with_visual_prompt(self, visual_prompt, delta_scale=0.1):
+        """Use per-class visual prompts to lightly adapt text prototypes.
+
+        Args:
+            visual_prompt (Tensor): [B, C, D] class-wise visual summaries.
+            delta_scale (float | Tensor): Scale for the visual residual.
+
+        Returns:
+            tuple:
+                adapted_prototypes: [B, C, D]
+                base_prototypes: [C, D]
+        """
+        if not self.use_visual_delta:
+            raise RuntimeError(
+                'TextEncoder.use_visual_delta must be True for '
+                'adapt_with_visual_prompt().')
+        base_prototypes = self.forward()                         # [C, D]
+        delta = self.visual_delta_proj(
+            self.visual_delta_norm(visual_prompt))               # [B, C, D]
+        adapted = base_prototypes.unsqueeze(0) + delta_scale * delta
+        adapted = F.normalize(adapted, dim=-1, p=2)
+        return adapted, base_prototypes
 
     def fuse(self):
         """Fuse RepRTA for deployment. After fusion, forward() skips RepRTA
