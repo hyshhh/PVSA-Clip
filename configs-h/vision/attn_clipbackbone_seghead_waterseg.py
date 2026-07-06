@@ -19,7 +19,7 @@ del _os, _config_dir, _model_base, _f
 
 # 同骨干无文本公平基线：
 # 使用 CLIP 路径同构的 BiFormer_fusion_clip 骨干，但不构建
-# CLIPEncoderDecoder / TextEncoder / CLIPSegHead。
+# CLIPEncoderDecoder / TextEncoder / CLIPSegHeadV2。
 # 用于区分“骨干融合结构和参数增加”与“文本原型分类”的贡献。
 
 crop_size = (256, 256)

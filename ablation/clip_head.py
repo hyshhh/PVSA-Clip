@@ -13,17 +13,24 @@ from types import SimpleNamespace
 
 # 训练 KAKA：background / boat / free-space -> land / ship / water
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt --train-dataset kaka
-# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants brg-query-Q4-no-text clip-v1-best clip-v2-actprompt --train-dataset kaka
-# 单独跑 headv2（不加 --train-dataset 时默认 kaka，--skip-existing 跳过已有 best mIoU 的运行）
+# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants brg-query-Q4-no-text brg-query-Q5-same-backbone-no-text clip-v2-actprompt --train-dataset kaka
+# 单独跑 headv2 并测试：不加 --train-dataset 时默认 kaka，--skip-existing 跳过已有 best mIoU 的运行
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt --skip-existing
-#
+# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --variants clip-v2-actprompt --train-dataset kaka --generalization-test
+
 # 训练 gqy：water / ground / object -> water / land / ship
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt --train-dataset gqy
-# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants brg-query-Q4-no-text clip-v1-best clip-v2-actprompt --train-dataset gqy
+# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants brg-query-Q4-no-text brg-query-Q5-same-backbone-no-text clip-v2-actprompt --train-dataset gqy
+# 单独跑 headv2 并测试
+# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt --train-dataset gqy --skip-existing
+# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --variants clip-v2-actprompt --train-dataset gqy --generalization-test
 #
 # 训练 GBA：object / water / ground -> ship / water / land
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt --train-dataset gba
-# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants brg-query-Q4-no-text clip-v1-best clip-v2-actprompt --train-dataset gba
+# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants brg-query-Q4-no-text brg-query-Q5-same-backbone-no-text clip-v2-actprompt --train-dataset gba
+# 单独跑 headv2 并测试
+# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt --train-dataset gba --skip-existing
+# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --variants clip-v2-actprompt --train-dataset gba --generalization-test
 CLIP_BRG_CONFIG = 'configs-h/clip/attn_waterseg.py'
 VISION_BRG_CONFIG = 'configs-h/vision/attn_ablation_waterseg.py'
 VISION_CLIP_BACKBONE_CONFIG = (
@@ -96,19 +103,14 @@ GENERALIZATION_TARGETS = [
 ]
 
 QUERY_VARIANTS = [
-    'brg-query-Q0-backbone-joint',      # 骨干多阶段池化 + 单个联合输出头
-    'brg-query-Q1-backbone-separate',   # 骨干多阶段池化 + 每类独立输出头
-    'brg-query-Q2-decode-joint',        # 解码融合特征池化 + 单个联合输出头
-    'brg-query-Q3-decode-separate',     # 解码融合特征池化 + 每类独立输出头
     'brg-query-Q4-no-text',             # 纯视觉 BiFormer，不引入任何文本
     'brg-query-Q5-same-backbone-no-text',  # 同 CLIP 骨干结构的无文本基线
-    'clip-v1-best',                     # 旧版最佳：decode_fusion + separate
     'clip-v2-actprompt',                # 新版：类激活视觉提示 + 文本原型增量
 ]
 
 DEFAULT_VARIANTS = [
     'brg-query-Q4-no-text',
-    'clip-v1-best',
+    'brg-query-Q5-same-backbone-no-text',
     'clip-v2-actprompt',
 ]
 
@@ -118,8 +120,6 @@ VARIANT_NOTES = {
     '不和 CLIP 分支严格同构。',
     'brg-query-Q5-same-backbone-no-text':
     '公平无文本基线：同 CLIP 分支的 BiFormer_fusion_clip 骨干 + SegformerHead。',
-    'clip-v1-best':
-    'CLIPSegHead v1：decode_fusion 图像查询 + 按类提示词池化。',
     'clip-v2-actprompt':
     'CLIPSegHead v2：普通视觉分支 + 类激活视觉提示 + 文本分支辅助监督。',
 }
@@ -190,20 +190,10 @@ def parse_args():
 
 def get_variant(variant_name):
     """Return (base_config, image_query_source, image_query_head_type)."""
-    if variant_name == 'brg-query-Q0-backbone-joint':
-        return CLIP_BRG_CONFIG, 'backbone_pool', 'joint'
-    if variant_name == 'brg-query-Q1-backbone-separate':
-        return CLIP_BRG_CONFIG, 'backbone_pool', 'separate'
-    if variant_name == 'brg-query-Q2-decode-joint':
-        return CLIP_BRG_CONFIG, 'decode_fusion', 'joint'
-    if variant_name == 'brg-query-Q3-decode-separate':
-        return CLIP_BRG_CONFIG, 'decode_fusion', 'separate'
     if variant_name == 'brg-query-Q4-no-text':
         return VISION_BRG_CONFIG, 'none', 'none'
     if variant_name == 'brg-query-Q5-same-backbone-no-text':
         return VISION_CLIP_BACKBONE_CONFIG, 'none', 'same_backbone_seghead'
-    if variant_name == 'clip-v1-best':
-        return CLIP_BRG_CONFIG, 'decode_fusion', 'separate'
     if variant_name == 'clip-v2-actprompt':
         return CLIP_BRG_CONFIG, 'class_activation', 'v2'
     raise ValueError(f'Unknown variant: {variant_name}. '
@@ -225,7 +215,7 @@ def decode_head_type_for_variant(variant_name):
             'brg-query-Q4-no-text',
             'brg-query-Q5-same-backbone-no-text'):
         return None
-    return 'CLIPSegHead'
+    return None
 
 
 def build_cfg_options(image_query_source, image_query_head_type,
@@ -241,16 +231,6 @@ def build_cfg_options(image_query_source, image_query_head_type,
         cfg_list.append(
             f'model.text_encoder.prompt_category_order={prompt_order!r}')
 
-    if image_query_source in ('none', 'class_activation'):
-        return cfg_dict, cfg_list
-    cfg_dict.update({
-        'model.image_query_proj.source': image_query_source,
-        'model.image_query_proj.query_head_type': image_query_head_type,
-    })
-    cfg_list.extend([
-        f'model.image_query_proj.source={image_query_source}',
-        f'model.image_query_proj.query_head_type={image_query_head_type}',
-    ])
     return cfg_dict, cfg_list
 
 
@@ -372,12 +352,6 @@ def write_eval_config(eval_config_path: Path, repo_root: Path,
             f'        type="{decode_head_type}"),',
             '    text_encoder=dict(',
             f'        prompt_category_order={prompt_order!r}),',
-        ])
-    if image_query_source not in ('none', 'class_activation'):
-        model_lines.extend([
-            '    image_query_proj=dict(',
-            f'        source="{image_query_source}",',
-            f'        query_head_type="{image_query_head_type}"),',
         ])
     model_lines.append(')')
 

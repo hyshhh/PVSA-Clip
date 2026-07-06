@@ -1,4 +1,4 @@
-"""Deploy CLIP-enhanced PVSA-Net by fusing all CLIP modules.
+"""Deploy CLIP-enhanced PVSA-Net by freezing deployable CLIP caches.
 
 Usage:
     python tools/deploy_clip_pvsa.py \
@@ -9,8 +9,7 @@ Usage:
 After deployment:
 - Backbone text is frozen after TextRefiner
 - Backbone TTRM/TextCrossAttention use pre-computed frozen K/V
-- Head keeps image-conditioned prototype pooling by default
-- Head fusion into Conv2d is only for the legacy fixed-prototype path
+- CLIPSegHeadV2 keeps image-conditioned visual prompts at runtime
 """
 
 import argparse
@@ -49,14 +48,13 @@ def main():
 
     model.eval()
 
-    # Fuse all CLIP modules for deployment
+    # Freeze deployable CLIP backbone caches. The V2 head remains dynamic.
     model.fuse_for_deployment()
-    print('All CLIP modules fused for deployment')
+    print('Deployable CLIP backbone caches frozen')
 
     # Save deployed model
     deployed_state = {
         'state_dict': model.state_dict(),
-        'frozen_prototypes': model.frozen_prototypes,
         'config': cfg.text,
     }
     deployed_path = os.path.join(args.output, 'deployed_model.pth')

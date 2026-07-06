@@ -4,7 +4,7 @@
 #   2. Backbone 仍复用 BiFormer_fusion，但关闭文本通道：
 #      - use_ttrm=False / ttrm_stages=[]   路由级文本注入关闭
 #      - cross_attn_stages=[]              特征级文本注入关闭（不构造 TextCrossAttention）
-#   3. decode_head 由 CLIPSegHead 退回 SegformerHead（无 embed_dim 文本对齐）
+#   3. decode_head 由 CLIPSegHeadV2 退回 SegformerHead（无文本原型对齐）
 #   4. block 切换规则沿用 clip 版：use_plain_attn_last_stage=True
 #      —— stage1-3 含 stage0-2 用 ToppAttention，最后一层 stage3 用普通 self-attention
 # 不需要修改任何 .py 代码，纯配置层即可生效。

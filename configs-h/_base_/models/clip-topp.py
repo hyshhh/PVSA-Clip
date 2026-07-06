@@ -10,18 +10,6 @@ if attention_type not in ('topp', 'brg'):
 
 use_clip_decode_head = True
 use_backbone_text_injection = False
-clip_head_type = globals().get('clip_head_type', 'v2')
-if clip_head_type not in ('v1', 'v2'):
-    raise ValueError('clip_head_type must be "v1" or "v2"')
-
-# 图相关 query 来源：
-# 'backbone_pool'  = 池化骨干多 stage 特征（旧路径）
-# 'decode_fusion'  = 池化 decode head 上采样拼接后的融合特征
-image_query_source = 'decode_fusion'
-# 图相关 query 输出头：
-# 'joint'    = 旧路径：一个线性层一次输出 3*512
-# 'separate' = 共享前层 + 每类独立线性输出头
-image_query_head_type = 'separate'
 
 # prompt bank 原始顺序为 water / ship / land。
 # 这里记录“训练标签通道顺序 -> prompt 语义顺序”的映射：
@@ -38,20 +26,6 @@ if prompt_dataset not in prompt_category_orders:
         f'prompt_dataset must be one of {tuple(prompt_category_orders)}')
 prompt_category_order = globals().get(
     'prompt_category_order', prompt_category_orders[prompt_dataset])
-
-clip_decode_head_v1 = dict(
-    type='CLIPSegHead',
-    in_channels=[64, 128, 256, 512],
-    in_index=[0, 1, 2, 3],
-    channels=256,
-    embed_dim=512,
-    normalize_visual=False,  # False=默认点积 | True=严格余弦（通道维 L2 归一化）
-    dropout_ratio=0.1,
-    num_classes=3,
-    norm_cfg=norm_cfg,
-    align_corners=False,
-    loss_decode=dict(
-        type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0))
 
 clip_decode_head_v2 = dict(
     type='CLIPSegHeadV2',
@@ -73,9 +47,6 @@ clip_decode_head_v2 = dict(
     align_corners=False,
     loss_decode=dict(
         type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0))
-
-clip_decode_head = (
-    clip_decode_head_v2 if clip_head_type == 'v2' else clip_decode_head_v1)
 
 # 消融用普通 seg head：仅替换解码头，保留 CLIP 文本路径与 backbone 文本注入。
 seg_decode_head = dict(
@@ -141,7 +112,7 @@ model = dict(
     pretrained=None,
     use_backbone_text_injection=use_backbone_text_injection,
     backbone=backbone,
-    decode_head=clip_decode_head if use_clip_decode_head else seg_decode_head,
+    decode_head=clip_decode_head_v2 if use_clip_decode_head else seg_decode_head,
     text_encoder=dict(
         embed_dim=512,
         num_categories=3,
@@ -154,12 +125,6 @@ model = dict(
     text_refiner=(
         dict(in_dim=512, hidden_mult=4)
         if use_backbone_text_injection else None),
-    image_query_proj=dict(
-        source=image_query_source,
-        query_head_type=image_query_head_type,
-        stage_channels=[64, 128, 256, 512],
-        in_dim=256,
-        hidden_dim=512),
     train_cfg=dict(),
     test_cfg=dict(mode='whole')
 )

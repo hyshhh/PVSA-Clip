@@ -105,8 +105,6 @@ def main():
     use_ttrm = bb_cfg.get('use_ttrm', False)
     ttrm_stages = set(bb_cfg.get('ttrm_stages', []))
     cross_attn_stages = set(bb_cfg.get('cross_attn_stages', []))
-    num_classes = cfg.model.decode_head.get('num_classes', 3)
-    text_dim = cfg.model.text_encoder.get('embed_dim', 512)
     win_size = n_win * n_win
     route_cfgs = bb_cfg.get('topp_route_configs', {})
 
@@ -117,11 +115,6 @@ def main():
     # Run full model forward to get module-level FLOPs
     module_flops_dict, module_hooks = _register_module_hooks(model)
     with torch.no_grad():
-        # Simulate inference path
-        if hasattr(model, 'text_encoder') and model.text_encoder is not None:
-            model._prototypes_frozen = True
-            model.frozen_prototypes.copy_(
-                torch.randn(num_classes, text_dim, device=device))
         model(dummy)
     for h in module_hooks:
         h.remove()

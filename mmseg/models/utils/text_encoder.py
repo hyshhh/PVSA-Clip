@@ -181,46 +181,6 @@ class TextEncoder(nn.Module):
         """
         return self.prompt_embeddings
 
-    def pool_with_query(self, image_query):
-        """Image-conditioned prompt pooling (decoder side).
-
-        Each category's fused query (image-derived + learnable prior) attends
-        only to that category's K prompts (grouped attention, K prompts per
-        class), producing per-image prototypes.
-
-        Args:
-            image_query (Tensor): [B, C, D] already L2-normalized & summed
-                with the normalized attn_pool_query prior by the caller.
-
-        Returns:
-            Tensor: [B, C, D] L2-normalized category prototypes.
-        """
-        # prompt_embeddings: [C, K, D]
-        C, K, D = self.prompt_embeddings.shape
-        B = image_query.shape[0]
-
-        prompts = self._maybe_augment_prompts(self.prompt_embeddings)   # [C, K', D]
-
-        # Grouped attention: each class's query attends only to its K prompts
-        q = image_query.unsqueeze(2)                         # [B, C, 1, D]
-        k = v = prompts.unsqueeze(0).expand(B, -1, -1, -1)  # [B, C, K', D]
-
-        # Attention: [B, C, 1, K_eff]
-        attn = (q * (D ** -0.5)) @ k.transpose(-2, -1)
-        attn = F.softmax(attn, dim=-1)
-
-        # Weighted aggregation: [B, C, 1, D] -> [B, C, D]
-        pooled = (attn @ v).squeeze(2)
-
-        # RepRTA refinement (FFN + residual), 自然 batch 广播；
-        # Linears 作用在最后一维，[B,C,D] 直接可处理，fuse() 或 use_reprta=False 时跳过。
-        pooled = self._reprta_refine(pooled)
-
-        # L2 normalize
-        category_prototypes = F.normalize(pooled, dim=-1, p=2)
-
-        return category_prototypes
-
     def adapt_with_visual_prompt(self, visual_prompt, delta_scale=0.1):
         """Use per-class visual prompts to lightly adapt text prototypes.
 

@@ -305,7 +305,7 @@ class BiFormer_fusion_clip(BiFormer):
     与 BiFormer_fusion（topp 版）平行存在，区别仅是注意力主路径用标准
     BiLevelRoutingAttention 而非 ToppAttention；其余完全一致：
       - 继承 BiFormer（已含 TTRM 路由级文本注入 + TextCrossAttention 特征级注入）
-      - 额外加跨层自门控融合（conv11 + bn + sigmoid + 上采样），供 CLIPSegHead 多尺度解码
+      - 额外加跨层自门控融合（conv11 + bn + sigmoid + 上采样），供解码头多尺度解码
       - forward(x, category_prototypes) 返回 (feats_tuple, category_prototypes)，
         与 CLIPEncoderDecoder.extract_feat 接口对齐
     """
