@@ -16,21 +16,21 @@ from types import SimpleNamespace
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants brg-query-Q4-no-text brg-query-Q5-same-backbone-no-text clip-v2-actprompt --train-dataset kaka
 # 单独跑 headv2 并测试：不加 --train-dataset 时默认 kaka，--skip-existing 跳过已有 best mIoU 的运行
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt --skip-existing
-# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --variants clip-v2-actprompt --train-dataset kaka --generalization-test
+# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --variants clip-v2-actprompt --train-dataset kaka --generalization-test --save-vis
 
 # 训练 gqy：water / ground / object -> water / land / ship
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt --train-dataset gqy
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants brg-query-Q4-no-text brg-query-Q5-same-backbone-no-text clip-v2-actprompt --train-dataset gqy
 # 单独跑 headv2 并测试
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt --train-dataset gqy --skip-existing
-# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --variants clip-v2-actprompt --train-dataset gqy --generalization-test
+# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --variants clip-v2-actprompt --train-dataset gqy --generalization-test --save-vis
 #
 # 训练 GBA：object / water / ground -> ship / water / land
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt --train-dataset gba
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants brg-query-Q4-no-text brg-query-Q5-same-backbone-no-text clip-v2-actprompt --train-dataset gba
 # 单独跑 headv2 并测试
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt --train-dataset gba --skip-existing
-# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --variants clip-v2-actprompt --train-dataset gba --generalization-test
+# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --variants clip-v2-actprompt --train-dataset gba --generalization-test --save-vis
 CLIP_BRG_CONFIG = 'configs-h/clip/attn_waterseg.py'
 VISION_BRG_CONFIG = 'configs-h/vision/attn_ablation_waterseg.py'
 VISION_CLIP_BACKBONE_CONFIG = (
@@ -179,6 +179,10 @@ def parse_args():
         nargs='*',
         default=[],
         help='Additional arguments passed through to tools/test.py.')
+    parser.add_argument(
+        '--save-vis',
+        action='store_true',
+        help='Save painted prediction images for --generalization-test.')
     parser.add_argument(
         '--shape',
         type=int,
@@ -394,6 +398,8 @@ val_evaluator = dict(
     ignore_index=255,
     classwise=True)
 test_evaluator = val_evaluator
+default_hooks = dict(
+    visualization=dict(type='SegVisualizationHook'))
 
 {chr(10).join(model_lines)}
 {chr(10).join(split_lines)}
@@ -588,8 +594,10 @@ def run_generalization_tests(args):
                 str(checkpoint),
                 '--work-dir',
                 str(eval_work_dir),
-                *args.extra_test_args,
             ]
+            if args.save_vis:
+                command.extend(['--show-dir', str(eval_work_dir / 'vis')])
+            command.extend(args.extra_test_args)
 
             print(' '.join(command))
             if args.dry_run:
