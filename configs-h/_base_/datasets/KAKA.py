@@ -1,8 +1,6 @@
 # dataset settings
-import os as _os
-
 dataset_type = 'KAKADataset'
-data_root = _os.getenv('KAKA_DATA_ROOT', 'data/KAKA')
+data_root = '/media/ddc/新加卷/hys/ljf/mmsegmentation-main/mmsegmentation-main/data/KAKA'
 img_scale = (256, 256)
 crop_size = (256, 256)
 
@@ -41,8 +39,8 @@ train_dataloader = dict(
         type=dataset_type,
         data_root=data_root,
         data_prefix=dict(
-            img_path='image/train',
-            seg_map_path='annotation/train'),
+            img_path='train/img_dir',
+            seg_map_path='train/ann_dir'),
         pipeline=train_pipeline))
 
 val_dataloader = dict(
@@ -54,8 +52,8 @@ val_dataloader = dict(
         type=dataset_type,
         data_root=data_root,
         data_prefix=dict(
-            img_path='image/val',
-            seg_map_path='annotation/val'),
+            img_path='val/img_dir',
+            seg_map_path='val/ann_dir'),
         pipeline=val_pipeline))
 
 test_dataloader = dict(
@@ -67,11 +65,9 @@ test_dataloader = dict(
         type=dataset_type,
         data_root=data_root,
         data_prefix=dict(
-            img_path='image/test',
-            seg_map_path='annotation/test'),
+            img_path='test/img_dir',
+            seg_map_path='test/ann_dir'),
         pipeline=test_pipeline))
 
 val_evaluator = dict(type='IoUMetric', iou_metrics=['mDice'])
 test_evaluator = val_evaluator
-
-del _os

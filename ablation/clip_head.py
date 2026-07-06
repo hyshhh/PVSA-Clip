@@ -14,6 +14,8 @@ from types import SimpleNamespace
 # 训练 KAKA：background / boat / free-space -> land / ship / water
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt --train-dataset kaka
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants brg-query-Q4-no-text clip-v1-best clip-v2-actprompt --train-dataset kaka
+# 单独跑 headv2（不加 --train-dataset 时默认 kaka，--skip-existing 跳过已有 best mIoU 的运行）
+# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt --skip-existing
 #
 # 训练 gqy：water / ground / object -> water / land / ship
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt --train-dataset gqy
