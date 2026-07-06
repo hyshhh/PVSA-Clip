@@ -11,22 +11,25 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+# 输出目录命名：
+# 训练：{work-dir-root}/{train_dataset}/train/{variant}，例如 kaka/train/v2
+# 总结：{work-dir-root}/{train_dataset}/summary.csv 和 summary.md
+# 测试：{work-dir-root}/{train_dataset}/eval/to_{test_dataset}/{variant}
+# 可视化：{work-dir-root}/{train_dataset}/eval/to_{test_dataset}/{variant}/vis
+#
 # 训练 KAKA：background / boat / free-space -> land / ship / water
-# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt --train-dataset kaka
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants brg-query-Q4-no-text brg-query-Q5-same-backbone-no-text clip-v2-actprompt --train-dataset kaka
-# 单独跑 headv2 并测试：不加 --train-dataset 时默认 kaka，--skip-existing 跳过已有 best mIoU 的运行
-# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt --skip-existing
+# 单独跑 headv2 并测试：--skip-existing 跳过已有 best mIoU 的运行
+# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt --train-dataset kaka --skip-existing
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --variants clip-v2-actprompt --train-dataset kaka --generalization-test --save-vis
 
 # 训练 gqy：water / ground / object -> water / land / ship
-# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt --train-dataset gqy
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants brg-query-Q4-no-text brg-query-Q5-same-backbone-no-text clip-v2-actprompt --train-dataset gqy
 # 单独跑 headv2 并测试
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt --train-dataset gqy --skip-existing
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --variants clip-v2-actprompt --train-dataset gqy --generalization-test --save-vis
 #
 # 训练 GBA：object / water / ground -> ship / water / land
-# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt --train-dataset gba
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants brg-query-Q4-no-text brg-query-Q5-same-backbone-no-text clip-v2-actprompt --train-dataset gba
 # 单独跑 headv2 并测试
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt --train-dataset gba --skip-existing
@@ -107,6 +110,12 @@ QUERY_VARIANTS = [
     'brg-query-Q5-same-backbone-no-text',  # 同 CLIP 骨干结构的无文本基线
     'clip-v2-actprompt',                # 新版：类激活视觉提示 + 文本原型增量
 ]
+
+VARIANT_ALIASES = {
+    'brg-query-Q4-no-text': 'q4',
+    'brg-query-Q5-same-backbone-no-text': 'q5',
+    'clip-v2-actprompt': 'v2',
+}
 
 DEFAULT_VARIANTS = [
     'brg-query-Q4-no-text',
@@ -205,11 +214,17 @@ def get_variant(variant_name):
 
 
 def get_variant_display_name(variant_name):
-    return variant_name.replace('brg-query-', '')
+    return VARIANT_ALIASES.get(variant_name, variant_name)
+
+
+def get_dataset_root(work_dir_root: Path, train_dataset: str):
+    return work_dir_root / train_dataset
 
 
 def get_work_dir(work_dir_root: Path, variant_name: str, train_dataset: str):
-    return work_dir_root / f'{variant_name}__{train_dataset}'
+    return (
+        get_dataset_root(work_dir_root, train_dataset) / 'train'
+        / get_variant_display_name(variant_name))
 
 
 def decode_head_type_for_variant(variant_name):
@@ -293,7 +308,8 @@ def make_train_config(repo_root: Path, work_dir_root: Path,
     if train_dataset == 'kaka':
         return base_path
 
-    train_config_root = work_dir_root / '_train_configs'
+    train_config_root = (
+        get_dataset_root(work_dir_root, train_dataset) / '_train_configs')
     train_config_root.mkdir(parents=True, exist_ok=True)
     train_config_path = train_config_root / (
         f'{Path(base_config).stem}__{train_dataset}.py')
@@ -398,8 +414,8 @@ val_evaluator = dict(
     ignore_index=255,
     classwise=True)
 test_evaluator = val_evaluator
-default_hooks = dict(
-    visualization=dict(type='SegVisualizationHook'))
+default_hooks = globals().get('default_hooks', {{}})
+default_hooks.update(dict(visualization=dict(type='SegVisualizationHook')))
 
 {chr(10).join(model_lines)}
 {chr(10).join(split_lines)}
@@ -425,7 +441,7 @@ def parse_test_metrics(work_dir: Path):
 def parse_json_metrics(work_dir: Path, metrics: dict):
     json_files = sorted(
         p for p in work_dir.rglob('*.json')
-        if p.name not in ('summary.csv', 'generalization_summary.csv'))
+        if p.name not in ('summary.csv', 'eval_summary.csv'))
     for json_file in json_files:
         try:
             with json_file.open('r', encoding='utf-8') as f:
@@ -540,8 +556,9 @@ def read_previous_summary(path: Path):
 def run_generalization_tests(args):
     repo_root = Path(__file__).resolve().parents[1]
     work_dir_root = Path(args.work_dir_root).resolve()
-    eval_config_root = work_dir_root / '_generalization_configs'
-    eval_work_root = work_dir_root / 'generalization'
+    dataset_root = get_dataset_root(work_dir_root, args.train_dataset)
+    eval_config_root = dataset_root / '_eval_configs'
+    eval_work_root = dataset_root / 'eval'
     eval_work_root.mkdir(parents=True, exist_ok=True)
 
     summary_rows = []
@@ -549,17 +566,19 @@ def run_generalization_tests(args):
     for variant_name in args.variants:
         base_config, image_query_source, image_query_head_type = get_variant(
             variant_name)
+        train_name = args.train_dataset
+        variant_alias = get_variant_display_name(variant_name)
         checkpoint = find_checkpoint(
-            get_work_dir(work_dir_root, variant_name, args.train_dataset))
+            get_work_dir(work_dir_root, variant_name, train_name))
 
         for target in GENERALIZATION_TARGETS:
             dataset_config, dataset_path = resolve_dataset_config(
                 repo_root, target['dataset_candidates'])
-            ablation_name = get_variant_display_name(variant_name)
-            run_name = (
-                f'{target["display_name"]}__{ablation_name}'
-                f'__trained-{args.train_dataset}')
-            eval_work_dir = eval_work_root / run_name
+            ablation_name = variant_alias
+            run_name = f'to_{target["display_name"]}_{variant_alias}'
+            eval_work_dir = (
+                eval_work_root / f'to_{target["display_name"]}'
+                / variant_alias)
 
             row = {
                 'dataset': target['display_name'],
@@ -621,10 +640,10 @@ def run_generalization_tests(args):
                 else f'failed({result.returncode})')
             summary_rows.append(row)
             write_generalization_summary(
-                work_dir_root / 'generalization_summary.csv', summary_rows)
+                dataset_root / 'eval_summary.csv', summary_rows)
 
     write_generalization_summary(
-        work_dir_root / 'generalization_summary.csv', summary_rows)
+        dataset_root / 'eval_summary.csv', summary_rows)
 
 
 def first_metric(metrics, pattern):
@@ -671,8 +690,9 @@ def main():
 
     repo_root = Path(__file__).resolve().parents[1]
     work_dir_root = Path(args.work_dir_root).resolve()
-    work_dir_root.mkdir(parents=True, exist_ok=True)
-    previous_summary = read_previous_summary(work_dir_root / 'summary.csv')
+    dataset_root = get_dataset_root(work_dir_root, args.train_dataset)
+    dataset_root.mkdir(parents=True, exist_ok=True)
+    previous_summary = read_previous_summary(dataset_root / 'summary.csv')
 
     summary_rows = []
 
@@ -695,8 +715,8 @@ def main():
         else:
             cfg_opts_str = f'train_dataset={args.train_dataset};no_text_biformer'
 
-        work_dir = get_work_dir(
-            work_dir_root, variant_name, args.train_dataset)
+        work_dir = get_work_dir(work_dir_root, variant_name,
+                                args.train_dataset)
         best_existing = parse_best_miou(work_dir)
         try:
             flops, params = compute_model_complexity(
@@ -789,11 +809,11 @@ def main():
             'ok' if result.returncode == 0 else f'failed({result.returncode})',
             'note': VARIANT_NOTES.get(variant_name, ''),
         })
-        write_summary(work_dir_root / 'summary.csv', summary_rows)
-        write_markdown_summary(work_dir_root / 'summary.md', summary_rows)
+        write_summary(dataset_root / 'summary.csv', summary_rows)
+        write_markdown_summary(dataset_root / 'summary.md', summary_rows)
 
-    write_summary(work_dir_root / 'summary.csv', summary_rows)
-    write_markdown_summary(work_dir_root / 'summary.md', summary_rows)
+    write_summary(dataset_root / 'summary.csv', summary_rows)
+    write_markdown_summary(dataset_root / 'summary.md', summary_rows)
 
 
 def write_summary(path: Path, rows):
