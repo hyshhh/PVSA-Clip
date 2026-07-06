@@ -2,6 +2,7 @@
 import argparse
 import csv
 import json
+import math
 import os
 import re
 import shutil
@@ -23,6 +24,8 @@ from types import SimpleNamespace
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants brg-query-Q4-no-text clip-v1-best clip-v2-actprompt --train-dataset gba
 CLIP_BRG_CONFIG = 'configs-h/clip/attn_waterseg.py'
 VISION_BRG_CONFIG = 'configs-h/vision/attn_ablation_waterseg.py'
+VISION_CLIP_BACKBONE_CONFIG = (
+    'configs-h/vision/attn_clipbackbone_seghead_waterseg.py')
 
 PROMPT_CATEGORY_ORDERS = dict(
     # KAKA: background / boat / free-space -> land / ship / water
@@ -96,6 +99,7 @@ QUERY_VARIANTS = [
     'brg-query-Q2-decode-joint',        # 解码融合特征池化 + 单个联合输出头
     'brg-query-Q3-decode-separate',     # 解码融合特征池化 + 每类独立输出头
     'brg-query-Q4-no-text',             # 纯视觉 BiFormer，不引入任何文本
+    'brg-query-Q5-same-backbone-no-text',  # 同 CLIP 骨干结构的无文本基线
     'clip-v1-best',                     # 旧版最佳：decode_fusion + separate
     'clip-v2-actprompt',                # 新版：类激活视觉提示 + 文本原型增量
 ]
@@ -105,6 +109,18 @@ DEFAULT_VARIANTS = [
     'clip-v1-best',
     'clip-v2-actprompt',
 ]
+
+VARIANT_NOTES = {
+    'brg-query-Q4-no-text':
+    '旧无文本基线：EncoderDecoder + BiFormer_standalone + SegformerHead；'
+    '不和 CLIP 分支严格同构。',
+    'brg-query-Q5-same-backbone-no-text':
+    '公平无文本基线：同 CLIP 分支的 BiFormer_fusion_clip 骨干 + SegformerHead。',
+    'clip-v1-best':
+    'CLIPSegHead v1：decode_fusion 图像查询 + 按类提示词池化。',
+    'clip-v2-actprompt':
+    'CLIPSegHead v2：普通视觉分支 + 类激活视觉提示 + 文本分支辅助监督。',
+}
 
 
 def parse_args():
@@ -182,6 +198,8 @@ def get_variant(variant_name):
         return CLIP_BRG_CONFIG, 'decode_fusion', 'separate'
     if variant_name == 'brg-query-Q4-no-text':
         return VISION_BRG_CONFIG, 'none', 'none'
+    if variant_name == 'brg-query-Q5-same-backbone-no-text':
+        return VISION_CLIP_BACKBONE_CONFIG, 'none', 'same_backbone_seghead'
     if variant_name == 'clip-v1-best':
         return CLIP_BRG_CONFIG, 'decode_fusion', 'separate'
     if variant_name == 'clip-v2-actprompt':
@@ -201,7 +219,9 @@ def get_work_dir(work_dir_root: Path, variant_name: str, train_dataset: str):
 def decode_head_type_for_variant(variant_name):
     if variant_name == 'clip-v2-actprompt':
         return 'CLIPSegHeadV2'
-    if variant_name == 'brg-query-Q4-no-text':
+    if variant_name in (
+            'brg-query-Q4-no-text',
+            'brg-query-Q5-same-backbone-no-text'):
         return None
     return 'CLIPSegHead'
 
@@ -278,15 +298,14 @@ def make_train_config(repo_root: Path, work_dir_root: Path,
                       base_config: str, train_dataset: str):
     """Return a config path whose dataset matches --train-dataset."""
     base_path = (repo_root / base_config).resolve()
-    if train_dataset == 'kaka':
-        return base_path
-
     dataset_config, dataset_path = resolve_dataset_config(
         repo_root, TRAIN_DATASETS[train_dataset]['dataset_candidates'])
     if dataset_path is None:
         candidates = TRAIN_DATASETS[train_dataset]['dataset_candidates']
         raise FileNotFoundError(
             f'Missing dataset config for {train_dataset}: {candidates}')
+    if train_dataset == 'kaka':
+        return base_path
 
     train_config_root = work_dir_root / '_train_configs'
     train_config_root.mkdir(parents=True, exist_ok=True)
@@ -522,6 +541,20 @@ def compute_model_complexity(config_path: Path, cfg_options: dict, shape):
     return result['flops'], result['params']
 
 
+def read_previous_summary(path: Path):
+    if not path.exists():
+        return {}
+    try:
+        with path.open('r', newline='', encoding='utf-8') as f:
+            return {
+                row.get('run_name', ''): row
+                for row in csv.DictReader(f)
+                if row.get('run_name')
+            }
+    except OSError:
+        return {}
+
+
 def run_generalization_tests(args):
     repo_root = Path(__file__).resolve().parents[1]
     work_dir_root = Path(args.work_dir_root).resolve()
@@ -655,6 +688,7 @@ def main():
     repo_root = Path(__file__).resolve().parents[1]
     work_dir_root = Path(args.work_dir_root).resolve()
     work_dir_root.mkdir(parents=True, exist_ok=True)
+    previous_summary = read_previous_summary(work_dir_root / 'summary.csv')
 
     summary_rows = []
 
@@ -683,14 +717,17 @@ def main():
         try:
             flops, params = compute_model_complexity(
                 config_path, cfg_dict, args.shape)
-        except Exception:
-            if not args.dry_run:
-                raise
-            flops, params = 'unavailable', 'unavailable'
+        except Exception as exc:
+            print(f'Warning: complexity summary unavailable: {exc}')
+            old_row = previous_summary.get(work_dir.name, {})
+            flops = old_row.get('flops') or 'unavailable'
+            params = old_row.get('params') or 'unavailable'
 
         if args.skip_existing and best_existing is not None:
             summary_rows.append({
                 'run_name': work_dir.name,
+                'variant': variant_name,
+                'train_dataset': args.train_dataset,
                 'base_config': relpath_for_config(config_path, repo_root),
                 'image_query_source': image_query_source,
                 'image_query_head_type': image_query_head_type,
@@ -699,12 +736,15 @@ def main():
                 'params': params,
                 'best_mIoU': f'{best_existing:.6f}',
                 'status': 'skipped_existing',
+                'note': VARIANT_NOTES.get(variant_name, ''),
             })
             continue
 
         if args.summary_only:
             summary_rows.append({
                 'run_name': work_dir.name,
+                'variant': variant_name,
+                'train_dataset': args.train_dataset,
                 'base_config': relpath_for_config(config_path, repo_root),
                 'image_query_source': image_query_source,
                 'image_query_head_type': image_query_head_type,
@@ -715,6 +755,7 @@ def main():
                 else f'{best_existing:.6f}',
                 'status': 'summary_only' if best_existing is not None
                 else 'missing',
+                'note': VARIANT_NOTES.get(variant_name, ''),
             })
             continue
 
@@ -733,6 +774,8 @@ def main():
         if args.dry_run:
             summary_rows.append({
                 'run_name': work_dir.name,
+                'variant': variant_name,
+                'train_dataset': args.train_dataset,
                 'base_config': relpath_for_config(config_path, repo_root),
                 'image_query_source': image_query_source,
                 'image_query_head_type': image_query_head_type,
@@ -741,6 +784,7 @@ def main():
                 'params': params,
                 'best_mIoU': '',
                 'status': 'dry_run',
+                'note': VARIANT_NOTES.get(variant_name, ''),
             })
             continue
 
@@ -748,6 +792,8 @@ def main():
         best_miou = parse_best_miou(work_dir)
         summary_rows.append({
             'run_name': work_dir.name,
+            'variant': variant_name,
+            'train_dataset': args.train_dataset,
             'base_config': relpath_for_config(config_path, repo_root),
             'image_query_source': image_query_source,
             'image_query_head_type': image_query_head_type,
@@ -757,10 +803,13 @@ def main():
             'best_mIoU': '' if best_miou is None else f'{best_miou:.6f}',
             'status':
             'ok' if result.returncode == 0 else f'failed({result.returncode})',
+            'note': VARIANT_NOTES.get(variant_name, ''),
         })
         write_summary(work_dir_root / 'summary.csv', summary_rows)
+        write_markdown_summary(work_dir_root / 'summary.md', summary_rows)
 
     write_summary(work_dir_root / 'summary.csv', summary_rows)
+    write_markdown_summary(work_dir_root / 'summary.md', summary_rows)
 
 
 def write_summary(path: Path, rows):
@@ -768,12 +817,111 @@ def write_summary(path: Path, rows):
         writer = csv.DictWriter(
             f,
             fieldnames=[
-                'run_name', 'base_config', 'image_query_source',
-                'image_query_head_type', 'cfg_options', 'flops', 'params',
-                'best_mIoU', 'status'
+                'run_name', 'variant', 'train_dataset', 'base_config',
+                'image_query_source', 'image_query_head_type', 'cfg_options',
+                'flops', 'params', 'best_mIoU', 'status', 'note'
             ])
         writer.writeheader()
         writer.writerows(rows)
+
+
+def parse_size_to_number(value):
+    if value in (None, ''):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    match = re.match(r'^\s*([0-9.]+)\s*([KMGTP]?)\s*$', str(value))
+    if not match:
+        return None
+    number = float(match.group(1))
+    scale = match.group(2)
+    multiplier = {
+        '': 1,
+        'K': 1e3,
+        'M': 1e6,
+        'G': 1e9,
+        'T': 1e12,
+        'P': 1e15,
+    }[scale]
+    return number * multiplier
+
+
+def parse_float(value):
+    try:
+        if value in (None, ''):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def fmt_delta(value, suffix=''):
+    if value is None:
+        return ''
+    sign = '+' if value >= 0 else ''
+    return f'{sign}{value:.3f}{suffix}'
+
+
+def find_baseline(rows, variant):
+    for row in rows:
+        if row.get('variant') == variant and parse_float(row.get('best_mIoU')) is not None:
+            return row
+    return None
+
+
+def write_markdown_summary(path: Path, rows):
+    q4 = find_baseline(rows, 'brg-query-Q4-no-text')
+    q5 = find_baseline(rows, 'brg-query-Q5-same-backbone-no-text')
+    strict_baseline = q5 or q4
+    loose_baseline = q4
+
+    headers = [
+        '变体', '数据集', 'mIoU', '相对同构基线', '相对旧 Q4',
+        '参数量', '参数差', '每百万参数收益', '状态'
+    ]
+    lines = ['# CLIP Head 消融汇总', '', '| ' + ' | '.join(headers) + ' |',
+             '| ' + ' | '.join(['---'] * len(headers)) + ' |']
+
+    for row in rows:
+        miou = parse_float(row.get('best_mIoU'))
+        params = parse_size_to_number(row.get('params'))
+        strict_miou = parse_float(strict_baseline.get('best_mIoU')) if strict_baseline else None
+        loose_miou = parse_float(loose_baseline.get('best_mIoU')) if loose_baseline else None
+        strict_params = parse_size_to_number(strict_baseline.get('params')) if strict_baseline else None
+
+        delta_strict = miou - strict_miou if miou is not None and strict_miou is not None else None
+        delta_loose = miou - loose_miou if miou is not None and loose_miou is not None else None
+        delta_params = params - strict_params if params is not None and strict_params is not None else None
+        if delta_strict is not None and delta_params not in (None, 0):
+            gain_per_m = delta_strict / (delta_params / 1e6)
+            if not math.isfinite(gain_per_m):
+                gain_per_m = None
+        else:
+            gain_per_m = None
+
+        lines.append('| ' + ' | '.join([
+            row.get('variant') or row.get('run_name', ''),
+            row.get('train_dataset', ''),
+            '' if miou is None else f'{miou:.3f}',
+            fmt_delta(delta_strict),
+            fmt_delta(delta_loose),
+            row.get('params', ''),
+            '' if delta_params is None else f'{delta_params / 1e6:+.3f}M',
+            '' if gain_per_m is None else f'{gain_per_m:+.3f}',
+            row.get('status', ''),
+        ]) + ' |')
+
+    lines.extend(['', '## 备注', ''])
+    if q5 is None:
+        lines.append(
+            '- 当前没有 `brg-query-Q5-same-backbone-no-text` 结果；'
+            '表中的“相对同构基线”暂时退回旧 `Q4`，它与 CLIP 分支不是严格同构。')
+    for row in rows:
+        note = row.get('note', '')
+        if note:
+            lines.append(f'- `{row.get("variant")}`：{note}')
+
+    path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
 
 
 if __name__ == '__main__':

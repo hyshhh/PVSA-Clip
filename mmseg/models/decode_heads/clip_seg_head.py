@@ -30,7 +30,8 @@ class CLIPSegHead(BaseDecodeHead):
                  normalize_visual=False, **kwargs):
         for unused_key in (
                 'visual_prompt_mode', 'clip_logit_weight_init',
-                'text_delta_scale_init', 'base_loss_weight',
+                'text_delta_scale_init', 'visual_prompt_temperature',
+                'visual_prompt_topk_ratio', 'base_loss_weight',
                 'clip_loss_weight', 'text_drift_loss_weight'):
             kwargs.pop(unused_key, None)
         super().__init__(input_transform='multiple_select', **kwargs)
@@ -196,6 +197,8 @@ class CLIPSegHeadV2(BaseDecodeHead):
                  visual_prompt_mode='class_activation',
                  clip_logit_weight_init=0.1,
                  text_delta_scale_init=0.1,
+                 visual_prompt_temperature=0.5,
+                 visual_prompt_topk_ratio=0.25,
                  base_loss_weight=0.4,
                  clip_loss_weight=0.4,
                  text_drift_loss_weight=0.02,
@@ -210,6 +213,8 @@ class CLIPSegHeadV2(BaseDecodeHead):
         self.embed_dim = embed_dim
         self.interpolate_mode = interpolate_mode
         self.visual_prompt_mode = visual_prompt_mode
+        self.visual_prompt_temperature = visual_prompt_temperature
+        self.visual_prompt_topk_ratio = visual_prompt_topk_ratio
         self.base_loss_weight = base_loss_weight
         self.clip_loss_weight = clip_loss_weight
         self.text_drift_loss_weight = text_drift_loss_weight
@@ -242,11 +247,26 @@ class CLIPSegHeadV2(BaseDecodeHead):
         self.clip_logit_scale = nn.Parameter(torch.tensor(-1.0))
         self.clip_bias = nn.Parameter(torch.tensor(-10.0))
 
-        # Fused logits = base logits + gamma * clip logits.
-        self.clip_logit_weight = nn.Parameter(
-            torch.tensor(float(clip_logit_weight_init)))
-        self.text_delta_scale = nn.Parameter(
-            torch.tensor(float(text_delta_scale_init)))
+        # Fused logits = base logits + positive_gamma * clip logits.
+        # Positive gates keep the text branch from being canceled by a negative
+        # residual while still allowing the optimizer to shrink its influence.
+        self.clip_logit_weight_raw = nn.Parameter(
+            self._inverse_softplus(float(clip_logit_weight_init)))
+        self.text_delta_scale_raw = nn.Parameter(
+            self._inverse_softplus(float(text_delta_scale_init)))
+
+    @staticmethod
+    def _inverse_softplus(value):
+        value = torch.tensor(float(value)).clamp_min(1e-6)
+        return torch.log(torch.expm1(value))
+
+    @property
+    def clip_logit_weight(self):
+        return F.softplus(self.clip_logit_weight_raw)
+
+    @property
+    def text_delta_scale(self):
+        return F.softplus(self.text_delta_scale_raw)
 
     def extract_fusion_feat(self, inputs):
         """Build the fused multi-scale visual feature."""
@@ -266,7 +286,16 @@ class CLIPSegHeadV2(BaseDecodeHead):
 
     def _make_visual_prompt(self, visual_feat, base_logits):
         """Aggregate projected visual features by per-class activations."""
-        activation = F.softmax(base_logits, dim=1)                # [B, C, H, W]
+        activation = F.softmax(
+            base_logits / self.visual_prompt_temperature, dim=1)  # [B, C, H, W]
+        topk_ratio = self.visual_prompt_topk_ratio
+        if 0 < topk_ratio < 1:
+            B, C, H, W = activation.shape
+            keep = max(1, int(H * W * topk_ratio))
+            flat = activation.flatten(2)
+            threshold = flat.topk(keep, dim=-1).values[..., -1:]
+            mask = (flat >= threshold).view(B, C, H, W)
+            activation = activation * mask
         denom = activation.flatten(2).sum(dim=-1).clamp_min(1e-6)
         visual_prompt = torch.einsum(
             'bkhw,bdhw->bkd', activation, visual_feat)
