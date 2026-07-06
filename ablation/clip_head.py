@@ -197,7 +197,7 @@ def parse_args():
         type=int,
         nargs='+',
         default=[256, 256],
-        help='Input shape used for FLOPs/Params summary.')
+        help='Input shape used for FLOPs/Params summary and eval resize.')
     return parser.parse_args()
 
 
@@ -342,7 +342,7 @@ val_evaluator = dict(
     classwise=True)
 test_evaluator = val_evaluator
 
-model.update(
+model = dict(
     data_preprocessor=data_preprocessor,
     test_cfg=dict(mode='whole'))
 '''
@@ -354,7 +354,8 @@ def write_eval_config(eval_config_path: Path, repo_root: Path,
                       base_config: str, dataset_config: str,
                       image_query_source: str, image_query_head_type: str,
                       split: str, target_metainfo: dict,
-                      variant_name: str, prompt_dataset: str):
+                      variant_name: str, prompt_dataset: str,
+                      eval_shape):
     base_rel = relpath_for_config(repo_root / base_config,
                                   eval_config_path.parent)
     dataset_path = (repo_root / dataset_config).resolve().as_posix()
@@ -390,6 +391,14 @@ _dataset_config = '{dataset_path}'
 with open(_dataset_config, 'r', encoding='utf-8') as _f:
     exec(compile(_f.read(), _dataset_config, 'exec'))
 del _dataset_config, _f
+
+crop_size = {tuple(eval_shape)!r}
+img_scale = crop_size
+for _pipeline_name in ('val_pipeline', 'test_pipeline'):
+    if _pipeline_name in globals():
+        for _step in globals()[_pipeline_name]:
+            if isinstance(_step, dict) and _step.get('type') == 'Resize':
+                _step['scale'] = crop_size
 
 data_preprocessor = dict(
     type='SegDataPreProcessor',
@@ -604,7 +613,8 @@ def run_generalization_tests(args):
             write_eval_config(
                 eval_config, repo_root, base_config, dataset_config,
                 image_query_source, image_query_head_type, target['split'],
-                target['metainfo'], variant_name, args.prompt_dataset)
+                target['metainfo'], variant_name, args.prompt_dataset,
+                args.shape)
 
             command = [
                 args.python,
