@@ -8,31 +8,31 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-
-# 输出目录命名：
-# 训练：{work-dir-root}/{train_dataset}/train/{variant}，例如 kaka/train/v2
-# 总结：{work-dir-root}/{train_dataset}/summary.csv 和 summary.md
-# 测试：{work-dir-root}/{train_dataset}/eval/to_{test_dataset}/{variant}
-# 可视化：{work-dir-root}/{train_dataset}/eval/to_{test_dataset}/{variant}/vis
-#
-# 训练 KAKA：background / boat / free-space -> land / ship / water
-# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head_fix_prompt/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants brg-query-Q4-no-text brg-query-Q5-same-backbone-no-text clip-v2-actprompt --train-dataset kaka --skip-existing
-# 单独跑 headv2 并测试：--skip-existing 跳过已有 best mIoU 的运行
-# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head_fix_prompt/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt --train-dataset kaka --skip-existing
-# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head_fix_prompt/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --variants clip-v2-actprompt --train-dataset kaka --generalization-test --save-vis
 # 单独统计三个消融的参数量和计算量：
 # python tools/analysis_tools/get_flops.py configs-h/vision/attn_ablation_waterseg.py --shape 256 256
 # python tools/analysis_tools/get_flops.py configs-h/vision/attn_clipbackbone_seghead_waterseg.py --shape 256 256
 # python tools/analysis_tools/get_flops.py configs-h/clip/attn_waterseg.py --shape 256 256 --cfg-options model.decode_head.type=CLIPSegHeadV2 model.text_encoder.prompt_category_order="['land','ship','water']"
+#
+# 训练 KAKA：background / boat / free-space -> land / ship / water
+# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head_fix_prompt/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants brg-query-Q4-no-text brg-query-Q5-same-backbone-no-text clip-v2-actprompt --train-dataset kaka --skip-existing
+# 单独刷新 kaka 的训练摘要（不重新训练）
+# python ablation/clip_head_fix_prompt/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --train-dataset kaka --summary-only
+# 单独跑 headv2 并测试：--skip-existing 跳过已有 best mIoU 的运行
+# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head_fix_prompt/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt --train-dataset kaka --skip-existing
+# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head_fix_prompt/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --variants clip-v2-actprompt --train-dataset kaka --generalization-test --save-vis
 
 # 训练 gqy：water / ground / object -> water / land / ship
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head_fix_prompt/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants brg-query-Q4-no-text brg-query-Q5-same-backbone-no-text clip-v2-actprompt --train-dataset gqy --skip-existing
+# 单独刷新 gqy 的训练摘要（不重新训练）
+# python ablation/clip_head_fix_prompt/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --train-dataset gqy --summary-only
 # 单独跑 headv2 并测试
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head_fix_prompt/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt --train-dataset gqy --skip-existing
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head_fix_prompt/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --variants clip-v2-actprompt --train-dataset gqy --generalization-test --save-vis
 #
 # 训练 GBA：object / water / ground -> ship / water / land
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head_fix_prompt/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants brg-query-Q4-no-text brg-query-Q5-same-backbone-no-text clip-v2-actprompt --train-dataset gba --skip-existing
+# 单独刷新 gba 的训练摘要（不重新训练）
+# python ablation/clip_head_fix_prompt/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --train-dataset gba --summary-only
 # 单独跑 headv2 并测试
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head_fix_prompt/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt --train-dataset gba --skip-existing
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head_fix_prompt/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --variants clip-v2-actprompt --train-dataset gba --generalization-test --save-vis
