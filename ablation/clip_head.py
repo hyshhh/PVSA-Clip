@@ -104,33 +104,42 @@ GENERALIZATION_TARGETS = [
             free_space='water')),
 ]
 
-QUERY_VARIANTS = [
-    'brg-query-Q4-no-text',             # 纯视觉 BiFormer，不引入任何文本
-    'brg-query-Q5-same-backbone-no-text',  # 同 CLIP 骨干结构的无文本基线
-    'clip-v2-actprompt',                # 新版：类激活视觉提示 + 文本原型增量
-]
-
-VARIANT_ALIASES = {
-    'brg-query-Q4-no-text': 'q4',
-    'brg-query-Q5-same-backbone-no-text': 'q5',
-    'clip-v2-actprompt': 'v2',
-}
-
-DEFAULT_VARIANTS = [
-    'brg-query-Q4-no-text',
-    'brg-query-Q5-same-backbone-no-text',
-    'clip-v2-actprompt',
-]
-
-VARIANT_NOTES = {
+VARIANT_SPECS = {
     'brg-query-Q4-no-text':
-    '旧无文本基线：EncoderDecoder + BiFormer_standalone + SegformerHead；'
-    '不和 CLIP 分支严格同构。',
+    dict(
+        alias='q4',
+        base_config=VISION_BRG_CONFIG,
+        decode_head_type=None,
+        note='旧无文本基线：EncoderDecoder + BiFormer_standalone + SegformerHead；'
+        '不和 CLIP 分支严格同构。'),
     'brg-query-Q5-same-backbone-no-text':
-    '公平无文本基线：同 CLIP 分支的 BiFormer_fusion_clip 骨干 + SegformerHead。',
+    dict(
+        alias='q5',
+        base_config=VISION_CLIP_BACKBONE_CONFIG,
+        decode_head_type=None,
+        note='公平无文本基线：同 CLIP 分支的 BiFormer_fusion_clip 骨干 + '
+        'SegformerHead。'),
     'clip-v2-actprompt':
-    'CLIPSegHead v2：普通视觉分支 + 类激活视觉提示 + 文本分支辅助监督。',
+    dict(
+        alias='v2',
+        base_config=CLIP_BRG_CONFIG,
+        decode_head_type='CLIPSegHeadV2',
+        note='CLIPSegHead v2：普通视觉分支 + 类激活视觉提示 + 文本分支辅助监督。'),
 }
+
+QUERY_VARIANTS = list(VARIANT_SPECS)
+DEFAULT_VARIANTS = list(VARIANT_SPECS)
+TRAIN_SUMMARY_FIELDS = [
+    'dataset',
+    'mIoU',
+    'IoU_background',
+    'IoU_boat',
+    'IoU_free_space',
+    'FLOPs',
+    'Params',
+    'ablation',
+    'status',
+]
 
 
 def parse_args():
@@ -200,20 +209,20 @@ def parse_args():
     return parser.parse_args()
 
 
-def get_variant(variant_name):
-    """Return (base_config, image_query_source, image_query_head_type)."""
-    if variant_name == 'brg-query-Q4-no-text':
-        return VISION_BRG_CONFIG, 'none', 'none'
-    if variant_name == 'brg-query-Q5-same-backbone-no-text':
-        return VISION_CLIP_BACKBONE_CONFIG, 'none', 'same_backbone_seghead'
-    if variant_name == 'clip-v2-actprompt':
-        return CLIP_BRG_CONFIG, 'class_activation', 'v2'
-    raise ValueError(f'Unknown variant: {variant_name}. '
-                     f'Valid: {QUERY_VARIANTS}')
+def get_variant_spec(variant_name):
+    try:
+        return VARIANT_SPECS[variant_name]
+    except KeyError as exc:
+        raise ValueError(f'Unknown variant: {variant_name}. '
+                         f'Valid: {QUERY_VARIANTS}') from exc
 
 
 def get_variant_display_name(variant_name):
-    return VARIANT_ALIASES.get(variant_name, variant_name)
+    return get_variant_spec(variant_name)['alias']
+
+
+def get_variant_note(variant_name):
+    return get_variant_spec(variant_name)['note']
 
 
 def get_dataset_root(work_dir_root: Path, train_dataset: str):
@@ -226,19 +235,8 @@ def get_work_dir(work_dir_root: Path, variant_name: str, train_dataset: str):
         / get_variant_display_name(variant_name))
 
 
-def decode_head_type_for_variant(variant_name):
-    if variant_name == 'clip-v2-actprompt':
-        return 'CLIPSegHeadV2'
-    if variant_name in (
-            'brg-query-Q4-no-text',
-            'brg-query-Q5-same-backbone-no-text'):
-        return None
-    return None
-
-
-def build_cfg_options(image_query_source, image_query_head_type,
-                      variant_name=None, prompt_dataset='kaka'):
-    decode_head_type = decode_head_type_for_variant(variant_name)
+def build_cfg_options(variant_name, prompt_dataset='kaka'):
+    decode_head_type = get_variant_spec(variant_name)['decode_head_type']
     cfg_dict = {}
     cfg_list = []
     if decode_head_type is not None:
@@ -358,11 +356,9 @@ model = dict(
 
 
 def write_eval_config(eval_config_path: Path, repo_root: Path,
-                      base_config: str, dataset_config: str,
-                      image_query_source: str, image_query_head_type: str,
-                      split: str, target_metainfo: dict,
-                      variant_name: str, prompt_dataset: str,
-                      eval_shape):
+                      base_config: str, dataset_config: str, split: str,
+                      target_metainfo: dict, variant_name: str,
+                      prompt_dataset: str, eval_shape):
     base_rel = relpath_for_config(repo_root / base_config,
                                   eval_config_path.parent)
     dataset_path = (repo_root / dataset_config).resolve().as_posix()
@@ -372,7 +368,7 @@ def write_eval_config(eval_config_path: Path, repo_root: Path,
         '    data_preprocessor=data_preprocessor,',
         '    test_cfg=dict(mode="whole"),',
     ]
-    decode_head_type = decode_head_type_for_variant(variant_name)
+    decode_head_type = get_variant_spec(variant_name)['decode_head_type']
     if decode_head_type is not None:
         prompt_order = PROMPT_CATEGORY_ORDERS[prompt_dataset]
         model_lines.extend([
@@ -561,12 +557,30 @@ def read_previous_summary(path: Path):
     try:
         with path.open('r', newline='', encoding='utf-8') as f:
             return {
-                row.get('run_name', ''): row
+                row.get('ablation') or row.get('run_name') or row.get(
+                    'variant', ''): row
                 for row in csv.DictReader(f)
-                if row.get('run_name')
+                if row.get('ablation') or row.get('run_name')
+                or row.get('variant')
             }
     except OSError:
         return {}
+
+
+def make_train_summary_row(train_dataset: str, variant_name: str,
+                           best_miou: str, train_ious: dict, flops, params,
+                           status: str):
+    return {
+        'dataset': train_dataset,
+        'mIoU': best_miou,
+        'IoU_background': train_ious.get('IoU_background', ''),
+        'IoU_boat': train_ious.get('IoU_boat', ''),
+        'IoU_free_space': train_ious.get('IoU_free_space', ''),
+        'FLOPs': flops,
+        'Params': params,
+        'ablation': get_variant_display_name(variant_name),
+        'status': status,
+    }
 
 
 def run_generalization_tests(args):
@@ -580,12 +594,11 @@ def run_generalization_tests(args):
     summary_rows = []
 
     for variant_name in args.variants:
-        base_config, image_query_source, image_query_head_type = get_variant(
-            variant_name)
-        train_name = args.train_dataset
+        variant_spec = get_variant_spec(variant_name)
+        base_config = variant_spec['base_config']
         variant_alias = get_variant_display_name(variant_name)
         checkpoint = find_checkpoint(
-            get_work_dir(work_dir_root, variant_name, train_name))
+            get_work_dir(work_dir_root, variant_name, args.train_dataset))
 
         for target in GENERALIZATION_TARGETS:
             dataset_config, dataset_path = resolve_dataset_config(
@@ -619,9 +632,8 @@ def run_generalization_tests(args):
             eval_config = eval_config_root / f'{run_name}.py'
             write_eval_config(
                 eval_config, repo_root, base_config, dataset_config,
-                image_query_source, image_query_head_type, target['split'],
-                target['metainfo'], variant_name, args.prompt_dataset,
-                args.shape)
+                target['split'], target['metainfo'], variant_name,
+                args.prompt_dataset, args.shape)
 
             command = [
                 args.python,
@@ -724,23 +736,12 @@ def main():
     summary_rows = []
 
     for variant_name in args.variants:
-        base_config, image_query_source, image_query_head_type = get_variant(
-            variant_name)
+        variant_spec = get_variant_spec(variant_name)
+        base_config = variant_spec['base_config']
         config_path = make_train_config(
             repo_root, work_dir_root, base_config, args.train_dataset)
-        cfg_dict, cfg_list = build_cfg_options(
-            image_query_source, image_query_head_type, variant_name,
-            args.prompt_dataset)
-        if cfg_list:
-            prompt_order = PROMPT_CATEGORY_ORDERS[args.prompt_dataset]
-            cfg_opts_str = (
-                f'train_dataset={args.train_dataset};'
-                f'image_query_source={image_query_source};'
-                f'image_query_head_type={image_query_head_type};'
-                f'prompt_dataset={args.prompt_dataset};'
-                f'prompt_category_order={prompt_order}')
-        else:
-            cfg_opts_str = f'train_dataset={args.train_dataset};no_text_biformer'
+        cfg_dict, cfg_list = build_cfg_options(variant_name,
+                                               args.prompt_dataset)
 
         work_dir = get_work_dir(work_dir_root, variant_name,
                                 args.train_dataset)
@@ -751,46 +752,25 @@ def main():
                 config_path, cfg_dict, args.shape)
         except Exception as exc:
             print(f'Warning: complexity summary unavailable: {exc}')
-            old_row = previous_summary.get(work_dir.name, {})
-            flops = old_row.get('flops') or old_row.get('FLOPs') or 'unavailable'
-            params = old_row.get('params') or old_row.get('Params') or 'unavailable'
+            old_row = previous_summary.get(
+                get_variant_display_name(variant_name), {})
+            flops = old_row.get('FLOPs') or old_row.get('flops') or 'unavailable'
+            params = old_row.get('Params') or old_row.get('params') or 'unavailable'
 
         if args.skip_existing and best_existing is not None:
-            summary_rows.append({
-                'run_name': work_dir.name,
-                'variant': variant_name,
-                'train_dataset': args.train_dataset,
-                'base_config': relpath_for_config(config_path, repo_root),
-                'image_query_source': image_query_source,
-                'image_query_head_type': image_query_head_type,
-                'cfg_options': cfg_opts_str,
-                'flops': flops,
-                'params': params,
-                'best_mIoU': f'{best_existing:.6f}',
-                **train_ious,
-                'status': 'skipped_existing',
-                'note': VARIANT_NOTES.get(variant_name, ''),
-            })
+            summary_rows.append(
+                make_train_summary_row(
+                    args.train_dataset, variant_name, f'{best_existing:.6f}',
+                    train_ious, flops, params, 'skipped_existing'))
             continue
 
         if args.summary_only:
-            summary_rows.append({
-                'run_name': work_dir.name,
-                'variant': variant_name,
-                'train_dataset': args.train_dataset,
-                'base_config': relpath_for_config(config_path, repo_root),
-                'image_query_source': image_query_source,
-                'image_query_head_type': image_query_head_type,
-                'cfg_options': cfg_opts_str,
-                'flops': flops,
-                'params': params,
-                'best_mIoU': '' if best_existing is None
-                else f'{best_existing:.6f}',
-                **train_ious,
-                'status': 'summary_only' if best_existing is not None
-                else 'missing',
-                'note': VARIANT_NOTES.get(variant_name, ''),
-            })
+            summary_rows.append(
+                make_train_summary_row(
+                    args.train_dataset, variant_name,
+                    '' if best_existing is None else f'{best_existing:.6f}',
+                    train_ious, flops, params,
+                    'summary_only' if best_existing is not None else 'missing'))
             continue
 
         command = [
@@ -806,42 +786,21 @@ def main():
 
         print(' '.join(command))
         if args.dry_run:
-            summary_rows.append({
-                'run_name': work_dir.name,
-                'variant': variant_name,
-                'train_dataset': args.train_dataset,
-                'base_config': relpath_for_config(config_path, repo_root),
-                'image_query_source': image_query_source,
-                'image_query_head_type': image_query_head_type,
-                'cfg_options': cfg_opts_str,
-                'flops': flops,
-                'params': params,
-                'best_mIoU': '',
-                **train_ious,
-                'status': 'dry_run',
-                'note': VARIANT_NOTES.get(variant_name, ''),
-            })
+            summary_rows.append(
+                make_train_summary_row(args.train_dataset, variant_name, '',
+                                       train_ious, flops, params, 'dry_run'))
             continue
 
         result = subprocess.run(command, check=False)
         best_miou = parse_best_miou(work_dir)
         train_ious = train_iou_summary(work_dir, args.train_dataset)
-        summary_rows.append({
-            'run_name': work_dir.name,
-            'variant': variant_name,
-            'train_dataset': args.train_dataset,
-            'base_config': relpath_for_config(config_path, repo_root),
-            'image_query_source': image_query_source,
-            'image_query_head_type': image_query_head_type,
-            'cfg_options': cfg_opts_str,
-            'flops': flops,
-            'params': params,
-            'best_mIoU': '' if best_miou is None else f'{best_miou:.6f}',
-            **train_ious,
-            'status':
-            'ok' if result.returncode == 0 else f'failed({result.returncode})',
-            'note': VARIANT_NOTES.get(variant_name, ''),
-        })
+        summary_rows.append(
+            make_train_summary_row(
+                args.train_dataset, variant_name,
+                '' if best_miou is None else f'{best_miou:.6f}', train_ious,
+                flops, params,
+                'ok' if result.returncode == 0
+                else f'failed({result.returncode})'))
         write_summary(dataset_root / 'summary.csv', summary_rows)
         write_markdown_summary(dataset_root / 'summary.md', summary_rows)
 
@@ -851,61 +810,33 @@ def main():
 
 def write_summary(path: Path, rows):
     with path.open('w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=[
-                'dataset', 'mIoU', 'IoU_background', 'IoU_boat',
-                'IoU_free_space', 'FLOPs', 'Params', 'ablation', 'status',
-                'run_name', 'variant', 'base_config', 'cfg_options', 'note'
-            ])
+        writer = csv.DictWriter(f, fieldnames=TRAIN_SUMMARY_FIELDS)
         writer.writeheader()
-        for row in rows:
-            writer.writerow({
-                'dataset': row.get('train_dataset', ''),
-                'mIoU': row.get('best_mIoU', ''),
-                'IoU_background': row.get('IoU_background', ''),
-                'IoU_boat': row.get('IoU_boat', ''),
-                'IoU_free_space': row.get('IoU_free_space', ''),
-                'FLOPs': row.get('flops', ''),
-                'Params': row.get('params', ''),
-                'ablation': get_variant_display_name(
-                    row.get('variant', row.get('run_name', ''))),
-                'status': row.get('status', ''),
-                'run_name': row.get('run_name', ''),
-                'variant': row.get('variant', ''),
-                'base_config': row.get('base_config', ''),
-                'cfg_options': row.get('cfg_options', ''),
-                'note': row.get('note', ''),
-            })
+        writer.writerows(rows)
 
 
 def write_markdown_summary(path: Path, rows):
-    headers = [
-        'dataset', 'mIoU', 'IoU_background', 'IoU_boat',
-        'IoU_free_space', 'FLOPs', 'Params', 'ablation', 'status'
-    ]
-    lines = ['# Train Summary', '', '| ' + ' | '.join(headers) + ' |',
-             '| ' + ' | '.join(['---'] * len(headers)) + ' |']
+    lines = ['# Train Summary', '', '| ' + ' | '.join(TRAIN_SUMMARY_FIELDS) +
+             ' |', '| ' + ' | '.join(['---'] * len(TRAIN_SUMMARY_FIELDS)) +
+             ' |']
 
     for row in rows:
-        lines.append('| ' + ' | '.join([
-            row.get('train_dataset', ''),
-            row.get('best_mIoU', ''),
-            row.get('IoU_background', ''),
-            row.get('IoU_boat', ''),
-            row.get('IoU_free_space', ''),
-            row.get('flops', ''),
-            row.get('params', ''),
-            get_variant_display_name(row.get('variant', row.get('run_name', ''))),
-            row.get('status', ''),
-        ]) + ' |')
+        lines.append('| ' + ' | '.join(
+            [str(row.get(field, '')) for field in TRAIN_SUMMARY_FIELDS]) +
+                     ' |')
 
     lines.extend(['', '## 备注', ''])
+    seen = set()
     for row in rows:
-        note = row.get('note', '')
-        if note:
-            lines.append(
-                f'- `{get_variant_display_name(row.get("variant", ""))}`：{note}')
+        ablation = row.get('ablation', '')
+        if not ablation or ablation in seen:
+            continue
+        seen.add(ablation)
+        for variant_name in QUERY_VARIANTS:
+            if get_variant_display_name(variant_name) != ablation:
+                continue
+            lines.append(f'- `{ablation}`：{get_variant_note(variant_name)}')
+            break
 
     path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
 
