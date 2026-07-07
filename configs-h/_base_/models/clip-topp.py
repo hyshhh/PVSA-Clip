@@ -26,13 +26,14 @@ if prompt_dataset not in prompt_category_orders:
         f'prompt_dataset must be one of {tuple(prompt_category_orders)}')
 prompt_category_order = globals().get(
     'prompt_category_order', prompt_category_orders[prompt_dataset])
+clip_embed_dim = globals().get('clip_embed_dim', 512)
 
 clip_decode_head_v2 = dict(
     type='CLIPSegHeadV2',
     in_channels=[64, 128, 256, 512],
     in_index=[0, 1, 2, 3],
     channels=256,
-    embed_dim=512,
+    embed_dim=clip_embed_dim,
     visual_prompt_mode='class_activation',
     clip_logit_weight_init=0.3,
     text_delta_scale_init=0.2,
@@ -114,7 +115,7 @@ model = dict(
     backbone=backbone,
     decode_head=clip_decode_head_v2 if use_clip_decode_head else seg_decode_head,
     text_encoder=dict(
-        embed_dim=512,
+        embed_dim=clip_embed_dim,
         num_categories=3,
         prompts_per_category=10,
         prompt_bank_path='tools/prompt_bank_water.pt',
@@ -123,7 +124,7 @@ model = dict(
         reprta_ffn_type='swiglu',         # 'swiglu'(门控) | 'gelu'(普通 FFN)
         reprta_zero_init=True),           # w3 是否零初始化（保护 CLIP 原型）
     text_refiner=(
-        dict(in_dim=512, hidden_mult=4)
+        dict(in_dim=clip_embed_dim, hidden_mult=4)
         if use_backbone_text_injection else None),
     train_cfg=dict(),
     test_cfg=dict(mode='whole')

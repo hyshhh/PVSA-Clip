@@ -12,6 +12,7 @@ from pathlib import Path
 # python tools/analysis_tools/get_flops.py configs-h/vision/attn_ablation_waterseg.py --shape 256 256
 # python tools/analysis_tools/get_flops.py configs-h/vision/attn_clipbackbone_seghead_waterseg.py --shape 256 256
 # python tools/analysis_tools/get_flops.py configs-h/clip/attn_waterseg.py --shape 256 256 --cfg-options model.decode_head.type=CLIPSegHeadV2 model.text_encoder.prompt_category_order="['land','ship','water']"
+# python tools/analysis_tools/get_flops.py configs-h/clip/attn_waterseg.py --shape 256 256 --cfg-options clip_embed_dim=256 model.decode_head.type=CLIPSegHeadV2 model.text_encoder.prompt_category_order="['land','ship','water']"
 #
 # 训练 KAKA：background / boat / free-space -> land / ship / water
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head_fix_prompt/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants brg-query-Q4-no-text brg-query-Q5-same-backbone-no-text clip-v2-actprompt --train-dataset kaka --skip-existing
@@ -19,6 +20,8 @@ from pathlib import Path
 # python ablation/clip_head_fix_prompt/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --train-dataset kaka --summary-only
 # 单独跑 headv2 并测试：--skip-existing 跳过已有 best mIoU 的运行
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head_fix_prompt/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt --train-dataset kaka --skip-existing
+# 单独跑 headv2-256：TextEncoder 会自动把 512 维 prompt bank 映射到 256 维工作空间
+# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head_fix_prompt/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt-d256 --train-dataset kaka --skip-existing
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head_fix_prompt/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --variants clip-v2-actprompt --train-dataset kaka --generalization-test --save-vis
 
 # 训练 gqy：water / ground / object -> water / land / ship
@@ -27,6 +30,8 @@ from pathlib import Path
 # python ablation/clip_head_fix_prompt/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --train-dataset gqy --summary-only
 # 单独跑 headv2 并测试
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head_fix_prompt/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt --train-dataset gqy --skip-existing
+# 单独跑 headv2-256
+# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head_fix_prompt/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt-d256 --train-dataset gqy --skip-existing
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head_fix_prompt/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --variants clip-v2-actprompt --train-dataset gqy --generalization-test --save-vis
 #
 # 训练 GBA：object / water / ground -> ship / water / land
@@ -35,6 +40,8 @@ from pathlib import Path
 # python ablation/clip_head_fix_prompt/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --train-dataset gba --summary-only
 # 单独跑 headv2 并测试
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head_fix_prompt/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt --train-dataset gba --skip-existing
+# 单独跑 headv2-256
+# CUDA_VISIBLE_DEVICES=0 python ablation/clip_head_fix_prompt/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --shape 256 256 --variants clip-v2-actprompt-d256 --train-dataset gba --skip-existing
 # CUDA_VISIBLE_DEVICES=0 python ablation/clip_head_fix_prompt/clip_head.py --work-dir-root ablation/clip_head_fix_prompt --variants clip-v2-actprompt --train-dataset gba --generalization-test --save-vis
 CLIP_BRG_CONFIG = 'configs-h/clip/attn_waterseg.py'
 VISION_BRG_CONFIG = 'configs-h/vision/attn_ablation_waterseg.py'
@@ -130,11 +137,24 @@ VARIANT_SPECS = {
         alias='v2',
         base_config=CLIP_BRG_CONFIG,
         decode_head_type='CLIPSegHeadV2',
+        clip_embed_dim=None,
         note='CLIPSegHead v2：普通视觉分支 + 类激活视觉提示 + 文本分支辅助监督。'),
+    'clip-v2-actprompt-d256':
+    dict(
+        alias='v2-d256',
+        base_config=CLIP_BRG_CONFIG,
+        decode_head_type='CLIPSegHeadV2',
+        clip_embed_dim=256,
+        note='CLIPSegHead v2-256：将视觉提示和文本工作维统一降到 256；'
+        'TextEncoder 自动完成 512/256 prompt bank 映射。'),
 }
 
 QUERY_VARIANTS = list(VARIANT_SPECS)
-DEFAULT_VARIANTS = list(VARIANT_SPECS)
+DEFAULT_VARIANTS = [
+    'brg-query-Q4-no-text',
+    'brg-query-Q5-same-backbone-no-text',
+    'clip-v2-actprompt',
+]
 
 
 def parse_args():
@@ -248,13 +268,17 @@ def get_work_dir(work_dir_root: Path, variant_name: str, train_dataset: str):
 
 
 def build_cfg_options(variant_name, prompt_dataset='kaka'):
-    decode_head_type = get_variant_spec(variant_name)['decode_head_type']
+    variant_spec = get_variant_spec(variant_name)
+    decode_head_type = variant_spec['decode_head_type']
     cfg_list = []
     if decode_head_type is not None:
         cfg_list.append(f'model.decode_head.type={decode_head_type}')
         prompt_order = PROMPT_CATEGORY_ORDERS[prompt_dataset]
         cfg_list.append(
             f'model.text_encoder.prompt_category_order={prompt_order!r}')
+    clip_embed_dim = variant_spec.get('clip_embed_dim')
+    if clip_embed_dim is not None:
+        cfg_list.append(f'clip_embed_dim={clip_embed_dim}')
 
     return cfg_list
 
@@ -377,14 +401,29 @@ def write_eval_config(eval_config_path: Path, repo_root: Path,
         '    data_preprocessor=data_preprocessor,',
         '    test_cfg=dict(mode="whole"),',
     ]
-    decode_head_type = get_variant_spec(variant_name)['decode_head_type']
+    variant_spec = get_variant_spec(variant_name)
+    decode_head_type = variant_spec['decode_head_type']
+    clip_embed_dim = variant_spec.get('clip_embed_dim')
+    extra_lines = []
+    if clip_embed_dim is not None:
+        extra_lines.append(f'clip_embed_dim = {clip_embed_dim!r}')
     if decode_head_type is not None:
         prompt_order = PROMPT_CATEGORY_ORDERS[prompt_dataset]
         model_lines.extend([
             '    decode_head=dict(',
-            f'        type="{decode_head_type}"),',
+            f'        type="{decode_head_type}",',
+        ])
+        if clip_embed_dim is not None:
+            model_lines.append(f'        embed_dim={clip_embed_dim!r},')
+        model_lines.extend([
+            '    ),',
             '    text_encoder=dict(',
-            f'        prompt_category_order={prompt_order!r}),',
+            f'        prompt_category_order={prompt_order!r},',
+        ])
+        if clip_embed_dim is not None:
+            model_lines.append(f'        embed_dim={clip_embed_dim!r},')
+        model_lines.extend([
+            '    ),',
         ])
     model_lines.append(')')
 
@@ -438,6 +477,7 @@ test_evaluator = val_evaluator
 default_hooks = globals().get('default_hooks', {{}})
 default_hooks.update(dict(visualization=dict(type='SegVisualizationHook')))
 
+{chr(10).join(extra_lines)}
 {chr(10).join(model_lines)}
 {chr(10).join(split_lines)}
 '''

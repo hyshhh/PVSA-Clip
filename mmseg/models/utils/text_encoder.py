@@ -57,10 +57,37 @@ class TextEncoder(nn.Module):
 
         self._fused = False
 
+        # Prompt bank may come from a different CLIP/text width (e.g. 512)
+        # than the working width used by the head ablation (e.g. 256). When
+        # they differ, build a learnable mapping automatically after loading.
+        self.prompt_bank_dim = embed_dim
+        self.prompt_proj_norm = None
+        self.prompt_proj = None
+
         # Precomputed prompt embeddings buffer (filled at init or loaded)
         self.register_buffer(
             'prompt_embeddings',
             torch.zeros(num_categories, prompts_per_category, embed_dim))
+
+    def _set_prompt_mapping(self, source_dim):
+        """Build an automatic prompt-bank width mapper when dimensions differ."""
+        self.prompt_bank_dim = source_dim
+        if source_dim == self.embed_dim:
+            self.prompt_proj_norm = None
+            self.prompt_proj = None
+            return
+
+        self.prompt_proj_norm = nn.LayerNorm(source_dim)
+        self.prompt_proj = nn.Linear(source_dim, self.embed_dim)
+        nn.init.xavier_uniform_(self.prompt_proj.weight)
+        nn.init.zeros_(self.prompt_proj.bias)
+
+    def _project_prompt_embeddings(self, prompts):
+        """Map raw prompt-bank embeddings to the working text width."""
+        if self.prompt_proj is None:
+            return prompts
+        prompts = self.prompt_proj(self.prompt_proj_norm(prompts))
+        return F.normalize(prompts, dim=-1, p=2)
 
     def _reprta_refine(self, pooled):
         """RepRTA 残差精炼，受 use_reprta/reprta_ffn_type 控制；fuse() 后整体跳过。
@@ -111,10 +138,12 @@ class TextEncoder(nn.Module):
             embeddings = embeddings[order]
 
         C, K, D = embeddings.shape
+        self._set_prompt_mapping(D)
+
         # Auto-resize query if category count differs
         if C != self.attn_pool_query.shape[0]:
             self.attn_pool_query = nn.Parameter(
-                torch.randn(C, 1, D) * 0.02)
+                torch.randn(C, 1, self.embed_dim) * 0.02)
             self.num_categories = C
         self.prompts_per_category = K
         self.register_buffer('prompt_embeddings', embeddings)
@@ -147,10 +176,10 @@ class TextEncoder(nn.Module):
         Returns:
             category_prototypes: [num_categories, embed_dim]
         """
-        # prompt_embeddings: [C, K, D]
-        C, K, D = self.prompt_embeddings.shape
+        prompts = self._project_prompt_embeddings(self.prompt_embeddings)
+        C, K, D = prompts.shape
 
-        prompts = self._maybe_augment_prompts(self.prompt_embeddings)
+        prompts = self._maybe_augment_prompts(prompts)
 
         # Attention pooling across prompts within each category
         q = self.attn_pool_query.expand(C, -1, -1)  # [C, 1, D]
@@ -179,7 +208,7 @@ class TextEncoder(nn.Module):
                 This is the offline CLIP-encoded prompt bank, never re-encoded
                 at runtime. backbone injects reshape(-1, D) = [C*K, D] of it.
         """
-        return self.prompt_embeddings
+        return self._project_prompt_embeddings(self.prompt_embeddings)
 
     def adapt_with_visual_prompt(self, visual_prompt, delta_scale=0.1):
         """Use per-class visual prompts to lightly adapt text prototypes.
