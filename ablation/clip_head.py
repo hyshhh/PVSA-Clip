@@ -326,6 +326,14 @@ with open(_dataset_config, 'r', encoding='utf-8') as _f:
     exec(compile(_f.read(), _dataset_config, 'exec'))
 del _dataset_config, _f
 
+_train_dataset = train_dataloader['dataset']
+_val_dataset = val_dataloader['dataset']
+_test_dataset = test_dataloader['dataset']
+train_dataloader = dict(dataset=_train_dataset)
+val_dataloader = dict(dataset=_val_dataset)
+test_dataloader = dict(dataset=_test_dataset)
+del _train_dataset, _val_dataset, _test_dataset
+
 data_preprocessor = dict(
     type='SegDataPreProcessor',
     mean=[123.675, 116.28, 103.53],
