@@ -2,7 +2,6 @@
 import argparse
 import csv
 import json
-import math
 import os
 import re
 import shutil
@@ -686,6 +685,16 @@ def class_iou(metrics, class_name):
     return ''
 
 
+def train_iou_summary(work_dir: Path, train_dataset: str):
+    metrics = parse_test_metrics(work_dir)
+    order = PROMPT_CATEGORY_ORDERS[train_dataset]
+    values = {}
+    for canonical, class_name in zip(
+            ('background', 'boat', 'free_space'), order):
+        values[f'IoU_{canonical}'] = class_iou(metrics, class_name)
+    return values
+
+
 def write_generalization_summary(path: Path, rows):
     with path.open('w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(
@@ -736,14 +745,15 @@ def main():
         work_dir = get_work_dir(work_dir_root, variant_name,
                                 args.train_dataset)
         best_existing = parse_best_miou(work_dir)
+        train_ious = train_iou_summary(work_dir, args.train_dataset)
         try:
             flops, params = compute_model_complexity(
                 config_path, cfg_dict, args.shape)
         except Exception as exc:
             print(f'Warning: complexity summary unavailable: {exc}')
             old_row = previous_summary.get(work_dir.name, {})
-            flops = old_row.get('flops') or 'unavailable'
-            params = old_row.get('params') or 'unavailable'
+            flops = old_row.get('flops') or old_row.get('FLOPs') or 'unavailable'
+            params = old_row.get('params') or old_row.get('Params') or 'unavailable'
 
         if args.skip_existing and best_existing is not None:
             summary_rows.append({
@@ -757,6 +767,7 @@ def main():
                 'flops': flops,
                 'params': params,
                 'best_mIoU': f'{best_existing:.6f}',
+                **train_ious,
                 'status': 'skipped_existing',
                 'note': VARIANT_NOTES.get(variant_name, ''),
             })
@@ -775,6 +786,7 @@ def main():
                 'params': params,
                 'best_mIoU': '' if best_existing is None
                 else f'{best_existing:.6f}',
+                **train_ious,
                 'status': 'summary_only' if best_existing is not None
                 else 'missing',
                 'note': VARIANT_NOTES.get(variant_name, ''),
@@ -805,6 +817,7 @@ def main():
                 'flops': flops,
                 'params': params,
                 'best_mIoU': '',
+                **train_ious,
                 'status': 'dry_run',
                 'note': VARIANT_NOTES.get(variant_name, ''),
             })
@@ -812,6 +825,7 @@ def main():
 
         result = subprocess.run(command, check=False)
         best_miou = parse_best_miou(work_dir)
+        train_ious = train_iou_summary(work_dir, args.train_dataset)
         summary_rows.append({
             'run_name': work_dir.name,
             'variant': variant_name,
@@ -823,6 +837,7 @@ def main():
             'flops': flops,
             'params': params,
             'best_mIoU': '' if best_miou is None else f'{best_miou:.6f}',
+            **train_ious,
             'status':
             'ok' if result.returncode == 0 else f'failed({result.returncode})',
             'note': VARIANT_NOTES.get(variant_name, ''),
@@ -839,109 +854,58 @@ def write_summary(path: Path, rows):
         writer = csv.DictWriter(
             f,
             fieldnames=[
-                'run_name', 'variant', 'train_dataset', 'base_config',
-                'image_query_source', 'image_query_head_type', 'cfg_options',
-                'flops', 'params', 'best_mIoU', 'status', 'note'
+                'dataset', 'mIoU', 'IoU_background', 'IoU_boat',
+                'IoU_free_space', 'FLOPs', 'Params', 'ablation', 'status',
+                'run_name', 'variant', 'base_config', 'cfg_options', 'note'
             ])
         writer.writeheader()
-        writer.writerows(rows)
-
-
-def parse_size_to_number(value):
-    if value in (None, ''):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    match = re.match(r'^\s*([0-9.]+)\s*([KMGTP]?)\s*$', str(value))
-    if not match:
-        return None
-    number = float(match.group(1))
-    scale = match.group(2)
-    multiplier = {
-        '': 1,
-        'K': 1e3,
-        'M': 1e6,
-        'G': 1e9,
-        'T': 1e12,
-        'P': 1e15,
-    }[scale]
-    return number * multiplier
-
-
-def parse_float(value):
-    try:
-        if value in (None, ''):
-            return None
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def fmt_delta(value, suffix=''):
-    if value is None:
-        return ''
-    sign = '+' if value >= 0 else ''
-    return f'{sign}{value:.3f}{suffix}'
-
-
-def find_baseline(rows, variant):
-    for row in rows:
-        if row.get('variant') == variant and parse_float(row.get('best_mIoU')) is not None:
-            return row
-    return None
+        for row in rows:
+            writer.writerow({
+                'dataset': row.get('train_dataset', ''),
+                'mIoU': row.get('best_mIoU', ''),
+                'IoU_background': row.get('IoU_background', ''),
+                'IoU_boat': row.get('IoU_boat', ''),
+                'IoU_free_space': row.get('IoU_free_space', ''),
+                'FLOPs': row.get('flops', ''),
+                'Params': row.get('params', ''),
+                'ablation': get_variant_display_name(
+                    row.get('variant', row.get('run_name', ''))),
+                'status': row.get('status', ''),
+                'run_name': row.get('run_name', ''),
+                'variant': row.get('variant', ''),
+                'base_config': row.get('base_config', ''),
+                'cfg_options': row.get('cfg_options', ''),
+                'note': row.get('note', ''),
+            })
 
 
 def write_markdown_summary(path: Path, rows):
-    q4 = find_baseline(rows, 'brg-query-Q4-no-text')
-    q5 = find_baseline(rows, 'brg-query-Q5-same-backbone-no-text')
-    strict_baseline = q5 or q4
-    loose_baseline = q4
-
     headers = [
-        '变体', '数据集', 'mIoU', '相对同构基线', '相对旧 Q4',
-        '参数量', '参数差', '每百万参数收益', '状态'
+        'dataset', 'mIoU', 'IoU_background', 'IoU_boat',
+        'IoU_free_space', 'FLOPs', 'Params', 'ablation', 'status'
     ]
-    lines = ['# CLIP Head 消融汇总', '', '| ' + ' | '.join(headers) + ' |',
+    lines = ['# Train Summary', '', '| ' + ' | '.join(headers) + ' |',
              '| ' + ' | '.join(['---'] * len(headers)) + ' |']
 
     for row in rows:
-        miou = parse_float(row.get('best_mIoU'))
-        params = parse_size_to_number(row.get('params'))
-        strict_miou = parse_float(strict_baseline.get('best_mIoU')) if strict_baseline else None
-        loose_miou = parse_float(loose_baseline.get('best_mIoU')) if loose_baseline else None
-        strict_params = parse_size_to_number(strict_baseline.get('params')) if strict_baseline else None
-
-        delta_strict = miou - strict_miou if miou is not None and strict_miou is not None else None
-        delta_loose = miou - loose_miou if miou is not None and loose_miou is not None else None
-        delta_params = params - strict_params if params is not None and strict_params is not None else None
-        if delta_strict is not None and delta_params not in (None, 0):
-            gain_per_m = delta_strict / (delta_params / 1e6)
-            if not math.isfinite(gain_per_m):
-                gain_per_m = None
-        else:
-            gain_per_m = None
-
         lines.append('| ' + ' | '.join([
-            row.get('variant') or row.get('run_name', ''),
             row.get('train_dataset', ''),
-            '' if miou is None else f'{miou:.3f}',
-            fmt_delta(delta_strict),
-            fmt_delta(delta_loose),
+            row.get('best_mIoU', ''),
+            row.get('IoU_background', ''),
+            row.get('IoU_boat', ''),
+            row.get('IoU_free_space', ''),
+            row.get('flops', ''),
             row.get('params', ''),
-            '' if delta_params is None else f'{delta_params / 1e6:+.3f}M',
-            '' if gain_per_m is None else f'{gain_per_m:+.3f}',
+            get_variant_display_name(row.get('variant', row.get('run_name', ''))),
             row.get('status', ''),
         ]) + ' |')
 
     lines.extend(['', '## 备注', ''])
-    if q5 is None:
-        lines.append(
-            '- 当前没有 `brg-query-Q5-same-backbone-no-text` 结果；'
-            '表中的“相对同构基线”暂时退回旧 `Q4`，它与 CLIP 分支不是严格同构。')
     for row in rows:
         note = row.get('note', '')
         if note:
-            lines.append(f'- `{row.get("variant")}`：{note}')
+            lines.append(
+                f'- `{get_variant_display_name(row.get("variant", ""))}`：{note}')
 
     path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
 
