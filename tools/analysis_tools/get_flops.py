@@ -1,5 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import argparse
+import os.path as osp
+import sys
 import tempfile
 from pathlib import Path
 
@@ -7,11 +9,15 @@ import torch
 from mmengine import Config, DictAction
 from mmengine.logging import MMLogger
 from mmengine.model import revert_sync_batchnorm
-from mmengine.registry import init_default_scope
+
+PROJECT_ROOT = osp.abspath(osp.join(osp.dirname(__file__), '..', '..'))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from mmseg.models import BaseSegmentor
 from mmseg.registry import MODELS
 from mmseg.structures import SegDataSample
+from mmseg.utils import register_all_modules
 
 try:
     from mmengine.analysis import get_model_complexity_info
@@ -53,10 +59,12 @@ def inference(args: argparse.Namespace, logger: MMLogger) -> dict:
     cfg: Config = Config.fromfile(config_name)
     cfg.work_dir = tempfile.TemporaryDirectory().name
     cfg.log_level = 'WARN'
+    if cfg.get('default_scope', None) is None:
+        cfg.default_scope = 'mmseg'
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
 
-    init_default_scope(cfg.get('scope', 'mmseg'))
+    register_all_modules(init_default_scope=True)
 
     if len(args.shape) == 1:
         input_shape = (3, args.shape[0], args.shape[0])
