@@ -41,6 +41,9 @@ work_dirs/
 # 消融脚本结果（保留 ablation/*.py 脚本，忽略训练跑出来的结果子目录）
 ablation/*/
 !ablation/run_*.py
+!ablation/clip_head_fix_prompt/
+ablation/clip_head_fix_prompt/*
+!ablation/clip_head_fix_prompt/clip_head.py
 
 # 模型权重 / 大文件
 *.pt
