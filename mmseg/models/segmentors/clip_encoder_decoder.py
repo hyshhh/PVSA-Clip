@@ -210,6 +210,8 @@ class CLIPEncoderDecoder(EncoderDecoder):
         CLIPSegHeadV2 keeps image-conditioned visual prompts at runtime, so
         the decode head is intentionally not fused into a fixed Conv2d.
         """
+        # 先把 TextEncoder 的 prompt 投影预算入 buffer，使推理零投影开销。
+        self.text_encoder.freeze_for_deployment()
         if self.use_backbone_text_injection:
             with torch.no_grad():
                 if self.text_refiner is not None:

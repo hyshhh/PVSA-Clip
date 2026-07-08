@@ -83,6 +83,10 @@ def inference(args: argparse.Namespace, logger: MMLogger) -> dict:
     if torch.cuda.is_available():
         model.cuda()
     model = revert_sync_batchnorm(model)
+    # 让 FLOPs 反映推理部署态：把 TextEncoder 的 prompt 投影预算入 buffer、
+    # 跳过 prompt_proj / prompt_proj_norm，统计折叠后的计算量。仅 CLIP 模型有此方法。
+    if hasattr(model, 'fuse_for_deployment'):
+        model.fuse_for_deployment()
     result['ori_shape'] = input_shape[-2:]
     result['pad_shape'] = input_shape[-2:]
     result['img_shape'] = input_shape[-2:]

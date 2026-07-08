@@ -63,6 +63,9 @@ class TextEncoder(nn.Module):
         self.prompt_bank_dim = embed_dim
         self.prompt_proj_norm = None
         self.prompt_proj = None
+        # 推理部署折叠标记：freeze_for_deployment 后置 True，使投影预算入
+        # 缓冲、forward 跳过 prompt_proj / prompt_proj_norm。
+        self._frozen = False
 
         # Precomputed prompt embeddings buffer (filled at init or loaded)
         self.register_buffer(
@@ -84,11 +87,10 @@ class TextEncoder(nn.Module):
 
     def _project_prompt_embeddings(self, prompts):
         """Map raw prompt-bank embeddings to the working text width."""
-        if self.prompt_proj is None:
+        if self._frozen or self.prompt_proj is None:
             return prompts
         prompts = self.prompt_proj(self.prompt_proj_norm(prompts))
         return F.normalize(prompts, dim=-1, p=2)
-
     def _reprta_refine(self, pooled):
         """RepRTA 残差精炼，受 use_reprta/reprta_ffn_type 控制；fuse() 后整体跳过。
 
@@ -237,3 +239,31 @@ class TextEncoder(nn.Module):
         """Fuse RepRTA for deployment. After fusion, forward() skips RepRTA
         and returns attention-pooled embeddings directly."""
         self._fused = True
+
+    @torch.no_grad()
+    def freeze_for_deployment(self):
+        """把 prompt 投影预算入 buffer，推理后跳过投影层。
+
+        prompt_bank_path 的原始文本（典型 512 维）与工作维度不一致时，
+        `forward` 每次都要经 ``prompt_proj_norm + prompt_proj + L2-norm``
+        投影到工作维度；而 prompt bank 与图像无关、可离线算一次。
+        本方法把该投影的结果固化为新的 ``prompt_embeddings`` buffer（工作
+        维度），并将 ``prompt_proj`` / ``prompt_proj_norm`` 释放，使得后续
+        ``forward`` 与 ``prompt_bank_tensor`` 直接取缓存、零投影开销。
+        """
+        if self._frozen:
+            return self
+        if self.prompt_proj is None:
+            # 源维度 == 工作维度，本就没有投影层，仅标冻结。
+            self._frozen = True
+            return self
+
+        projected = self.prompt_proj(self.prompt_proj_norm(self.prompt_embeddings))
+        projected = F.normalize(projected, dim=-1, p=2)
+        # 用投影后的工作维度张量替换原 buffer，使后续路径视为“源即工作维度”。
+        self.register_buffer('prompt_embeddings', projected)
+        self.prompt_proj_norm = None
+        self.prompt_proj = None
+        self.prompt_bank_dim = self.embed_dim
+        self._frozen = True
+        return self
