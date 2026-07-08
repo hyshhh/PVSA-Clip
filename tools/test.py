@@ -11,7 +11,7 @@ if PROJECT_ROOT not in sys.path:
 from mmengine.config import Config, DictAction
 from mmengine.runner import Runner
 
-from mmseg.utils import register_all_modules
+from mmseg.utils import register_all_modules, sync_clip_embed_dim
 
 
 # TODO: support fuse_conv_bn, visualization, and format_only
@@ -98,6 +98,9 @@ def main():
     cfg.launcher = args.launcher
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
+    # 让 `--cfg-options clip_embed_dim=...` 真正生效：把顶层标量同步
+    # 回写到 model 中被 exec 固化的三处维度。详见 mmseg.utils.clip_dim。
+    sync_clip_embed_dim(cfg)
 
     # work_dir is determined in this priority: CLI > segment in file > filename
     if args.work_dir is not None:

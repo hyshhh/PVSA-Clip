@@ -137,8 +137,9 @@ VARIANT_SPECS = {
         alias='v2',
         base_config=CLIP_BRG_CONFIG,
         decode_head_type='CLIPSegHeadV2',
-        clip_embed_dim=None,
-        note='CLIPSegHead v2：普通视觉分支 + 类激活视觉提示 + 文本分支辅助监督。'),
+        clip_embed_dim=512,
+        note='CLIPSegHead v2：普通视觉分支 + 类激活视觉提示 + 文本分支辅助监督。'
+        '显式锁定 512 维（覆盖 base 默认），与 d256 构成维度对照。'),
     'clip-v2-actprompt-d256':
     dict(
         alias='v2-d256',
@@ -412,19 +413,14 @@ def write_eval_config(eval_config_path: Path, repo_root: Path,
         model_lines.extend([
             '    decode_head=dict(',
             f'        type="{decode_head_type}",',
-        ])
-        if clip_embed_dim is not None:
-            model_lines.append(f'        embed_dim={clip_embed_dim!r},')
-        model_lines.extend([
             '    ),',
             '    text_encoder=dict(',
             f'        prompt_category_order={prompt_order!r},',
-        ])
-        if clip_embed_dim is not None:
-            model_lines.append(f'        embed_dim={clip_embed_dim!r},')
-        model_lines.extend([
             '    ),',
         ])
+        # 维度不由这里手写，改由顶层 `clip_embed_dim` 一处声明，
+        # 经 tools/test.py 的 sync_clip_embed_dim 同步回填到
+        # decode_head.embed_dim / text_encoder.embed_dim / text_refiner.in_dim。
     model_lines.append(')')
 
     split_lines = []

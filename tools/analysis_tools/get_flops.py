@@ -17,7 +17,7 @@ if PROJECT_ROOT not in sys.path:
 from mmseg.models import BaseSegmentor
 from mmseg.registry import MODELS
 from mmseg.structures import SegDataSample
-from mmseg.utils import register_all_modules
+from mmseg.utils import register_all_modules, sync_clip_embed_dim
 
 try:
     from mmengine.analysis import get_model_complexity_info
@@ -63,6 +63,9 @@ def inference(args: argparse.Namespace, logger: MMLogger) -> dict:
         cfg.default_scope = 'mmseg'
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
+    # 让 `--cfg-options clip_embed_dim=...` 真正生效：把顶层标量同步
+    # 回写到 model 中被 exec 固化的三处维度。详见 mmseg.utils.clip_dim。
+    sync_clip_embed_dim(cfg)
 
     register_all_modules(init_default_scope=True)
 

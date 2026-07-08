@@ -11,6 +11,7 @@ from .class_names import (ade_classes, ade_palette, bdd100k_classes,
                           vaihingen_palette, voc_classes, voc_palette)
 # yapf: enable
 from .collect_env import collect_env
+from .clip_dim import sync_clip_embed_dim
 from .get_templates import get_predefined_templates
 from .io import datafrombytes
 from .misc import add_prefix, stack_batch
@@ -33,6 +34,7 @@ __all__ = [
     'register_all_modules',
     'stack_batch',
     'add_prefix',
+    'sync_clip_embed_dim',
     'ConfigType',
     'OptConfigType',
     'MultiConfig',

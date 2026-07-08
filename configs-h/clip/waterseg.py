@@ -8,6 +8,10 @@ _base_ = [
 import os as _os
 
 attention_type = 'topp'
+# CLIP 对比维度：512 用原生 CLIP 文本宽度，256 为轻量消融。
+# 必须在下方 exec(clip-topp.py) 之前生效，该文件用
+# globals().get('clip_embed_dim', 512) 读取并固化进 model 三处。
+clip_embed_dim = 256
 _config_dir = (
     _os.path.dirname(__file__)
     if '__file__' in globals() else '{{ fileDirname }}')
