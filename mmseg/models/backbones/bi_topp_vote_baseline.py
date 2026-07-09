@@ -604,9 +604,8 @@ class VTFormer(nn.Module):
 
         self.trans_downsample_layers = nn.ModuleList()
         self.cnn_downsample_layers = nn.ModuleList()
-        self.FAM = nn.ModuleList()
-
-
+        # use_fam=False 时不创建 FAM，参数量/官方复杂度统计会真实下降
+        self.FAM = nn.ModuleList() if self.use_fam else nn.ModuleList()
 
         # 共用 stem 结构: Conv→BN→GELU→Conv (stride=2+2=4, 下采样4倍)
         def _make_stem_conv():
@@ -637,7 +636,8 @@ class VTFormer(nn.Module):
         self.trans_downsample_layers.append(trans_stem)
         self.cnn_downsample_layers.append(cnn_stem)
 
-        self.FAM.append(FeatureAlignmentModule(dim=2*embed_dim[0], reduction=fam_reduction))
+        if self.use_fam:
+            self.FAM.append(FeatureAlignmentModule(dim=2*embed_dim[0], reduction=fam_reduction))
         self.fusion = nn.ModuleList()
         fusion_builder = getattr(
             self,
@@ -669,7 +669,8 @@ class VTFormer(nn.Module):
             self.trans_downsample_layers.append(trans_downsample_layer)
             self.cnn_downsample_layers.append(cnn_downsample_layer)
             self.fusion.append(fusion_builder(embed_dim[i + 1]))
-            self.FAM.append(FeatureAlignmentModule(dim=2*embed_dim[i + 1], reduction=fam_reduction))
+            if self.use_fam:
+                self.FAM.append(FeatureAlignmentModule(dim=2*embed_dim[i + 1], reduction=fam_reduction))
 
         ##########################################################################
 

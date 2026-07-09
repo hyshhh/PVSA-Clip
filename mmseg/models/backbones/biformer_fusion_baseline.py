@@ -34,30 +34,38 @@ class BiFormer_fusion_baseline(VTFormer):
         self.extra_norms = nn.ModuleList()
         self.trans_bn = nn.ModuleList()
         self.cnn_bn = nn.ModuleList()
-        self.cnn_conv=nn.ModuleList()
-        self.trans_conv=nn.ModuleList()
+        self.cnn_conv = nn.ModuleList()
+        self.trans_conv = nn.ModuleList()
         self.trans_cross_stage_fusion = nn.ModuleList()
         self.cnn_cross_stage_fusion = nn.ModuleList()
         self.trans_gate_scale = nn.ParameterList()
         self.cnn_gate_scale = nn.ParameterList()
+
+        # VFM 相关层按模式按需创建：mode='none' 时不建任何跨层融合参数
+        need_proj = cross_stage_fusion_mode in {
+            'gate', 'concat', 'gate_concat', 'cross_gate', 'cross_concat'}
+        need_gate = cross_stage_fusion_mode in {
+            'gate', 'gate_concat', 'cross_gate'}
+        need_cross = cross_stage_fusion_mode in {
+            'concat', 'gate_concat', 'cross_concat'}
+
         for i in range(4):
             self.extra_norms.append(LayerNorm2d(self.embed_dim[i]))
-            if i < 3:
-                # trans_conv/cnn_conv 作用在高一层 (i+1) 的特征上做通道投影，
-                # 输入通道应为 embed_dim[i+1]，而非 2*embed_dim[i]（此前二者恰好数值相等，
-                # 是因为 embed_dim 逐级翻倍，换成非翻倍配置会直接报通道不匹配）。
-                self.trans_bn.append(nn.BatchNorm2d(self.embed_dim[i]))
-                self.cnn_bn.append(nn.BatchNorm2d(self.embed_dim[i]))
+            if i < 3 and need_proj:
+                # trans_conv/cnn_conv 作用在高一层 (i+1) 的特征上做通道投影
                 self.cnn_conv.append(nn.Conv2d(self.embed_dim[i + 1], self.embed_dim[i], 1, 1, 0))
                 self.trans_conv.append(nn.Conv2d(self.embed_dim[i + 1], self.embed_dim[i], 1, 1, 0))
-                self.trans_cross_stage_fusion.append(
-                    nn.Conv2d(2 * self.embed_dim[i], self.embed_dim[i], 1, 1, 0))
-                self.cnn_cross_stage_fusion.append(
-                    nn.Conv2d(2 * self.embed_dim[i], self.embed_dim[i], 1, 1, 0))
-                self.trans_gate_scale.append(nn.Parameter(torch.tensor(0.0)))
-                self.cnn_gate_scale.append(nn.Parameter(torch.tensor(0.0)))
-            
-            
+                if need_gate:
+                    self.trans_bn.append(nn.BatchNorm2d(self.embed_dim[i]))
+                    self.cnn_bn.append(nn.BatchNorm2d(self.embed_dim[i]))
+                    self.trans_gate_scale.append(nn.Parameter(torch.tensor(0.0)))
+                    self.cnn_gate_scale.append(nn.Parameter(torch.tensor(0.0)))
+                if need_cross:
+                    self.trans_cross_stage_fusion.append(
+                        nn.Conv2d(2 * self.embed_dim[i], self.embed_dim[i], 1, 1, 0))
+                    self.cnn_cross_stage_fusion.append(
+                        nn.Conv2d(2 * self.embed_dim[i], self.embed_dim[i], 1, 1, 0))
+
         self.apply(self._init_weights)
         self.init_weights(pretrained=pretrained)
         nn.SyncBatchNorm.convert_sync_batchnorm(self)
@@ -265,12 +273,15 @@ class BiFormer_fusion_baseline(VTFormer):
             return
         # Fuse parent (VTFormer) conv-bn layers
         super().optimize_for_inference()
-        for idx in range(len(self.trans_conv)):
+        # 仅在存在 BN 的 gate 类 VFM 模式下做 Conv-BN 融合；
+        # mode='none' 或纯 concat 时 bn 列表为空，直接跳过。
+        for idx in range(min(len(self.trans_conv), len(self.trans_bn))):
             trans_bn = self.trans_bn[idx]
-            cnn_bn = self.cnn_bn[idx]
             if isinstance(trans_bn, nn.modules.batchnorm._BatchNorm) and not trans_bn.training:
                 self.trans_conv[idx] = fuse_conv_bn_eval(self.trans_conv[idx], trans_bn)
                 self.trans_bn[idx] = nn.Identity()
+        for idx in range(min(len(self.cnn_conv), len(self.cnn_bn))):
+            cnn_bn = self.cnn_bn[idx]
             if isinstance(cnn_bn, nn.modules.batchnorm._BatchNorm) and not cnn_bn.training:
                 self.cnn_conv[idx] = fuse_conv_bn_eval(self.cnn_conv[idx], cnn_bn)
                 self.cnn_bn[idx] = nn.Identity()

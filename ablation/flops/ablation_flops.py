@@ -220,8 +220,11 @@ def main():
                 first_block = model.backbone.stages[0][0]
                 if hasattr(first_block, 'PA'):
                     topks = getattr(model.backbone, 'topks', None)
+                    fam_n = len(getattr(model.backbone, 'FAM', []))
+                    vfm_n = len(getattr(model.backbone, 'trans_cross_stage_fusion', []))
                     print(f'  attention_type={cfg.model.backbone.get("attention_type", "topp")} '
-                          f'topks={topks} → PA={type(first_block.PA).__name__}')
+                          f'topks={topks} FAM={fam_n} VFM_layers={vfm_n} '
+                          f'→ PA={type(first_block.PA).__name__}')
             flops, params = _measure(model, input_shape)
             results.append((exp_id, exp_name, params, flops))
             print(f'  Params: {params}  |  FLOPs: {flops}')
