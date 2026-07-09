@@ -23,7 +23,7 @@ python ablation/flops/ablation_flops.py --shape 256 256
 | 1 | FAM × PVSA × VFM 三开关 | 5 |
 | 2-A | MBConv / PVSA 深度组合 | 5 |
 | 2-B | 融合方式（顺序/并行） | 4 |
-| 3 | FFM 内部 CA / SA | 3 |
+| 3 | Full 基础上减 CA / SA | 3 |
 
 ## 单独跑某个实验
 
