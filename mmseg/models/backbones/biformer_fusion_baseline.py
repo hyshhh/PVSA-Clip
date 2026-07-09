@@ -41,30 +41,32 @@ class BiFormer_fusion_baseline(VTFormer):
         self.trans_gate_scale = nn.ParameterList()
         self.cnn_gate_scale = nn.ParameterList()
 
-        # VFM 相关层按模式按需创建：mode='none' 时不建任何跨层融合参数
-        need_proj = cross_stage_fusion_mode in {
-            'gate', 'concat', 'gate_concat', 'cross_gate', 'cross_concat'}
-        need_gate = cross_stage_fusion_mode in {
-            'gate', 'gate_concat', 'cross_gate'}
-        need_cross = cross_stage_fusion_mode in {
-            'concat', 'gate_concat', 'cross_concat'}
+        # 纯 Transformer：不建 VFM / extra_norms / 任何跨分支融合参数
+        # 双分支且 VFM mode!='none' 时才按需建 VFM 相关层
+        if not getattr(self, '_cnn_disabled', False):
+            need_proj = cross_stage_fusion_mode in {
+                'gate', 'concat', 'gate_concat', 'cross_gate', 'cross_concat'}
+            need_gate = cross_stage_fusion_mode in {
+                'gate', 'gate_concat', 'cross_gate'}
+            need_cross = cross_stage_fusion_mode in {
+                'concat', 'gate_concat', 'cross_concat'}
 
-        for i in range(4):
-            self.extra_norms.append(LayerNorm2d(self.embed_dim[i]))
-            if i < 3 and need_proj:
-                # trans_conv/cnn_conv 作用在高一层 (i+1) 的特征上做通道投影
-                self.cnn_conv.append(nn.Conv2d(self.embed_dim[i + 1], self.embed_dim[i], 1, 1, 0))
-                self.trans_conv.append(nn.Conv2d(self.embed_dim[i + 1], self.embed_dim[i], 1, 1, 0))
-                if need_gate:
-                    self.trans_bn.append(nn.BatchNorm2d(self.embed_dim[i]))
-                    self.cnn_bn.append(nn.BatchNorm2d(self.embed_dim[i]))
-                    self.trans_gate_scale.append(nn.Parameter(torch.tensor(0.0)))
-                    self.cnn_gate_scale.append(nn.Parameter(torch.tensor(0.0)))
-                if need_cross:
-                    self.trans_cross_stage_fusion.append(
-                        nn.Conv2d(2 * self.embed_dim[i], self.embed_dim[i], 1, 1, 0))
-                    self.cnn_cross_stage_fusion.append(
-                        nn.Conv2d(2 * self.embed_dim[i], self.embed_dim[i], 1, 1, 0))
+            for i in range(4):
+                self.extra_norms.append(LayerNorm2d(self.embed_dim[i]))
+                if i < 3 and need_proj:
+                    # trans_conv/cnn_conv 作用在高一层 (i+1) 的特征上做通道投影
+                    self.cnn_conv.append(nn.Conv2d(self.embed_dim[i + 1], self.embed_dim[i], 1, 1, 0))
+                    self.trans_conv.append(nn.Conv2d(self.embed_dim[i + 1], self.embed_dim[i], 1, 1, 0))
+                    if need_gate:
+                        self.trans_bn.append(nn.BatchNorm2d(self.embed_dim[i]))
+                        self.cnn_bn.append(nn.BatchNorm2d(self.embed_dim[i]))
+                        self.trans_gate_scale.append(nn.Parameter(torch.tensor(0.0)))
+                        self.cnn_gate_scale.append(nn.Parameter(torch.tensor(0.0)))
+                    if need_cross:
+                        self.trans_cross_stage_fusion.append(
+                            nn.Conv2d(2 * self.embed_dim[i], self.embed_dim[i], 1, 1, 0))
+                        self.cnn_cross_stage_fusion.append(
+                            nn.Conv2d(2 * self.embed_dim[i], self.embed_dim[i], 1, 1, 0))
 
         self.apply(self._init_weights)
         self.init_weights(pretrained=pretrained)
@@ -318,18 +320,20 @@ class BiFormer_sequential(BiFormer_fusion_baseline):
 
         # 顺序模式：第二分支跳过 stem/下采样，直接吃第一分支同 stage 输出。
         # 这里把对应层真正删掉，而不是前向跳过但仍保留参数。
-        if branch_order == 'cnn_first':
-            # C+T：第二分支是 Transformer
-            self.trans_downsample_layers = nn.ModuleList([
-                self._drop_stage_downsample(layer, stage_idx)
-                for stage_idx, layer in enumerate(self.trans_downsample_layers)
-            ])
-        else:
-            # T+C：第二分支是 CNN
-            self.cnn_downsample_layers = nn.ModuleList([
-                self._drop_stage_downsample(layer, stage_idx)
-                for stage_idx, layer in enumerate(self.cnn_downsample_layers)
-            ])
+        # 纯 Transformer（cnn_block_layers 全 0）已无双分支，无需再裁剪。
+        if not getattr(self, '_cnn_disabled', False):
+            if branch_order == 'cnn_first':
+                # C+T：第二分支是 Transformer
+                self.trans_downsample_layers = nn.ModuleList([
+                    self._drop_stage_downsample(layer, stage_idx)
+                    for stage_idx, layer in enumerate(self.trans_downsample_layers)
+                ])
+            else:
+                # T+C：第二分支是 CNN
+                self.cnn_downsample_layers = nn.ModuleList([
+                    self._drop_stage_downsample(layer, stage_idx)
+                    for stage_idx, layer in enumerate(self.cnn_downsample_layers)
+                ])
 
         self.apply(self._init_weights)
 

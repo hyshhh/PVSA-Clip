@@ -604,8 +604,12 @@ class VTFormer(nn.Module):
 
         self.trans_downsample_layers = nn.ModuleList()
         self.cnn_downsample_layers = nn.ModuleList()
-        # use_fam=False 时不创建 FAM，参数量/官方复杂度统计会真实下降
+        # 关模块就不建：use_fam=False / 纯 Transformer 时不创建 FAM
+        # cnn_block_layers 全 0 时，整条 CNN 分支 + 同层 fusion 都不创建
+        if self._cnn_disabled:
+            self.use_fam = False
         self.FAM = nn.ModuleList() if self.use_fam else nn.ModuleList()
+        self.fusion = nn.ModuleList()
 
         # 共用 stem 结构: Conv→BN→GELU→Conv (stride=2+2=4, 下采样4倍)
         def _make_stem_conv():
@@ -615,62 +619,70 @@ class VTFormer(nn.Module):
                 nn.GELU(),
                 nn.Conv2d(embed_dim[0] // 2, embed_dim[0], kernel_size=3, stride=2, padding=1),
             ]
-        # Transformer 分支: 加 BN 归一化输出
-        trans_stem = nn.Sequential(*_make_stem_conv(), nn.BatchNorm2d(embed_dim[0]))
-        # CNN 分支: 接 DWConv blocks
-        cnn_stem_layers = _make_stem_conv() + [
-            nn.BatchNorm2d(embed_dim[0]),
-            nn.ReLU(inplace=True),
-        ]
-        cnn_stem_layers.extend([
-            _make_cnn_block(embed_dim[0]) for _ in range(cnn_block_layers[0])
-        ])
-        cnn_stem = nn.Sequential(*cnn_stem_layers)
 
-        if (pe is not None) and 0 in pe_stages:
-            trans_stem.append(get_pe_layer(emb_dim=embed_dim[0], name=pe))
-            cnn_stem.append(get_pe_layer(emb_dim=embed_dim[0], name=pe))
-        if use_checkpoint_stages:
-            trans_stem = checkpoint_wrapper(trans_stem)
-            cnn_stem = checkpoint_wrapper(cnn_stem)
-        self.trans_downsample_layers.append(trans_stem)
-        self.cnn_downsample_layers.append(cnn_stem)
-
-        if self.use_fam:
-            self.FAM.append(FeatureAlignmentModule(dim=2*embed_dim[0], reduction=fam_reduction))
-        self.fusion = nn.ModuleList()
         fusion_builder = getattr(
             self,
             '_build_fusion_layer',
             lambda channels: nn.Conv2d(
                 2 * channels, channels, kernel_size=1, stride=1, padding=0, bias=True))
-        self.fusion.append(fusion_builder(embed_dim[0]))
+
+        # Transformer 分支: 加 BN 归一化输出
+        trans_stem = nn.Sequential(*_make_stem_conv(), nn.BatchNorm2d(embed_dim[0]))
+        if (pe is not None) and 0 in pe_stages:
+            trans_stem.append(get_pe_layer(emb_dim=embed_dim[0], name=pe))
+        if use_checkpoint_stages:
+            trans_stem = checkpoint_wrapper(trans_stem)
+        self.trans_downsample_layers.append(trans_stem)
+
+        # 双分支才建 CNN / FAM / 同层 fusion；纯 Transformer 不建任何 CNN 侧参数
+        if not self._cnn_disabled:
+            cnn_stem_layers = _make_stem_conv() + [
+                nn.BatchNorm2d(embed_dim[0]),
+                nn.ReLU(inplace=True),
+            ]
+            cnn_stem_layers.extend([
+                _make_cnn_block(embed_dim[0]) for _ in range(cnn_block_layers[0])
+            ])
+            cnn_stem = nn.Sequential(*cnn_stem_layers)
+            if (pe is not None) and 0 in pe_stages:
+                cnn_stem.append(get_pe_layer(emb_dim=embed_dim[0], name=pe))
+            if use_checkpoint_stages:
+                cnn_stem = checkpoint_wrapper(cnn_stem)
+            self.cnn_downsample_layers.append(cnn_stem)
+            if self.use_fam:
+                self.FAM.append(FeatureAlignmentModule(dim=2 * embed_dim[0], reduction=fam_reduction))
+            self.fusion.append(fusion_builder(embed_dim[0]))
+
         for i in range(3):
             trans_downsample_layer = nn.Sequential(
                 nn.Conv2d(embed_dim[i], embed_dim[i + 1], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
                 nn.BatchNorm2d(embed_dim[i + 1])
             )
-            cnn_layers = [
-                nn.Conv2d(embed_dim[i], embed_dim[i + 1], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
-                nn.BatchNorm2d(embed_dim[i + 1]),
-                nn.GELU(),
-            ]
-            cnn_layers.extend([
-                _make_cnn_block(embed_dim[i + 1])
-                for _ in range(cnn_block_layers[i + 1])
-            ])
-            cnn_downsample_layer = nn.Sequential(*cnn_layers)
             if (pe is not None) and i + 1 in pe_stages:
                 trans_downsample_layer.append(get_pe_layer(emb_dim=embed_dim[i + 1], name=pe))
-                cnn_downsample_layer.append(get_pe_layer(emb_dim=embed_dim[i + 1], name=pe))
             if use_checkpoint_stages:
                 trans_downsample_layer = checkpoint_wrapper(trans_downsample_layer)
-                cnn_downsample_layer = checkpoint_wrapper(cnn_downsample_layer)
             self.trans_downsample_layers.append(trans_downsample_layer)
-            self.cnn_downsample_layers.append(cnn_downsample_layer)
-            self.fusion.append(fusion_builder(embed_dim[i + 1]))
-            if self.use_fam:
-                self.FAM.append(FeatureAlignmentModule(dim=2*embed_dim[i + 1], reduction=fam_reduction))
+
+            if not self._cnn_disabled:
+                cnn_layers = [
+                    nn.Conv2d(embed_dim[i], embed_dim[i + 1], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
+                    nn.BatchNorm2d(embed_dim[i + 1]),
+                    nn.GELU(),
+                ]
+                cnn_layers.extend([
+                    _make_cnn_block(embed_dim[i + 1])
+                    for _ in range(cnn_block_layers[i + 1])
+                ])
+                cnn_downsample_layer = nn.Sequential(*cnn_layers)
+                if (pe is not None) and i + 1 in pe_stages:
+                    cnn_downsample_layer.append(get_pe_layer(emb_dim=embed_dim[i + 1], name=pe))
+                if use_checkpoint_stages:
+                    cnn_downsample_layer = checkpoint_wrapper(cnn_downsample_layer)
+                self.cnn_downsample_layers.append(cnn_downsample_layer)
+                self.fusion.append(fusion_builder(embed_dim[i + 1]))
+                if self.use_fam:
+                    self.FAM.append(FeatureAlignmentModule(dim=2 * embed_dim[i + 1], reduction=fam_reduction))
 
         ##########################################################################
 
@@ -762,7 +774,7 @@ class VTFormer(nn.Module):
             return
         for layer in self.trans_downsample_layers:
             _fuse_sequential_conv_bn(layer)
-        for layer in self.cnn_downsample_layers:
+        for layer in getattr(self, 'cnn_downsample_layers', []):
             _fuse_sequential_conv_bn(layer)
         for module in self.modules():
             if isinstance(module, (

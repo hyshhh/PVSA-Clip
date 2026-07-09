@@ -76,24 +76,36 @@ EXPERIMENTS = [
     # 实验组 2-A：骨干消融 (MBConv-Block / PVSA-Block 深度组合)
     # ════════════════════════════════════════════════════════════════════════
     ('2-A-1', 'MBConv[0,0,0,0] PVSA[3,4,6,3]', {
+        # 纯 Transformer：显式关掉 FAM/VFM；模型侧也会在 cnn 全 0 时不建 CNN/融合
         'model.backbone.cnn_block_layers': [0, 0, 0, 0],
         'model.backbone.depth': [3, 4, 6, 3],
+        'model.backbone.use_fam': False,
+        'model.backbone.cross_stage_fusion_mode': 'none',
     }),
     ('2-A-2', 'MBConv[1,1,1,1] PVSA[3,4,6,3]', {
+        # 与 full 同开 FAM/VFM，只改深度
         'model.backbone.cnn_block_layers': [1, 1, 1, 1],
         'model.backbone.depth': [3, 4, 6, 3],
+        'model.backbone.use_fam': True,
+        'model.backbone.cross_stage_fusion_mode': 'cross_concat',
     }),
     ('2-A-3', 'MBConv[1,2,2,1] PVSA[1,3,4,2]', {
         'model.backbone.cnn_block_layers': [1, 2, 2, 1],
         'model.backbone.depth': [1, 3, 4, 2],
+        'model.backbone.use_fam': True,
+        'model.backbone.cross_stage_fusion_mode': 'cross_concat',
     }),
     ('2-A-4', 'MBConv[1,2,2,1] PVSA[2,6,8,4]', {
         'model.backbone.cnn_block_layers': [1, 2, 2, 1],
         'model.backbone.depth': [2, 6, 8, 4],
+        'model.backbone.use_fam': True,
+        'model.backbone.cross_stage_fusion_mode': 'cross_concat',
     }),
     ('2-A-5', 'MBConv[1,2,2,1] PVSA[3,4,6,3] (full)', {
         'model.backbone.cnn_block_layers': [1, 2, 2, 1],
         'model.backbone.depth': [3, 4, 6, 3],
+        'model.backbone.use_fam': True,
+        'model.backbone.cross_stage_fusion_mode': 'cross_concat',
     }),
 
     # ════════════════════════════════════════════════════════════════════════
@@ -228,8 +240,12 @@ def main():
                     topks = getattr(model.backbone, 'topks', None)
                     fam_n = len(getattr(model.backbone, 'FAM', []))
                     vfm_n = len(getattr(model.backbone, 'trans_cross_stage_fusion', []))
+                    fusion_n = len(getattr(model.backbone, 'fusion', []))
+                    cnn_n = len(getattr(model.backbone, 'cnn_downsample_layers', []))
+                    cnn_disabled = getattr(model.backbone, '_cnn_disabled', False)
                     print(f'  attention_type={cfg.model.backbone.get("attention_type", "topp")} '
-                          f'topks={topks} FAM={fam_n} VFM_layers={vfm_n} '
+                          f'topks={topks} FAM={fam_n} VFM={vfm_n} fusion={fusion_n} '
+                          f'cnn_stages={cnn_n} cnn_disabled={cnn_disabled} '
                           f'→ PA={type(first_block.PA).__name__}')
             flops, params = _measure(model, input_shape)
             results.append((exp_id, exp_name, params, flops))
@@ -256,9 +272,10 @@ def main():
         print(f'{exp_id:<10} {exp_name:<42} {params:>10} {flops:>12}')
 
     print('-' * 76)
-    print('注: PVSA=attention_type\'topp\'(Top-P路由+route_mask); BRA=attention_type\'bra\' 默认 topks=[1,4,16,-1]。')
-    print('    C+T / T+C 为顺序分支（BiFormer_sequential），branch_order 控制方向，默认关闭 FAM/VFM。')
-    print('    TC1=并行+直接 concat（无 FAM/VFM）；TC2=并行+FAM+VFM。')
+    print('注: 关模块就不建参数。FAM=use_fam；VFM=cross_stage_fusion_mode；CNN全0=纯Transformer。')
+    print('    PVSA=attention_type\'topp\'；BRA=attention_type\'bra\' 默认 topks=[1,4,16,-1]。')
+    print('    C+T/T+C 顺序且关 FAM/VFM；TC1 并行无融合增强；TC2 并行+FAM+VFM。')
+    print('    2-A-1 纯 Transformer；2-A-2~5 与 full 同开 FAM/VFM，只改深度。')
     print('=' * 76)
 
     # ── 保存 CSV ─────────────────────────────────────────────────────────
