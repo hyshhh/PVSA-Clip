@@ -41,7 +41,8 @@ def _estimate_kv_tokens(module, local_h, local_w):
             kv_per_win = kv_per_win[0]
         kv_per_win = _as_int(kv_per_win, default=local_h)
         return int(kv_per_win * kv_per_win)
-    raise NotImplementedError(f'Unsupported kv_downsample_mode for FLOPs counting: {mode}')
+    raise NotImplementedError(
+        f'Unsupported kv_downsample_mode for FLOPs counting: {mode}')
 
 
 def _estimate_topp_keep_len(module):
@@ -68,7 +69,8 @@ def _attention_extra_flops(module, x):
     if isinstance(module, ToppAttention):
         effective_topk = _estimate_topp_keep_len(module)
     else:
-        effective_topk = float(getattr(module, 'topk', getattr(module.router, 'topk', 1)))
+        effective_topk = float(
+            getattr(module, 'topk', getattr(module.router, 'topk', 1)))
 
     routing_flops = 2 * batch * num_windows * num_windows * int(module.qk_dim)
     attention_flops = (
@@ -88,17 +90,35 @@ def _plain_attention_extra_flops(module, x):
     return int(qk_flops + av_flops)
 
 
+def _module_param_count(module):
+    # 只统计本模块自己持有的参数，避免子模块被父子 hook 重复累计。
+    return sum(param.numel() for param in module.parameters(recurse=False))
+
+
 def attach_flops_hooks(model):
+    """注册前向 hook，同时统计 FLOPs 与“实际触达”参数量。
+
+    参数量恢复为上一版语义：仅累计前向过程中真正执行到的模块参数。
+    这样 use_fam=False / VFM=none / CNN 禁用时，不会把未使用模块仍计入 Params。
+    """
     flops_dict = {}
+    active_param_ids = set()
     hooks = []
 
-    def _record(name, flops):
+    def _record_flops(name, flops):
         if flops <= 0:
             return
         flops_dict[name] = flops_dict.get(name, 0) + int(flops)
 
+    def _record_params(module):
+        for param in module.parameters(recurse=False):
+            active_param_ids.add(id(param))
+
     def _make_hook(name):
         def hook_fn(module, inp, out):
+            # 参数统计：凡是前向实际触达的模块都计入其自身参数。
+            _record_params(module)
+
             if isinstance(module, ToppTopkRouting):
                 if isinstance(out, tuple) and len(out) >= 3 and out[2] is not None:
                     valid_mask = out[2]
@@ -109,32 +129,41 @@ def attach_flops_hooks(model):
                 return
 
             if isinstance(module, nn.Linear):
-                _record(name, 2 * out.numel() * int(module.in_features))
+                _record_flops(name, 2 * out.numel() * int(module.in_features))
                 return
 
             if isinstance(module, nn.Conv2d):
                 kernel_h, kernel_w = module.kernel_size
                 per_output = (module.in_channels // module.groups) * kernel_h * kernel_w
-                _record(name, 2 * out.numel() * per_output)
+                _record_flops(name, 2 * out.numel() * per_output)
                 return
 
             if isinstance(module, nn.BatchNorm2d):
-                _record(name, out.numel() * 2)
+                _record_flops(name, out.numel() * 2)
                 return
 
             if isinstance(module, (ToppAttention, BiLevelRoutingAttention)):
-                _record(name, _attention_extra_flops(module, inp[0]))
+                _record_flops(name, _attention_extra_flops(module, inp[0]))
                 return
 
             if isinstance(module, (Attention, AttentionLePE)):
-                _record(name, _plain_attention_extra_flops(module, inp[0]))
+                _record_flops(name, _plain_attention_extra_flops(module, inp[0]))
 
         return hook_fn
 
     for name, module in model.named_modules():
         hooks.append(module.register_forward_hook(_make_hook(name)))
 
-    return flops_dict, hooks
+    return flops_dict, active_param_ids, hooks
+
+
+def count_active_params(model, active_param_ids):
+    """根据前向触达到的参数 id 统计有效参数量。"""
+    total = 0
+    for param in model.parameters():
+        if id(param) in active_param_ids:
+            total += param.numel()
+    return int(total)
 
 
 def remove_hooks(hooks):

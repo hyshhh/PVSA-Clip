@@ -18,7 +18,8 @@ from mmseg.models import BaseSegmentor
 from mmseg.registry import MODELS
 from mmseg.structures import SegDataSample
 from mmseg.utils import register_all_modules, sync_clip_embed_dim
-from tools.analysis_tools.flops_counter import attach_flops_hooks, remove_hooks
+from tools.analysis_tools.flops_counter import (
+    attach_flops_hooks, count_active_params, remove_hooks)
 
 try:
     from mmengine.analysis import get_model_complexity_info
@@ -104,7 +105,7 @@ def inference(args: argparse.Namespace, logger: MMLogger) -> dict:
         raise NotImplementedError('MaskFormer and Mask2Former are not '
                                   'supported yet.')
     # fvcore 对 nn.Identity 的别名处理有 bug，用 forward hook 手动统计
-    flops_dict, hooks = attach_flops_hooks(model)
+    flops_dict, active_param_ids, hooks = attach_flops_hooks(model)
 
     with torch.no_grad():
         model(data['inputs'], data['data_samples'], mode='predict')
@@ -112,7 +113,8 @@ def inference(args: argparse.Namespace, logger: MMLogger) -> dict:
     remove_hooks(hooks)
 
     total_flops = sum(flops_dict.values())
-    total_params = sum(p.numel() for p in model.parameters())
+    # 与消融脚本一致：统计前向实际触达参数，而非 state_dict 全量参数。
+    total_params = count_active_params(model, active_param_ids)
     result['flops'] = _format_size(total_flops)
     result['params'] = _format_size(total_params)
     result['compute_type'] = 'direct: randomly generate a picture'

@@ -32,7 +32,8 @@ if PROJECT_ROOT not in sys.path:
 from mmseg.registry import MODELS
 from mmseg.utils import register_all_modules, sync_clip_embed_dim
 from mmseg.structures import SegDataSample
-from tools.analysis_tools.flops_counter import attach_flops_hooks, remove_hooks
+from tools.analysis_tools.flops_counter import (
+    attach_flops_hooks, count_active_params, remove_hooks)
 
 BASE_CONFIG = os.path.join(
     PROJECT_ROOT, 'configs-h', '_base_', 'models', 'vision-topp-cnn.py')
@@ -158,8 +159,8 @@ def _build_model(cfg: Config):
 
 
 def _measure(model, input_shape=(3, 256, 256)):
-    """用 forward hook 统计 FLOPs / Params（兼容 fvcore 对 nn.Identity 的 bug）。"""
-    flops_dict, hooks = attach_flops_hooks(model)
+    """用 forward hook 统计 FLOPs / 实际触达 Params。"""
+    flops_dict, active_param_ids, hooks = attach_flops_hooks(model)
 
     data = torch.rand(1, *input_shape)
     seg_sample = SegDataSample(metainfo={
@@ -178,7 +179,8 @@ def _measure(model, input_shape=(3, 256, 256)):
     remove_hooks(hooks)
 
     total_flops = sum(flops_dict.values())
-    total_params = sum(p.numel() for p in model.parameters())
+    # 恢复上一版语义：只统计前向真正触达的参数，关闭 FAM/VFM/CNN 时不计入闲置参数。
+    total_params = count_active_params(model, active_param_ids)
     del model
     torch.cuda.empty_cache() if torch.cuda.is_available() else None
     return _format_size(total_flops), _format_size(total_params)
