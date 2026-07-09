@@ -7,9 +7,11 @@
 运行方式: python ablation/flops/ablation_flops.py [--shape 256 256]
 
 模块映射（论文缩写 → 代码配置键）:
-  FAM  = use_fam           (FeatureAlignmentModule 同层跨分支注意力对齐)
-  PVSA = attention_type='topp'  (Top-P 路由自注意力，关闭时用 attention_type='bra')
-  VFM  = cross_stage_fusion_mode  (跨层视觉特征融合模块)
+  FAM/FFM = use_fam           (FeatureAlignmentModule 同层跨分支注意力对齐)
+  CA      = fam_use_channel   (FAM 通道注意力)
+  SA      = fam_use_spatial   (FAM 空间注意力)
+  PVSA    = attention_type='topp'  (Top-P 路由自注意力，关闭时用 attention_type='bra')
+  VFM     = cross_stage_fusion_mode  (跨层视觉特征融合模块)
   backbone 深度 = depth (Transformer) / cnn_block_layers (MBConv)
 """
 import argparse
@@ -53,6 +55,8 @@ EXPERIMENTS = [
     }),
     ('1-2', 'FFM√ PVSA× VFM×', {
         'model.backbone.use_fam': True,
+        'model.backbone.fam_use_channel': True,
+        'model.backbone.fam_use_spatial': True,
         'model.backbone.attention_type': 'bra',
         'model.backbone.cross_stage_fusion_mode': 'none',
     }),
@@ -63,11 +67,15 @@ EXPERIMENTS = [
     }),
     ('1-4', 'FFM√ PVSA× VFM√', {
         'model.backbone.use_fam': True,
+        'model.backbone.fam_use_channel': True,
+        'model.backbone.fam_use_spatial': True,
         'model.backbone.attention_type': 'bra',
         'model.backbone.cross_stage_fusion_mode': 'cross_concat',
     }),
     ('1-5', 'Full (FFM√ PVSA√ VFM√)', {
         'model.backbone.use_fam': True,
+        'model.backbone.fam_use_channel': True,
+        'model.backbone.fam_use_spatial': True,
         'model.backbone.attention_type': 'topp',
         'model.backbone.cross_stage_fusion_mode': 'cross_concat',
     }),
@@ -87,24 +95,32 @@ EXPERIMENTS = [
         'model.backbone.cnn_block_layers': [1, 1, 1, 1],
         'model.backbone.depth': [3, 4, 6, 3],
         'model.backbone.use_fam': True,
+        'model.backbone.fam_use_channel': True,
+        'model.backbone.fam_use_spatial': True,
         'model.backbone.cross_stage_fusion_mode': 'cross_concat',
     }),
     ('2-A-3', 'MBConv[1,2,2,1] PVSA[1,3,4,2]', {
         'model.backbone.cnn_block_layers': [1, 2, 2, 1],
         'model.backbone.depth': [1, 3, 4, 2],
         'model.backbone.use_fam': True,
+        'model.backbone.fam_use_channel': True,
+        'model.backbone.fam_use_spatial': True,
         'model.backbone.cross_stage_fusion_mode': 'cross_concat',
     }),
     ('2-A-4', 'MBConv[1,2,2,1] PVSA[2,6,8,4]', {
         'model.backbone.cnn_block_layers': [1, 2, 2, 1],
         'model.backbone.depth': [2, 6, 8, 4],
         'model.backbone.use_fam': True,
+        'model.backbone.fam_use_channel': True,
+        'model.backbone.fam_use_spatial': True,
         'model.backbone.cross_stage_fusion_mode': 'cross_concat',
     }),
     ('2-A-5', 'MBConv[1,2,2,1] PVSA[3,4,6,3] (full)', {
         'model.backbone.cnn_block_layers': [1, 2, 2, 1],
         'model.backbone.depth': [3, 4, 6, 3],
         'model.backbone.use_fam': True,
+        'model.backbone.fam_use_channel': True,
+        'model.backbone.fam_use_spatial': True,
         'model.backbone.cross_stage_fusion_mode': 'cross_concat',
     }),
 
@@ -137,7 +153,35 @@ EXPERIMENTS = [
         # FAM + VFM 全开，注意力用 BRA
         'model.backbone.attention_type': 'bra',
         'model.backbone.use_fam': True,
+        'model.backbone.fam_use_channel': True,
+        'model.backbone.fam_use_spatial': True,
         'model.backbone.cross_stage_fusion_mode': 'cross_concat',
+    }),
+
+    # ════════════════════════════════════════════════════════════════════════
+    # 实验组 3：FFM 内部 CA / SA 消融
+    # 固定：双分支 + BRA + VFM 关，只比较 FAM 内通道/空间注意力
+    # ════════════════════════════════════════════════════════════════════════
+    ('3-1', 'FFM CA√ SA×', {
+        'model.backbone.use_fam': True,
+        'model.backbone.fam_use_channel': True,
+        'model.backbone.fam_use_spatial': False,
+        'model.backbone.attention_type': 'bra',
+        'model.backbone.cross_stage_fusion_mode': 'none',
+    }),
+    ('3-2', 'FFM CA× SA√', {
+        'model.backbone.use_fam': True,
+        'model.backbone.fam_use_channel': False,
+        'model.backbone.fam_use_spatial': True,
+        'model.backbone.attention_type': 'bra',
+        'model.backbone.cross_stage_fusion_mode': 'none',
+    }),
+    ('3-3', 'FFM CA√ SA√', {
+        'model.backbone.use_fam': True,
+        'model.backbone.fam_use_channel': True,
+        'model.backbone.fam_use_spatial': True,
+        'model.backbone.attention_type': 'bra',
+        'model.backbone.cross_stage_fusion_mode': 'none',
     }),
 ]
 
@@ -243,8 +287,11 @@ def main():
                     fusion_n = len(getattr(model.backbone, 'fusion', []))
                     cnn_n = len(getattr(model.backbone, 'cnn_downsample_layers', []))
                     cnn_disabled = getattr(model.backbone, '_cnn_disabled', False)
+                    fam_ca = getattr(model.backbone, 'fam_use_channel', None)
+                    fam_sa = getattr(model.backbone, 'fam_use_spatial', None)
                     print(f'  attention_type={cfg.model.backbone.get("attention_type", "topp")} '
-                          f'topks={topks} FAM={fam_n} VFM={vfm_n} fusion={fusion_n} '
+                          f'topks={topks} FAM={fam_n} CA={fam_ca} SA={fam_sa} '
+                          f'VFM={vfm_n} fusion={fusion_n} '
                           f'cnn_stages={cnn_n} cnn_disabled={cnn_disabled} '
                           f'→ PA={type(first_block.PA).__name__}')
             flops, params = _measure(model, input_shape)
@@ -272,10 +319,10 @@ def main():
         print(f'{exp_id:<10} {exp_name:<42} {params:>10} {flops:>12}')
 
     print('-' * 76)
-    print('注: 关模块就不建参数。FAM=use_fam；VFM=cross_stage_fusion_mode；CNN全0=纯Transformer。')
-    print('    PVSA=attention_type\'topp\'；BRA=attention_type\'bra\' 默认 topks=[1,4,16,-1]。')
+    print('注: 关模块就不建参数。FAM=use_fam；CA=fam_use_channel；SA=fam_use_spatial；VFM=cross_stage_fusion_mode。')
+    print('    PVSA=attention_type\'topp\'；BRA=attention_type\'bra\' 默认 topks=[1,4,16,-1]；CNN全0=纯Transformer。')
     print('    C+T/T+C 顺序且关 FAM/VFM；TC1 并行无融合增强；TC2 并行+FAM+VFM。')
-    print('    2-A-1 纯 Transformer；2-A-2~5 与 full 同开 FAM/VFM，只改深度。')
+    print('    2-A-1 纯 Transformer；2-A-2~5 同开 FAM/VFM 只改深度；3 组只消融 FFM 内 CA/SA。')
     print('=' * 76)
 
     # ── 保存 CSV ─────────────────────────────────────────────────────────

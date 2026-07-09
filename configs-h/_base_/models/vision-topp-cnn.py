@@ -46,6 +46,9 @@ model = dict(
         auto_pad=True,
         # FAM 空间注意力降维比例（1=无降维，4=压缩到1/4通道）
         fam_reduction=4,
+        # FFM/FAM 内部 CA/SA 开关：关了就不建对应参数
+        fam_use_channel=True,
+        fam_use_spatial=True,
         # CNN 分支各层 block 数量：[stem, stage1, stage2, stage3]
         cnn_block_layers=[2, 1, 2, 1],
         # CNN block 类型:

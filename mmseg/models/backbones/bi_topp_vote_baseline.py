@@ -158,13 +158,19 @@ class Block(nn.Module):
         return x
 
 class FeatureAlignmentModule(nn.Module):
-    def __init__(self, dim, reduction=1):
+    def __init__(self, dim, reduction=1, use_channel=True, use_spatial=True):
         super(FeatureAlignmentModule, self).__init__()
+        if not use_channel and not use_spatial:
+            raise ValueError('FeatureAlignmentModule 至少需要开启 CA 或 SA 之一')
         # sigmoid(0) = 0.5, so 2*sigmoid(0) = 1.0 — neutral init
-        self.lambda_c = nn.Parameter(torch.tensor(0.0))
-        self.lambda_s = nn.Parameter(torch.tensor(0.0))
-        self.channel_weights = ChannelWeights(dim=dim, reduction=reduction)
-        self.spatial_weights = SpatialWeights(dim=dim, reduction=reduction)
+        self.use_channel = use_channel
+        self.use_spatial = use_spatial
+        if use_channel:
+            self.lambda_c = nn.Parameter(torch.tensor(0.0))
+            self.channel_weights = ChannelWeights(dim=dim, reduction=reduction)
+        if use_spatial:
+            self.lambda_s = nn.Parameter(torch.tensor(0.0))
+            self.spatial_weights = SpatialWeights(dim=dim, reduction=reduction)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -180,14 +186,19 @@ class FeatureAlignmentModule(nn.Module):
             m.weight.data.normal_(0, math.sqrt(2.0 / fan_out))
             if m.bias is not None:
                 m.bias.data.zero_()
-    
+
     def forward(self, x1, x2):
-        channel_weights = self.channel_weights(x1, x2)
-        spatial_weights = self.spatial_weights(x1, x2)
-        lc = 2.0 * self.lambda_c.sigmoid()
-        ls = 2.0 * self.lambda_s.sigmoid()
-        out_x1 = x1 + lc * channel_weights[1] * x2 + ls * spatial_weights[1] * x2
-        out_x2 = x2 + lc * channel_weights[0] * x1 + ls * spatial_weights[0] * x1
+        out_x1, out_x2 = x1, x2
+        if self.use_channel:
+            channel_weights = self.channel_weights(x1, x2)
+            lc = 2.0 * self.lambda_c.sigmoid()
+            out_x1 = out_x1 + lc * channel_weights[1] * x2
+            out_x2 = out_x2 + lc * channel_weights[0] * x1
+        if self.use_spatial:
+            spatial_weights = self.spatial_weights(x1, x2)
+            ls = 2.0 * self.lambda_s.sigmoid()
+            out_x1 = out_x1 + ls * spatial_weights[1] * x2
+            out_x2 = out_x2 + ls * spatial_weights[0] * x1
         return out_x1, out_x2
 
 class DepthWiseConvModule(nn.Module):
@@ -541,6 +552,8 @@ class VTFormer(nn.Module):
                  use_plain_attn_last_stage=False,
                  attention_type='topp',
                  fam_reduction=4,
+                 fam_use_channel=True,
+                 fam_use_spatial=True,
                  cnn_block_layers=[2, 1, 2, 1],
                  cnn_block_type='dwconv',
                  feature_vis_config=None,
@@ -565,6 +578,11 @@ class VTFormer(nn.Module):
             topks = [8, 8, -1, -1]
         self.topks = list(topks)
         self.use_fam = use_fam
+        self.fam_use_channel = fam_use_channel
+        self.fam_use_spatial = fam_use_spatial
+        # CA/SA 全关时等价于关闭 FAM，避免空模块仍被统计
+        if use_fam and (not fam_use_channel) and (not fam_use_spatial):
+            self.use_fam = False
         self.route_pooling = route_pooling
         self.use_plain_attn_last_stage = use_plain_attn_last_stage
         # cnn_block_layers 全零时禁用 CNN 分支，只走 Transformer
@@ -650,7 +668,11 @@ class VTFormer(nn.Module):
                 cnn_stem = checkpoint_wrapper(cnn_stem)
             self.cnn_downsample_layers.append(cnn_stem)
             if self.use_fam:
-                self.FAM.append(FeatureAlignmentModule(dim=2 * embed_dim[0], reduction=fam_reduction))
+                self.FAM.append(FeatureAlignmentModule(
+                    dim=2 * embed_dim[0],
+                    reduction=fam_reduction,
+                    use_channel=self.fam_use_channel,
+                    use_spatial=self.fam_use_spatial))
             self.fusion.append(fusion_builder(embed_dim[0]))
 
         for i in range(3):
@@ -682,7 +704,11 @@ class VTFormer(nn.Module):
                 self.cnn_downsample_layers.append(cnn_downsample_layer)
                 self.fusion.append(fusion_builder(embed_dim[i + 1]))
                 if self.use_fam:
-                    self.FAM.append(FeatureAlignmentModule(dim=2 * embed_dim[i + 1], reduction=fam_reduction))
+                    self.FAM.append(FeatureAlignmentModule(
+                        dim=2 * embed_dim[i + 1],
+                        reduction=fam_reduction,
+                        use_channel=self.fam_use_channel,
+                        use_spatial=self.fam_use_spatial))
 
         ##########################################################################
 
