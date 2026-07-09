@@ -22,6 +22,7 @@ from copy import deepcopy
 import torch
 from mmengine import Config
 from mmengine.model import revert_sync_batchnorm
+from mmengine.analysis import get_model_complexity_info
 from mmengine.analysis.print_helper import _format_size
 
 # ── 项目根 & 注册 ──────────────────────────────────────────────────────────
@@ -32,8 +33,6 @@ if PROJECT_ROOT not in sys.path:
 from mmseg.registry import MODELS
 from mmseg.utils import register_all_modules, sync_clip_embed_dim
 from mmseg.structures import SegDataSample
-from tools.analysis_tools.flops_counter import (
-    attach_flops_hooks, count_active_params, remove_hooks)
 
 BASE_CONFIG = os.path.join(
     PROJECT_ROOT, 'configs-h', '_base_', 'models', 'vision-topp-cnn.py')
@@ -159,28 +158,30 @@ def _build_model(cfg: Config):
 
 
 def _measure(model, input_shape=(3, 256, 256)):
-    """用 forward hook 统计 FLOPs / 实际触达 Params。"""
-    flops_dict, active_param_ids, hooks = attach_flops_hooks(model)
-
+    """使用 mmseg/mmengine 官方口径统计 FLOPs / Params。"""
     data = torch.rand(1, *input_shape)
-    seg_sample = SegDataSample(metainfo={
-        'ori_shape': input_shape[-2:],
-        'pad_shape': input_shape[-2:],
-        'img_shape': input_shape[-2:],
-    })
-    with torch.no_grad():
-        if hasattr(model, 'data_preprocessor') and model.data_preprocessor is not None:
-            out = model.data_preprocessor(
-                {'inputs': data, 'data_samples': [seg_sample]})
-            model(out['inputs'], out['data_samples'], mode='predict')
-        else:
-            model(data, [seg_sample], mode='predict')
+    # 官方 get_model_complexity_info 需要 tensor 输入；这里与 get_flops.py 一致，
+    # 先过 data_preprocessor，再把预处理后的 inputs 交给复杂度分析。
+    if hasattr(model, 'data_preprocessor') and model.data_preprocessor is not None:
+        seg_sample = SegDataSample(metainfo={
+            'ori_shape': input_shape[-2:],
+            'pad_shape': input_shape[-2:],
+            'img_shape': input_shape[-2:],
+        })
+        out = model.data_preprocessor(
+            {'inputs': [data], 'data_samples': [seg_sample]})
+        inputs = out['inputs']
+    else:
+        inputs = data
 
-    remove_hooks(hooks)
-
-    total_flops = sum(flops_dict.values())
-    # 恢复上一版语义：只统计前向真正触达的参数，关闭 FAM/VFM/CNN 时不计入闲置参数。
-    total_params = count_active_params(model, active_param_ids)
+    outputs = get_model_complexity_info(
+        model,
+        input_shape=None,
+        inputs=inputs,
+        show_table=False,
+        show_arch=False)
+    total_flops = outputs['flops']
+    total_params = outputs['params']
     del model
     torch.cuda.empty_cache() if torch.cuda.is_available() else None
     return _format_size(total_flops), _format_size(total_params)
