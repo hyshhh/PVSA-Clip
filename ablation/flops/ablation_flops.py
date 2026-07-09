@@ -159,20 +159,22 @@ def _build_model(cfg: Config):
 
 def _measure(model, input_shape=(3, 256, 256)):
     """使用 mmseg/mmengine 官方口径统计 FLOPs / Params。"""
-    data = torch.rand(1, *input_shape)
-    # 官方 get_model_complexity_info 需要 tensor 输入；这里与 get_flops.py 一致，
-    # 先过 data_preprocessor，再把预处理后的 inputs 交给复杂度分析。
+    # 与 tools/analysis_tools/get_flops.py 保持一致：
+    # 传入未 batch 的 (C,H,W)，由 data_preprocessor 组 batch，避免出现 5D 输入。
+    result_meta = {
+        'ori_shape': input_shape[-2:],
+        'pad_shape': input_shape[-2:],
+        'img_shape': input_shape[-2:],
+    }
+    data_batch = {
+        'inputs': [torch.rand(input_shape)],
+        'data_samples': [SegDataSample(metainfo=result_meta)],
+    }
     if hasattr(model, 'data_preprocessor') and model.data_preprocessor is not None:
-        seg_sample = SegDataSample(metainfo={
-            'ori_shape': input_shape[-2:],
-            'pad_shape': input_shape[-2:],
-            'img_shape': input_shape[-2:],
-        })
-        out = model.data_preprocessor(
-            {'inputs': [data], 'data_samples': [seg_sample]})
-        inputs = out['inputs']
+        data = model.data_preprocessor(data_batch)
+        inputs = data['inputs']
     else:
-        inputs = data
+        inputs = torch.rand(1, *input_shape)
 
     outputs = get_model_complexity_info(
         model,
