@@ -77,8 +77,6 @@ class Block(nn.Module):
                  attention_type='topp',
                  ):
         super().__init__()
-        if topk <= 0:
-            raise ValueError(f'Block only supports topk > 0, but got {topk}')
         if not pre_norm:
             raise ValueError('Block only supports pre_norm=True')
         if layer_scale_init_value > 0:
@@ -92,45 +90,47 @@ class Block(nn.Module):
             self.pos_embed = nn.Conv2d(dim, dim, kernel_size=before_attn_dwconv, padding=1, groups=dim)
         else:
             self.pos_embed = lambda x: 0
-        if topk > 0 and not use_plain_attn:
-            if attention_type == 'topp':
-                # PVSA: Top-P 路由 + route_mask 硬屏蔽
-                self.PA = ToppAttention(dim=dim, num_heads=num_heads, n_win=n_win, qk_dim=qk_dim,
-                                        qk_scale=qk_scale, kv_per_win=kv_per_win,
-                                        kv_downsample_ratio=kv_downsample_ratio,
-                                        kv_downsample_kernel=kv_downsample_kernel,
-                                        kv_downsample_mode=kv_downsample_mode,
-                                        topk=topk, param_attention=param_attention, param_routing=param_routing,
-                                        diff_routing=diff_routing, soft_routing=soft_routing,
-                                        side_dwconv=side_dwconv,
-                                        auto_pad=auto_pad, W=self.W,
-                                        topp_flash_block_windows=topp_flash_block_windows,
-                                        topp_flash_backend=topp_flash_backend,
-                                        topp_route_configs=topp_route_configs,
-                                        attn_vis_config=attn_vis_config,
-                                        debug_route=debug_route,
-                                        topp_flash_debug=topp_flash_debug,
-                                        use_route_mask=use_route_mask,
-                                        route_pooling=route_pooling)
-            elif attention_type == 'bra':
-                # BRA: 标准 Bi-Level Routing Attention（固定 top-k，无 Top-P 裁剪）
-                self.PA = BiLevelRoutingAttention(dim=dim, num_heads=num_heads, n_win=n_win,
-                                                   qk_dim=qk_dim, qk_scale=qk_scale,
-                                                   kv_per_win=kv_per_win,
-                                                   kv_downsample_ratio=kv_downsample_ratio,
-                                                   kv_downsample_kernel=kv_downsample_kernel,
-                                                   kv_downsample_mode=kv_downsample_mode,
-                                                   topk=topk, param_attention=param_attention,
-                                                   param_routing=param_routing,
-                                                   diff_routing=diff_routing,
-                                                   soft_routing=soft_routing,
-                                                   side_dwconv=side_dwconv,
-                                                   auto_pad=auto_pad)
-            self._use_plain_attn = False
-        elif topk > 0 and use_plain_attn:
-            # 最后一层用普通 self-attention（token 数少，O(n²) 可接受）
+        # topk<=0（如 BRA 默认最后一阶段 -1）或显式 plain：走普通 self-attention
+        if use_plain_attn or topk <= 0:
             self.PA = Attention(dim=dim, num_heads=num_heads)
             self._use_plain_attn = True
+        elif attention_type == 'topp':
+            # PVSA: Top-P 路由 + route_mask 硬屏蔽
+            self.PA = ToppAttention(dim=dim, num_heads=num_heads, n_win=n_win, qk_dim=qk_dim,
+                                    qk_scale=qk_scale, kv_per_win=kv_per_win,
+                                    kv_downsample_ratio=kv_downsample_ratio,
+                                    kv_downsample_kernel=kv_downsample_kernel,
+                                    kv_downsample_mode=kv_downsample_mode,
+                                    topk=topk, param_attention=param_attention, param_routing=param_routing,
+                                    diff_routing=diff_routing, soft_routing=soft_routing,
+                                    side_dwconv=side_dwconv,
+                                    auto_pad=auto_pad, W=self.W,
+                                    topp_flash_block_windows=topp_flash_block_windows,
+                                    topp_flash_backend=topp_flash_backend,
+                                    topp_route_configs=topp_route_configs,
+                                    attn_vis_config=attn_vis_config,
+                                    debug_route=debug_route,
+                                    topp_flash_debug=topp_flash_debug,
+                                    use_route_mask=use_route_mask,
+                                    route_pooling=route_pooling)
+            self._use_plain_attn = False
+        elif attention_type == 'bra':
+            # BRA: 标准 Bi-Level Routing Attention（固定 top-k，无 Top-P 裁剪）
+            self.PA = BiLevelRoutingAttention(dim=dim, num_heads=num_heads, n_win=n_win,
+                                               qk_dim=qk_dim, qk_scale=qk_scale,
+                                               kv_per_win=kv_per_win,
+                                               kv_downsample_ratio=kv_downsample_ratio,
+                                               kv_downsample_kernel=kv_downsample_kernel,
+                                               kv_downsample_mode=kv_downsample_mode,
+                                               topk=topk, param_attention=param_attention,
+                                               param_routing=param_routing,
+                                               diff_routing=diff_routing,
+                                               soft_routing=soft_routing,
+                                               side_dwconv=side_dwconv,
+                                               auto_pad=auto_pad)
+            self._use_plain_attn = False
+        else:
+            raise ValueError(f'Unsupported attention_type: {attention_type}')
         self.norm3 = nn.LayerNorm(dim, eps=1e-6)
         self.norm4 = nn.LayerNorm(dim, eps=1e-6)
         self.mlp2 = nn.Sequential(nn.Linear(dim, int(mlp_ratio * dim)),
@@ -557,9 +557,13 @@ class VTFormer(nn.Module):
         self.debug_route = debug_route
         self.use_route_mask = use_route_mask
         self.attention_type = attention_type
-        # BRA 模式默认 topks [1,4,16,-1]；PVSA 模式默认 [8,8,-1,-1]
-        if topks is None:
-            topks = [1, 4, 16, -1] if attention_type == 'bra' else [8, 8, -1, -1]
+        # BRA 模式固定使用标准 BiFormer topks，避免沿用 PVSA 配置里的 [16,12,8,6]。
+        # PVSA(topp) 才使用配置传入的 topks；未传时回退 [8,8,-1,-1]。
+        if attention_type == 'bra':
+            topks = [1, 4, 16, -1]
+        elif topks is None:
+            topks = [8, 8, -1, -1]
+        self.topks = list(topks)
         self.use_fam = use_fam
         self.route_pooling = route_pooling
         self.use_plain_attn_last_stage = use_plain_attn_last_stage
@@ -705,7 +709,8 @@ class VTFormer(nn.Module):
                         topp_flash_debug=self.topp_flash_debug,
                         use_route_mask=self.use_route_mask,
                         route_pooling=self.route_pooling,
-                        use_plain_attn=(self.use_plain_attn_last_stage and i == 3),
+                        use_plain_attn=(
+                            (self.use_plain_attn_last_stage and i == 3) or topks[i] <= 0),
                         attention_type=self.attention_type
                         ) for j in range(depth[i])],
             )

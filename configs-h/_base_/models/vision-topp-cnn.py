@@ -21,7 +21,10 @@ model = dict(
         n_win=7,
         kv_downsample_mode='identity',
         kv_per_wins=[-1, -1, -1, -1],
+        # PVSA(topp) 使用该 topks；切到 attention_type='bra' 时会强制覆盖为 [1, 4, 16, -1]
         topks=[16, 12, 8, 6],
+        # BRA 默认 topks（BiFormer 标准配置；attention_type='bra' 时生效）
+        # bra_topks=[1, 4, 16, -1],
         # Top-P v3 路由参数表
         topp_route_configs={
             16: dict(maxk=5, mink=1, p=0.2, temperature=0.5, energy=3.0),

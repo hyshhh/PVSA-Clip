@@ -216,8 +216,9 @@ def main():
             if hasattr(model, 'backbone') and hasattr(model.backbone, 'stages'):
                 first_block = model.backbone.stages[0][0]
                 if hasattr(first_block, 'PA'):
+                    topks = getattr(model.backbone, 'topks', None)
                     print(f'  attention_type={cfg.model.backbone.get("attention_type", "topp")} '
-                          f'→ PA={type(first_block.PA).__name__}')
+                          f'topks={topks} → PA={type(first_block.PA).__name__}')
             flops, params = _measure(model, input_shape)
             results.append((exp_id, exp_name, params, flops))
             print(f'  Params: {params}  |  FLOPs: {flops}')
@@ -243,7 +244,7 @@ def main():
         print(f'{exp_id:<10} {exp_name:<42} {params:>10} {flops:>12}')
 
     print('-' * 76)
-    print('注: PVSA=attention_type\'topp\'(Top-P路由+route_mask), BRA=attention_type\'bra\'(标准固定top-k)。')
+    print('注: PVSA=attention_type\'topp\'(Top-P路由+route_mask); BRA=attention_type\'bra\' 默认 topks=[1,4,16,-1]。')
     print('    C+T / T+C 为顺序分支（BiFormer_sequential），通过 branch_order 控制方向。')
     print('    TC1/TC2 为并行双分支（BiFormer_fusion_baseline），通过 use_fam / cross_stage_fusion_mode 控制。')
     print('=' * 76)
