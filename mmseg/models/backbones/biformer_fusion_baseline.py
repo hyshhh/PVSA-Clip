@@ -123,6 +123,15 @@ class BiFormer_fusion_baseline(VTFormer):
         trans_features=[]
         cnn_features=[]
         fused_features=[]
+
+        # ── CNN 分支全零时：纯 Transformer 路径，跳过 CNN/FAM/Fusion ──
+        if getattr(self, '_cnn_disabled', False):
+            for i in range(4):
+                x = self.trans_downsample_layers[i](x)
+                x = self.stages[i](x)
+                out.append(x)
+            return out
+
         for i in range(4):
             if vis_enabled and (not vis_once or not getattr(self, '_feature_vis_saved', False)):
                 self._save_feature_channel_as_image(x, f'{vis_dir}/stage{i}_xinput.png', vis_out_size, vis_reduce)
@@ -133,7 +142,8 @@ class BiFormer_fusion_baseline(VTFormer):
                 self._save_feature_channel_as_image(x, f'{vis_dir}/stage{i}_before_FAM_x.png', vis_out_size, vis_reduce)
                 self._save_feature_channel_as_image(cnn_out, f'{vis_dir}/stage{i}_before_FAM_cnn.png', vis_out_size, vis_reduce)
 
-            x, cnn_out = self.FAM[i](x, cnn_out)
+            if self.use_fam:
+                x, cnn_out = self.FAM[i](x, cnn_out)
             trans_features.append(x)
             cnn_features.append(cnn_out)
 
@@ -276,3 +286,152 @@ class BiFormer_fusion_baseline(VTFormer):
             for m in self.modules():
                 if isinstance(m, torch.nn.BatchNorm2d):
                     m.eval()
+
+
+@MODELS.register_module()
+class BiFormer_sequential(BiFormer_fusion_baseline):
+    """顺序双分支骨干：C+T / T+C。
+
+    与并行版 BiFormer_fusion_baseline 的区别：
+      - branch_order='cnn_first'  → C+T：CNN 先跑，输出投影后喂给 Transformer
+      - branch_order='trans_first' → T+C：Transformer 先跑，输出投影后喂给 CNN
+    第二分支的 stem 被跳过，改用 1×1 投影层匹配通道数。
+
+    融合流程（FAM / VFM / self.fusion）与并行版完全一致。
+    """
+
+    def __init__(self, branch_order='cnn_first', **kwargs):
+        super().__init__(**kwargs)
+        self.branch_order = branch_order
+        embed_dim = self.embed_dim  # [64, 128, 256, 512]
+
+        # ── 投影层：将第一分支输出通道映射到第二分支 stage 期望的通道 ──
+        if branch_order == 'cnn_first':
+            # CNN → T：CNN stage 输出投影到 Transformer stage 输入通道
+            self.cnn_to_trans_proj = nn.ModuleList([
+                nn.Conv2d(embed_dim[i], embed_dim[i], kernel_size=1, bias=False)
+                for i in range(4)
+            ])
+        else:
+            # T → CNN：Transformer stage 输出投影到 CNN stage 输入通道
+            self.trans_to_cnn_proj = nn.ModuleList([
+                nn.Conv2d(embed_dim[i], embed_dim[i], kernel_size=1, bias=False)
+                for i in range(4)
+            ])
+
+        self.apply(self._init_weights)
+
+    # ── 顺序 forward ────────────────────────────────────────────────────────
+    def forward_features(self, x: torch.Tensor):
+        vis_cfg = self.feature_vis_config
+        vis_enabled = vis_cfg.get('enabled', False)
+        vis_once = vis_cfg.get('once', True)
+        vis_dir = vis_cfg.get('save_dir', 'cam/features_imgs4')
+        vis_out_size = vis_cfg.get('out_size', 512)
+        vis_reduce = vis_cfg.get('channel_reduce', 'mean')
+
+        if vis_enabled and (not vis_once or not getattr(self, '_feature_vis_saved', False)):
+            os.makedirs(vis_dir, exist_ok=True)
+
+        out = []
+        trans_features = []
+        cnn_features = []
+        fused_features = []
+
+        # ── CNN 分支全零时：纯 Transformer 路径 ──
+        if getattr(self, '_cnn_disabled', False):
+            for i in range(4):
+                x = self.trans_downsample_layers[i](x)
+                x = self.stages[i](x)
+                out.append(x)
+            return out
+
+        if self.branch_order == 'cnn_first':
+            # ══════════ C+T：CNN 先跑，投影后喂给 Transformer ══════════
+            cnn_out = x
+            for i in range(4):
+                cnn_out = self.cnn_downsample_layers[i](cnn_out)
+                # 投影 CNN 输出 → Transformer stage 期望的通道
+                t_in = self.cnn_to_trans_proj[i](cnn_out)
+                x = self.trans_downsample_layers[i](t_in)
+                x = self.stages[i](x)
+
+                if self.use_fam:
+                    x, cnn_out = self.FAM[i](x, cnn_out)
+                trans_features.append(x)
+                cnn_features.append(cnn_out)
+
+        else:
+            # ══════════ T+C：Transformer 先跑，投影后喂给 CNN ══════════
+            trans_out = x
+            for i in range(4):
+                trans_out = self.trans_downsample_layers[i](trans_out)
+                trans_out = self.stages[i](trans_out)
+                # 投影 Transformer 输出 → CNN stage 期望的通道
+                c_in = self.trans_to_cnn_proj[i](trans_out)
+                cnn_out = self.cnn_downsample_layers[i](c_in)
+
+                if self.use_fam:
+                    trans_out, cnn_out = self.FAM[i](trans_out, cnn_out)
+                trans_features.append(trans_out)
+                cnn_features.append(cnn_out)
+
+        # ── 跨层融合 VFM（与并行版逻辑一致）──────────────────────────
+        for i in range(3):
+            trans_feat = trans_features[i]
+            cnn_feat = cnn_features[i]
+            if self.cross_stage_fusion_mode == 'none':
+                fused_features.append(
+                    self.fusion[i](torch.cat((trans_feat, cnn_feat), dim=1)))
+                continue
+            target_size = trans_features[i].shape[2:]
+            if self.cross_stage_fusion_mode in {'gate', 'gate_concat', 'cross_gate'}:
+                trans_proj = self.trans_conv[i](trans_features[i + 1])
+                cnn_proj = self.cnn_conv[i](cnn_features[i + 1])
+                trans_mask = self.sigmoid(self.trans_bn[i](trans_proj))
+                cnn_mask = self.sigmoid(self.cnn_bn[i](cnn_proj))
+                trans_scale = 2.0 * self.trans_gate_scale[i].sigmoid()
+                cnn_scale = 2.0 * self.cnn_gate_scale[i].sigmoid()
+                trans_mask = F.interpolate(trans_mask, size=target_size,
+                                           mode='bilinear', align_corners=False)
+                cnn_mask = F.interpolate(cnn_mask, size=target_size,
+                                         mode='bilinear', align_corners=False)
+                if self.cross_stage_fusion_mode == 'cross_gate':
+                    trans_feat = trans_feat * (1 + trans_scale * (cnn_mask - 0.5))
+                    cnn_feat = cnn_feat * (1 + cnn_scale * (trans_mask - 0.5))
+                else:
+                    trans_feat = trans_feat * (1 + trans_scale * (trans_mask - 0.5))
+                    cnn_feat = cnn_feat * (1 + cnn_scale * (cnn_mask - 0.5))
+            if self.cross_stage_fusion_mode in {'concat', 'gate_concat', 'cross_concat'}:
+                if self.cross_stage_fusion_mode in {'concat', 'cross_concat'}:
+                    trans_proj = self.trans_conv[i](trans_features[i + 1])
+                    cnn_proj = self.cnn_conv[i](cnn_features[i + 1])
+                trans_high = F.interpolate(trans_proj, size=target_size,
+                                           mode='bilinear', align_corners=False)
+                cnn_high = F.interpolate(cnn_proj, size=target_size,
+                                         mode='bilinear', align_corners=False)
+                if self.cross_stage_fusion_mode == 'cross_concat':
+                    trans_feat = self.trans_cross_stage_fusion[i](
+                        torch.cat((trans_feat, cnn_high), dim=1))
+                    cnn_feat = self.cnn_cross_stage_fusion[i](
+                        torch.cat((cnn_feat, trans_high), dim=1))
+                else:
+                    trans_feat = self.trans_cross_stage_fusion[i](
+                        torch.cat((trans_feat, trans_high), dim=1))
+                    cnn_feat = self.cnn_cross_stage_fusion[i](
+                        torch.cat((cnn_feat, trans_high), dim=1))
+            fused_features.append(
+                self.fusion[i](torch.cat((trans_feat, cnn_feat), dim=1)))
+
+        fused_features.append(
+            self.fusion[3](torch.cat((trans_features[3], cnn_features[3]), dim=1)))
+
+        for i in range(4):
+            out.append(self.extra_norms[i](fused_features[i]))
+
+        if vis_enabled:
+            self._feature_vis_saved = True
+        return tuple(out)
+
+    def forward(self, x: torch.Tensor):
+        return self.forward_features(x)

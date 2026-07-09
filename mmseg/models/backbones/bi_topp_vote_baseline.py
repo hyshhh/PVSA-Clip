@@ -9,6 +9,7 @@ from fairscale.nn.checkpoint import checkpoint_wrapper
 from timm.models.layers import DropPath, trunc_normal_
 from ..utils.common import Attention, DWConv
 from ..utils.top_p_bra import ToppAttention
+from ..utils.bra_legacy import BiLevelRoutingAttention
 from mmseg.registry import MODELS
 
 
@@ -73,6 +74,7 @@ class Block(nn.Module):
                  use_route_mask=False,
                  route_pooling='avg',
                  use_plain_attn=False,
+                 attention_type='topp',
                  ):
         super().__init__()
         if topk <= 0:
@@ -91,23 +93,39 @@ class Block(nn.Module):
         else:
             self.pos_embed = lambda x: 0
         if topk > 0 and not use_plain_attn:
-            self.PA = ToppAttention(dim=dim, num_heads=num_heads, n_win=n_win, qk_dim=qk_dim,
-                                    qk_scale=qk_scale, kv_per_win=kv_per_win,
-                                    kv_downsample_ratio=kv_downsample_ratio,
-                                    kv_downsample_kernel=kv_downsample_kernel,
-                                    kv_downsample_mode=kv_downsample_mode,
-                                    topk=topk, param_attention=param_attention, param_routing=param_routing,
-                                    diff_routing=diff_routing, soft_routing=soft_routing,
-                                    side_dwconv=side_dwconv,
-                                    auto_pad=auto_pad, W=self.W,
-                                    topp_flash_block_windows=topp_flash_block_windows,
-                                    topp_flash_backend=topp_flash_backend,
-                                    topp_route_configs=topp_route_configs,
-                                    attn_vis_config=attn_vis_config,
-                                    debug_route=debug_route,
-                                    topp_flash_debug=topp_flash_debug,
-                                    use_route_mask=use_route_mask,
-                                    route_pooling=route_pooling)
+            if attention_type == 'topp':
+                # PVSA: Top-P 路由 + route_mask 硬屏蔽
+                self.PA = ToppAttention(dim=dim, num_heads=num_heads, n_win=n_win, qk_dim=qk_dim,
+                                        qk_scale=qk_scale, kv_per_win=kv_per_win,
+                                        kv_downsample_ratio=kv_downsample_ratio,
+                                        kv_downsample_kernel=kv_downsample_kernel,
+                                        kv_downsample_mode=kv_downsample_mode,
+                                        topk=topk, param_attention=param_attention, param_routing=param_routing,
+                                        diff_routing=diff_routing, soft_routing=soft_routing,
+                                        side_dwconv=side_dwconv,
+                                        auto_pad=auto_pad, W=self.W,
+                                        topp_flash_block_windows=topp_flash_block_windows,
+                                        topp_flash_backend=topp_flash_backend,
+                                        topp_route_configs=topp_route_configs,
+                                        attn_vis_config=attn_vis_config,
+                                        debug_route=debug_route,
+                                        topp_flash_debug=topp_flash_debug,
+                                        use_route_mask=use_route_mask,
+                                        route_pooling=route_pooling)
+            elif attention_type == 'bra':
+                # BRA: 标准 Bi-Level Routing Attention（固定 top-k，无 Top-P 裁剪）
+                self.PA = BiLevelRoutingAttention(dim=dim, num_heads=num_heads, n_win=n_win,
+                                                   qk_dim=qk_dim, qk_scale=qk_scale,
+                                                   kv_per_win=kv_per_win,
+                                                   kv_downsample_ratio=kv_downsample_ratio,
+                                                   kv_downsample_kernel=kv_downsample_kernel,
+                                                   kv_downsample_mode=kv_downsample_mode,
+                                                   topk=topk, param_attention=param_attention,
+                                                   param_routing=param_routing,
+                                                   diff_routing=diff_routing,
+                                                   soft_routing=soft_routing,
+                                                   side_dwconv=side_dwconv,
+                                                   auto_pad=auto_pad)
             self._use_plain_attn = False
         elif topk > 0 and use_plain_attn:
             # 最后一层用普通 self-attention（token 数少，O(n²) 可接受）
@@ -494,7 +512,7 @@ class VTFormer(nn.Module):
                  n_win=7,
                  kv_downsample_mode='ada_avgpool',
                  kv_per_wins=[2, 2, -1, -1],
-                 topks=[8, 8, -1, -1],
+                 topks=None,
                  side_dwconv=5,
                  layer_scale_init_value=-1,
                  qk_dims=[None, None, None, None],
@@ -521,10 +539,12 @@ class VTFormer(nn.Module):
                  use_route_mask=False,
                  route_pooling='avg',
                  use_plain_attn_last_stage=False,
+                 attention_type='topp',
                  fam_reduction=4,
                  cnn_block_layers=[2, 1, 2, 1],
                  cnn_block_type='dwconv',
                  feature_vis_config=None,
+                 use_fam=True,
                  **kwargs):
 
         super().__init__()
@@ -536,8 +556,15 @@ class VTFormer(nn.Module):
         self.attn_vis_config = attn_vis_config
         self.debug_route = debug_route
         self.use_route_mask = use_route_mask
+        self.attention_type = attention_type
+        # BRA 模式默认 topks [1,4,16,-1]；PVSA 模式默认 [8,8,-1,-1]
+        if topks is None:
+            topks = [1, 4, 16, -1] if attention_type == 'bra' else [8, 8, -1, -1]
+        self.use_fam = use_fam
         self.route_pooling = route_pooling
         self.use_plain_attn_last_stage = use_plain_attn_last_stage
+        # cnn_block_layers 全零时禁用 CNN 分支，只走 Transformer
+        self._cnn_disabled = all(v == 0 for v in cnn_block_layers)
         self.feature_vis_config = feature_vis_config or {}
         self._inference_fused = False
         self._disable_inference_fusion = False
@@ -678,7 +705,8 @@ class VTFormer(nn.Module):
                         topp_flash_debug=self.topp_flash_debug,
                         use_route_mask=self.use_route_mask,
                         route_pooling=self.route_pooling,
-                        use_plain_attn=(self.use_plain_attn_last_stage and i == 3)
+                        use_plain_attn=(self.use_plain_attn_last_stage and i == 3),
+                        attention_type=self.attention_type
                         ) for j in range(depth[i])],
             )
             if i in use_checkpoint_stages:

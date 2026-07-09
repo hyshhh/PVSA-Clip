@@ -44,6 +44,10 @@ ablation/*/
 !ablation/clip_head_fix_prompt/
 ablation/clip_head_fix_prompt/*
 !ablation/clip_head_fix_prompt/clip_head.py
+!ablation/flops/
+ablation/flops/*
+!ablation/flops/*.py
+!ablation/flops/*.md
 
 # 模型权重 / 大文件
 *.pt

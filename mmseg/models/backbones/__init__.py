@@ -2,7 +2,7 @@
 from .bi_topp_vote import VTFormer
 from .biformer_fusion import BiFormer_fusion
 from .bi_topp_vote_baseline import VTFormer as VTFormer_baseline
-from .biformer_fusion_baseline import BiFormer_fusion_baseline
+from .biformer_fusion_baseline import BiFormer_fusion_baseline, BiFormer_sequential
 # 标准 mmseg backbone（用于对比实验）
 from .resnet import ResNet
 from .swin import SwinTransformer
@@ -11,6 +11,7 @@ from .biformer import BiFormer_fusion_clip, BiFormer_standalone
 
 __all__ = [
     'VTFormer', 'BiFormer_fusion', 'VTFormer_baseline', 'BiFormer_fusion_baseline',
+    'BiFormer_sequential',
     'ResNet', 'SwinTransformer', 'MixVisionTransformer', 'BiFormer_standalone',
     'BiFormer_fusion_clip',
 ]

@@ -29,6 +29,8 @@ model = dict(
             8: dict(maxk=25, mink=5, p=0.6, temperature=8, energy=12.0),
         },
         debug_route=False,
+        # 自注意力类型: 'topp'=Top-P路由(PVSA) / 'bra'=标准Bi-Level Routing Attention
+        attention_type='topp',
         use_route_mask=True,
         side_dwconv=5,
         before_attn_dwconv=3,
