@@ -100,14 +100,20 @@ EXPERIMENTS = [
     # 实验组 2-B：融合方式对比
     # ════════════════════════════════════════════════════════════════════════
     ('2-B-1', 'C+T (sequential, CNN→Trans)', {
+        # 顺序结构只比分支方向，关闭 FAM/VFM，避免和 TC1 混入融合模块参数差
         'model.backbone.type': 'BiFormer_sequential',
         'model.backbone.branch_order': 'cnn_first',
         'model.backbone.attention_type': 'bra',
+        'model.backbone.use_fam': False,
+        'model.backbone.cross_stage_fusion_mode': 'none',
     }),
     ('2-B-2', 'T+C (sequential, Trans→CNN)', {
+        # 顺序结构只比分支方向，关闭 FAM/VFM，避免和 TC1 混入融合模块参数差
         'model.backbone.type': 'BiFormer_sequential',
         'model.backbone.branch_order': 'trans_first',
         'model.backbone.attention_type': 'bra',
+        'model.backbone.use_fam': False,
+        'model.backbone.cross_stage_fusion_mode': 'none',
     }),
     ('2-B-3', 'TC1 (parallel, concat only)', {
         # 无 FAM、无 VFM，双分支直接 concat → 1×1 conv
@@ -251,8 +257,8 @@ def main():
 
     print('-' * 76)
     print('注: PVSA=attention_type\'topp\'(Top-P路由+route_mask); BRA=attention_type\'bra\' 默认 topks=[1,4,16,-1]。')
-    print('    C+T / T+C 为顺序分支（BiFormer_sequential），通过 branch_order 控制方向。')
-    print('    TC1/TC2 为并行双分支（BiFormer_fusion_baseline），通过 use_fam / cross_stage_fusion_mode 控制。')
+    print('    C+T / T+C 为顺序分支（BiFormer_sequential），branch_order 控制方向，默认关闭 FAM/VFM。')
+    print('    TC1=并行+直接 concat（无 FAM/VFM）；TC2=并行+FAM+VFM。')
     print('=' * 76)
 
     # ── 保存 CSV ─────────────────────────────────────────────────────────
