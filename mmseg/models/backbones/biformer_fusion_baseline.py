@@ -304,9 +304,10 @@ class BiFormer_sequential(BiFormer_fusion_baseline):
     """顺序双分支骨干：C+T / T+C。
 
     与并行版 BiFormer_fusion_baseline 的区别：
-      - branch_order='cnn_first'  → C+T：CNN 先跑，输出投影后喂给 Transformer
-      - branch_order='trans_first' → T+C：Transformer 先跑，输出投影后喂给 CNN
-    第二分支的 stem 被跳过，改用 1×1 投影层匹配通道数。
+      - branch_order='cnn_first'  → C+T：CNN 先跑，输出直接喂给 Transformer
+      - branch_order='trans_first' → T+C：Transformer 先跑，输出直接喂给 CNN
+    第二分支不再建 stem / stride-2 下采样层，也不再使用 1×1 映射层；
+    通道与分辨率已由第一分支对齐，参数量会真实小于并行 TC1。
 
     融合流程（FAM / VFM / self.fusion）与并行版完全一致。
     """
@@ -314,37 +315,35 @@ class BiFormer_sequential(BiFormer_fusion_baseline):
     def __init__(self, branch_order='cnn_first', **kwargs):
         super().__init__(**kwargs)
         self.branch_order = branch_order
-        embed_dim = self.embed_dim  # [64, 128, 256, 512]
 
-        # ── 投影层：将第一分支输出通道映射到第二分支 stage 期望的通道 ──
+        # 顺序模式：第二分支跳过 stem/下采样，直接吃第一分支同 stage 输出。
+        # 这里把对应层真正删掉，而不是前向跳过但仍保留参数。
         if branch_order == 'cnn_first':
-            # CNN → T：CNN stage 输出投影到 Transformer stage 输入通道
-            self.cnn_to_trans_proj = nn.ModuleList([
-                nn.Conv2d(embed_dim[i], embed_dim[i], kernel_size=1, bias=False)
-                for i in range(4)
+            # C+T：第二分支是 Transformer
+            self.trans_downsample_layers = nn.ModuleList([
+                self._drop_stage_downsample(layer, stage_idx)
+                for stage_idx, layer in enumerate(self.trans_downsample_layers)
             ])
         else:
-            # T → CNN：Transformer stage 输出投影到 CNN stage 输入通道
-            self.trans_to_cnn_proj = nn.ModuleList([
-                nn.Conv2d(embed_dim[i], embed_dim[i], kernel_size=1, bias=False)
-                for i in range(4)
+            # T+C：第二分支是 CNN
+            self.cnn_downsample_layers = nn.ModuleList([
+                self._drop_stage_downsample(layer, stage_idx)
+                for stage_idx, layer in enumerate(self.cnn_downsample_layers)
             ])
 
         self.apply(self._init_weights)
 
-    def _forward_trans_stage_from_stage_feature(self, stage_idx, x):
-        trans_layer = self.trans_downsample_layers[stage_idx]
-        start_idx = 4 if stage_idx == 0 else 1
-        for module in list(trans_layer.children())[start_idx:]:
-            x = module(x)
-        return self.stages[stage_idx](x)
+    @staticmethod
+    def _drop_stage_downsample(layer, stage_idx):
+        """去掉 stage 前缀下采样卷积，只保留后续 BN/激活/block。
 
-    def _forward_cnn_stage_from_stage_feature(self, stage_idx, x):
-        cnn_layer = self.cnn_downsample_layers[stage_idx]
+        stage0 stem 结构前 4 项是两层 stride-2 stem；
+        后续 stage 第 0 项是 stride-2 下采样卷积。
+        """
+        modules = list(layer.children())
         start_idx = 4 if stage_idx == 0 else 1
-        for module in list(cnn_layer.children())[start_idx:]:
-            x = module(x)
-        return x
+        kept = modules[start_idx:]
+        return nn.Sequential(*kept) if kept else nn.Identity()
 
     # ── 顺序 forward ────────────────────────────────────────────────────────
     def forward_features(self, x: torch.Tensor):
@@ -372,13 +371,13 @@ class BiFormer_sequential(BiFormer_fusion_baseline):
             return out
 
         if self.branch_order == 'cnn_first':
-            # ══════════ C+T：CNN 先跑，投影后喂给 Transformer ══════════
+            # ══════════ C+T：CNN 先跑，直接喂给 Transformer ══════════
             cnn_out = x
             for i in range(4):
                 cnn_out = self.cnn_downsample_layers[i](cnn_out)
-                # CNN 已经完成当前 stage 的下采样，第二分支只补齐归一化后直接进 Transformer block。
-                t_in = self.cnn_to_trans_proj[i](cnn_out)
-                x = self._forward_trans_stage_from_stage_feature(i, t_in)
+                # 第二分支已去掉 stem/下采样，直接接同 stage 特征
+                x = self.trans_downsample_layers[i](cnn_out)
+                x = self.stages[i](x)
 
                 if self.use_fam:
                     x, cnn_out = self.FAM[i](x, cnn_out)
@@ -386,14 +385,13 @@ class BiFormer_sequential(BiFormer_fusion_baseline):
                 cnn_features.append(cnn_out)
 
         else:
-            # ══════════ T+C：Transformer 先跑，投影后喂给 CNN ══════════
+            # ══════════ T+C：Transformer 先跑，直接喂给 CNN ══════════
             trans_out = x
             for i in range(4):
                 trans_out = self.trans_downsample_layers[i](trans_out)
                 trans_out = self.stages[i](trans_out)
-                # Transformer 已经完成当前 stage，下游 CNN 分支跳过 stem / stride-2 downsample。
-                c_in = self.trans_to_cnn_proj[i](trans_out)
-                cnn_out = self._forward_cnn_stage_from_stage_feature(i, c_in)
+                # 第二分支已去掉 stem/下采样，直接接同 stage 特征
+                cnn_out = self.cnn_downsample_layers[i](trans_out)
 
                 if self.use_fam:
                     trans_out, cnn_out = self.FAM[i](trans_out, cnn_out)
