@@ -18,6 +18,7 @@ from mmseg.models import BaseSegmentor
 from mmseg.registry import MODELS
 from mmseg.structures import SegDataSample
 from mmseg.utils import register_all_modules, sync_clip_embed_dim
+from tools.analysis_tools.flops_counter import attach_flops_hooks, remove_hooks
 
 try:
     from mmengine.analysis import get_model_complexity_info
@@ -103,32 +104,12 @@ def inference(args: argparse.Namespace, logger: MMLogger) -> dict:
         raise NotImplementedError('MaskFormer and Mask2Former are not '
                                   'supported yet.')
     # fvcore 对 nn.Identity 的别名处理有 bug，用 forward hook 手动统计
-    flops_dict = {}
-    hooks = []
-
-    def _make_hook(name):
-        def hook_fn(module, inp, out):
-            flops = 0
-            if isinstance(module, torch.nn.Linear):
-                flops = 2 * inp[0].shape[0] * module.in_features * module.out_features
-            elif isinstance(module, torch.nn.Conv2d):
-                out_h, out_w = out.shape[2], out.shape[3]
-                flops = 2 * module.in_channels * module.out_channels * \
-                    module.kernel_size[0] * module.kernel_size[1] * out_h * out_w // module.groups
-            elif isinstance(module, torch.nn.BatchNorm2d):
-                flops = inp[0].numel() * 2
-            if flops > 0:
-                flops_dict[name] = flops
-        return hook_fn
-
-    for name, module in model.named_modules():
-        hooks.append(module.register_forward_hook(_make_hook(name)))
+    flops_dict, hooks = attach_flops_hooks(model)
 
     with torch.no_grad():
         model(data['inputs'], data['data_samples'], mode='predict')
 
-    for h in hooks:
-        h.remove()
+    remove_hooks(hooks)
 
     total_flops = sum(flops_dict.values())
     total_params = sum(p.numel() for p in model.parameters())

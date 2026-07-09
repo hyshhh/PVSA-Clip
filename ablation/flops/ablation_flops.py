@@ -32,6 +32,7 @@ if PROJECT_ROOT not in sys.path:
 from mmseg.registry import MODELS
 from mmseg.utils import register_all_modules, sync_clip_embed_dim
 from mmseg.structures import SegDataSample
+from tools.analysis_tools.flops_counter import attach_flops_hooks, remove_hooks
 
 BASE_CONFIG = os.path.join(
     PROJECT_ROOT, 'configs-h', '_base_', 'models', 'vision-topp-cnn.py')
@@ -158,27 +159,7 @@ def _build_model(cfg: Config):
 
 def _measure(model, input_shape=(3, 256, 256)):
     """用 forward hook 统计 FLOPs / Params（兼容 fvcore 对 nn.Identity 的 bug）。"""
-    flops_dict = {}
-    hooks = []
-
-    def _make_hook(name):
-        def hook_fn(module, inp, out):
-            flops = 0
-            if isinstance(module, torch.nn.Linear):
-                flops = 2 * inp[0].shape[0] * module.in_features * module.out_features
-            elif isinstance(module, torch.nn.Conv2d):
-                out_h, out_w = out.shape[2], out.shape[3]
-                flops = (2 * module.in_channels * module.out_channels *
-                         module.kernel_size[0] * module.kernel_size[1] *
-                         out_h * out_w // module.groups)
-            elif isinstance(module, torch.nn.BatchNorm2d):
-                flops = inp[0].numel() * 2
-            if flops > 0:
-                flops_dict[name] = flops
-        return hook_fn
-
-    for name, module in model.named_modules():
-        hooks.append(module.register_forward_hook(_make_hook(name)))
+    flops_dict, hooks = attach_flops_hooks(model)
 
     data = torch.rand(1, *input_shape)
     seg_sample = SegDataSample(metainfo={
@@ -194,8 +175,7 @@ def _measure(model, input_shape=(3, 256, 256)):
         else:
             model(data, [seg_sample], mode='predict')
 
-    for h in hooks:
-        h.remove()
+    remove_hooks(hooks)
 
     total_flops = sum(flops_dict.values())
     total_params = sum(p.numel() for p in model.parameters())
@@ -230,6 +210,12 @@ def main():
         _apply_overrides(cfg, overrides)
         try:
             model = _build_model(cfg)
+            # 诊断：打印实际使用的注意力模块类型
+            if hasattr(model, 'backbone') and hasattr(model.backbone, 'stages'):
+                first_block = model.backbone.stages[0][0]
+                if hasattr(first_block, 'PA'):
+                    print(f'  attention_type={cfg.model.backbone.get("attention_type", "topp")} '
+                          f'→ PA={type(first_block.PA).__name__}')
             flops, params = _measure(model, input_shape)
             results.append((exp_id, exp_name, params, flops))
             print(f'  Params: {params}  |  FLOPs: {flops}')

@@ -321,6 +321,20 @@ class BiFormer_sequential(BiFormer_fusion_baseline):
 
         self.apply(self._init_weights)
 
+    def _forward_trans_stage_from_stage_feature(self, stage_idx, x):
+        trans_layer = self.trans_downsample_layers[stage_idx]
+        start_idx = 4 if stage_idx == 0 else 1
+        for module in list(trans_layer.children())[start_idx:]:
+            x = module(x)
+        return self.stages[stage_idx](x)
+
+    def _forward_cnn_stage_from_stage_feature(self, stage_idx, x):
+        cnn_layer = self.cnn_downsample_layers[stage_idx]
+        start_idx = 4 if stage_idx == 0 else 1
+        for module in list(cnn_layer.children())[start_idx:]:
+            x = module(x)
+        return x
+
     # ── 顺序 forward ────────────────────────────────────────────────────────
     def forward_features(self, x: torch.Tensor):
         vis_cfg = self.feature_vis_config
@@ -351,10 +365,9 @@ class BiFormer_sequential(BiFormer_fusion_baseline):
             cnn_out = x
             for i in range(4):
                 cnn_out = self.cnn_downsample_layers[i](cnn_out)
-                # 投影 CNN 输出 → Transformer stage 期望的通道
+                # CNN 已经完成当前 stage 的下采样，第二分支只补齐归一化后直接进 Transformer block。
                 t_in = self.cnn_to_trans_proj[i](cnn_out)
-                x = self.trans_downsample_layers[i](t_in)
-                x = self.stages[i](x)
+                x = self._forward_trans_stage_from_stage_feature(i, t_in)
 
                 if self.use_fam:
                     x, cnn_out = self.FAM[i](x, cnn_out)
@@ -367,9 +380,9 @@ class BiFormer_sequential(BiFormer_fusion_baseline):
             for i in range(4):
                 trans_out = self.trans_downsample_layers[i](trans_out)
                 trans_out = self.stages[i](trans_out)
-                # 投影 Transformer 输出 → CNN stage 期望的通道
+                # Transformer 已经完成当前 stage，下游 CNN 分支跳过 stem / stride-2 downsample。
                 c_in = self.trans_to_cnn_proj[i](trans_out)
-                cnn_out = self.cnn_downsample_layers[i](c_in)
+                cnn_out = self._forward_cnn_stage_from_stage_feature(i, c_in)
 
                 if self.use_fam:
                     trans_out, cnn_out = self.FAM[i](trans_out, cnn_out)
@@ -419,7 +432,7 @@ class BiFormer_sequential(BiFormer_fusion_baseline):
                     trans_feat = self.trans_cross_stage_fusion[i](
                         torch.cat((trans_feat, trans_high), dim=1))
                     cnn_feat = self.cnn_cross_stage_fusion[i](
-                        torch.cat((cnn_feat, trans_high), dim=1))
+                        torch.cat((cnn_feat, cnn_high), dim=1))
             fused_features.append(
                 self.fusion[i](torch.cat((trans_feat, cnn_feat), dim=1)))
 
