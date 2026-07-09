@@ -189,10 +189,10 @@ def _measure(model, input_shape=(3, 256, 256)):
     with torch.no_grad():
         if hasattr(model, 'data_preprocessor') and model.data_preprocessor is not None:
             out = model.data_preprocessor(
-                {'inputs': [data], 'data_samples': [seg_sample]})
+                {'inputs': data, 'data_samples': [seg_sample]})
             model(out['inputs'], out['data_samples'], mode='predict')
         else:
-            model([data], [seg_sample], mode='predict')
+            model(data, [seg_sample], mode='predict')
 
     for h in hooks:
         h.remove()
