@@ -159,25 +159,34 @@ EXPERIMENTS = [
     }),
 
     # ════════════════════════════════════════════════════════════════════════
-    # 实验组 3：FFM 内部 CA / SA 消融
-    # 对照 = Full（FFM√ PVSA√ VFM√），在此基础上只减 CA / SA
+    # 实验组 3：FFM 内部 CA / SA 消融（完整 2×2）
+    # 对照 = Full（PVSA√ VFM√），在此基础上开关 CA / SA
+    # CA×SA× 时不建整个 FAM（use_fam=False）
     # ════════════════════════════════════════════════════════════════════════
-    ('3-1', 'Full -SA (CA√ SA×)', {
+    ('3-1', 'Full CA× SA×', {
+        # 无 FFM，但仍开 PVSA + VFM
+        'model.backbone.use_fam': False,
+        'model.backbone.fam_use_channel': False,
+        'model.backbone.fam_use_spatial': False,
+        'model.backbone.attention_type': 'topp',
+        'model.backbone.cross_stage_fusion_mode': 'cross_concat',
+    }),
+    ('3-2', 'Full CA√ SA×', {
         'model.backbone.use_fam': True,
         'model.backbone.fam_use_channel': True,
         'model.backbone.fam_use_spatial': False,
         'model.backbone.attention_type': 'topp',
         'model.backbone.cross_stage_fusion_mode': 'cross_concat',
     }),
-    ('3-2', 'Full -CA (CA× SA√)', {
+    ('3-3', 'Full CA× SA√', {
         'model.backbone.use_fam': True,
         'model.backbone.fam_use_channel': False,
         'model.backbone.fam_use_spatial': True,
         'model.backbone.attention_type': 'topp',
         'model.backbone.cross_stage_fusion_mode': 'cross_concat',
     }),
-    ('3-3', 'Full (CA√ SA√)', {
-        # 与 1-5 Full 同配置，作为 CA/SA 消融对照
+    ('3-4', 'Full CA√ SA√', {
+        # 与 1-5 Full 同配置
         'model.backbone.use_fam': True,
         'model.backbone.fam_use_channel': True,
         'model.backbone.fam_use_spatial': True,
@@ -323,7 +332,7 @@ def main():
     print('注: 关模块就不建参数。FAM=use_fam；CA=fam_use_channel；SA=fam_use_spatial；VFM=cross_stage_fusion_mode。')
     print('    PVSA=attention_type\'topp\'；BRA=attention_type\'bra\' 默认 topks=[1,4,16,-1]；CNN全0=纯Transformer。')
     print('    C+T/T+C 顺序且关 FAM/VFM；TC1 并行无融合增强；TC2 并行+FAM+VFM。')
-    print('    2-A-1 纯 Transformer；2-A-2~5 同开 FAM/VFM 只改深度；3 组以 Full 为对照，再分别减 CA/SA。')
+    print('    2-A-1 纯 Transformer；2-A-2~5 同开 FAM/VFM 只改深度；3 组为 Full 上 CA/SA 完整 2×2（含 CA×SA×）。')
     print('=' * 76)
 
     # ── 保存 CSV ─────────────────────────────────────────────────────────
