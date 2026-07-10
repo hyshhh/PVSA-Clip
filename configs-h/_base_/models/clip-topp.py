@@ -26,14 +26,18 @@ if prompt_dataset not in prompt_category_orders:
         f'prompt_dataset must be one of {tuple(prompt_category_orders)}')
 prompt_category_order = globals().get(
     'prompt_category_order', prompt_category_orders[prompt_dataset])
-clip_embed_dim = globals().get('clip_embed_dim', 512)
+head_clip_dim = globals().get('head_clip_dim', globals().get('clip_embed_dim', 512))
+backbone_text_dim = globals().get('backbone_text_dim', 512)
+backbone_route_text_mode = globals().get('backbone_route_text_mode', 'prompts')
+backbone_align_text_mode = globals().get('backbone_align_text_mode', 'prompts')
+clip_embed_dim = head_clip_dim
 
 clip_decode_head_v2 = dict(
     type='CLIPSegHeadV2',
     in_channels=[64, 128, 256, 512],
     in_index=[0, 1, 2, 3],
     channels=256,
-    embed_dim=clip_embed_dim,
+    embed_dim=head_clip_dim,
     visual_prompt_mode='class_activation',
     clip_logit_weight_init=0.3,
     text_delta_scale_init=0.2,
@@ -78,8 +82,9 @@ common_backbone = dict(
     pre_norm=True,
     auto_pad=True,
     use_ttrm=use_backbone_text_injection,
-    ttrm_stages=[0, 1, 2] if use_backbone_text_injection else [],
-    cross_attn_stages=[2, 3] if use_backbone_text_injection else [],
+    ttrm_stages=[1, 2] if use_backbone_text_injection else [],
+    cross_attn_stages=[3] if use_backbone_text_injection else [],
+    text_dim=backbone_text_dim,
     use_plain_attn_last_stage=True,
 )
 
@@ -112,10 +117,12 @@ model = dict(
     type='CLIPEncoderDecoder',
     pretrained=None,
     use_backbone_text_injection=use_backbone_text_injection,
+    backbone_route_text_mode=backbone_route_text_mode,
+    backbone_align_text_mode=backbone_align_text_mode,
     backbone=backbone,
     decode_head=clip_decode_head_v2 if use_clip_decode_head else seg_decode_head,
     text_encoder=dict(
-        embed_dim=clip_embed_dim,
+        embed_dim=head_clip_dim,
         num_categories=3,
         prompts_per_category=10,
         prompt_bank_path='tools/prompt_bank_water.pt',
@@ -123,8 +130,19 @@ model = dict(
         use_reprta=True,                  # 是否启用 RepRTA 文本原型精炼
         reprta_ffn_type='swiglu',         # 'swiglu'(门控) | 'gelu'(普通 FFN)
         reprta_zero_init=True),           # w3 是否零初始化（保护 CLIP 原型）
+    backbone_text_encoder=(
+        dict(
+            embed_dim=backbone_text_dim,
+            num_categories=3,
+            prompts_per_category=10,
+            prompt_bank_path='tools/prompt_bank_water.pt',
+            prompt_category_order=prompt_category_order,
+            use_reprta=True,
+            reprta_ffn_type='swiglu',
+            reprta_zero_init=True)
+        if use_backbone_text_injection else None),
     text_refiner=(
-        dict(in_dim=clip_embed_dim, hidden_mult=4)
+        dict(in_dim=backbone_text_dim, hidden_mult=4)
         if use_backbone_text_injection else None),
     train_cfg=dict(),
     test_cfg=dict(mode='whole')

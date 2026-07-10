@@ -72,6 +72,7 @@ class Block(nn.Module):
                  topp_flash_debug=False,
                  use_route_mask=False,
                  use_ttrm=False,
+                 text_dim=512,
                  soft_kv_weight=0.5,
                  route_pooling='avg',
                  use_plain_attn=False,
@@ -103,6 +104,7 @@ class Block(nn.Module):
                                     topp_flash_debug=topp_flash_debug,
                                     use_route_mask=use_route_mask,
                                     use_ttrm=use_ttrm,
+                                    text_dim=text_dim,
                                     soft_kv_weight=soft_kv_weight,
                                     route_pooling=route_pooling)
             self._use_plain_attn = False
@@ -336,6 +338,7 @@ class VTFormer(nn.Module):
                  use_ttrm=False,
                  ttrm_stages=[0, 1, 2],
                  cross_attn_stages=[2, 3],
+                 text_dim=512,
                  remove_cnn_branch=False,
                  soft_kv_weight=0.5,
                  **kwargs):
@@ -489,11 +492,12 @@ class VTFormer(nn.Module):
                         topp_flash_debug=self.topp_flash_debug,
                         use_route_mask=self.use_route_mask,
                         use_ttrm=(use_ttrm and i in ttrm_stages),
+                        text_dim=text_dim,
                         soft_kv_weight=soft_kv_weight,
                         route_pooling=self.route_pooling,
                         use_plain_attn=(self.use_plain_attn_last_stage and i == 3),
                         cross_attn_module=TextCrossAttention(
-                            visual_dim=embed_dim[i], text_dim=512,
+                            visual_dim=embed_dim[i], text_dim=text_dim,
                             num_heads=nheads[i]) if use_ca else None
                         ) for j in range(depth[i])],
             )

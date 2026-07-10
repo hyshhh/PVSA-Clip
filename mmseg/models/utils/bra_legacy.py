@@ -18,6 +18,8 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
 
+from .backbone_text import split_backbone_text_inputs
+
 
 class TopkRouting(nn.Module):
     """
@@ -31,7 +33,7 @@ class TopkRouting(nn.Module):
         soft_routing: bool, wether make output value multiplied by routing weights
     """
     def __init__(self, qk_dim, topk=4, qk_scale=None, param_routing=False, diff_routing=False,
-                 use_ttrm=False):
+                 use_ttrm=False, text_dim=512):
         super().__init__()
         self.topk = topk
         self.qk_dim = qk_dim
@@ -45,7 +47,6 @@ class TopkRouting(nn.Module):
         # TTRM: Text-guided routing injection（与 top_p_bra.TopkRouting 同款注入）
         self.use_ttrm = use_ttrm
         if use_ttrm:
-            text_dim = 512  # CLIP embedding dimension
             self.ttrm_text_proj = nn.Linear(text_dim, qk_dim)
             self.ttrm_text_v_proj = nn.Linear(text_dim, qk_dim)
             self.ttrm_out_proj = nn.Linear(qk_dim, qk_dim)
@@ -56,10 +57,11 @@ class TopkRouting(nn.Module):
         """
         Args:
             q, k: (n, p^2, c) tensor
-            category_prototypes: (K, 512) text prototypes, optional TTRM injection
+            category_prototypes: 路由侧文本原型，支持 Tensor 或 dict(route_text=..., align_text=...)
         Return:
             r_weight, topk_index: (n, p^2, topk) tensor
         """
+        route_text, _ = split_backbone_text_inputs(category_prototypes)
         if not self.diff_routing:
             query, key = query.detach(), key.detach()
         query_hat, key_hat = self.emb(query), self.emb(key) # per-window pooling -> (n, p^2, c)
@@ -67,7 +69,7 @@ class TopkRouting(nn.Module):
         attn_logit = visual_attn_logit
 
         # TTRM: cross-attention with text before routing（含 eval frozen cache）
-        if self.use_ttrm and category_prototypes is not None:
+        if self.use_ttrm and route_text is not None:
             has_frozen_kv = (
                 hasattr(self, '_frozen_tc_k')
                 and self._frozen_tc_k is not None
@@ -77,7 +79,7 @@ class TopkRouting(nn.Module):
                 tc_k = self._frozen_tc_k
                 tc_v = self._frozen_tc_v
             else:
-                tc = self.ttrm_norm(category_prototypes)
+                tc = self.ttrm_norm(route_text)
                 tc_k = self.ttrm_text_proj(tc)
                 tc_v = self.ttrm_text_v_proj(tc)
                 if not self.training:
@@ -96,6 +98,14 @@ class TopkRouting(nn.Module):
         r_weight = self.routing_act(topk_attn_logit) # (n, p^2, topk)
 
         return r_weight, topk_index
+
+    @torch.no_grad()
+    def freeze_for_deployment(self, text_prototypes):
+        route_text, _ = split_backbone_text_inputs(text_prototypes)
+        if not self.use_ttrm or route_text is None:
+            return
+        self.register_buffer('_frozen_tc_k', self.ttrm_text_proj(self.ttrm_norm(route_text)))
+        self.register_buffer('_frozen_tc_v', self.ttrm_text_v_proj(self.ttrm_norm(route_text)))
         
 
 class KVGather(nn.Module):
@@ -158,7 +168,7 @@ class BiLevelRoutingAttention(nn.Module):
     def __init__(self, dim, num_heads=8, n_win=7, qk_dim=None, qk_scale=None,
                  kv_per_win=4, kv_downsample_ratio=4, kv_downsample_kernel=None, kv_downsample_mode='identity',
                  topk=4, param_attention="qkvo", param_routing=False, diff_routing=False, soft_routing=False, side_dwconv=3,
-                 auto_pad=False, use_ttrm=False):
+                 auto_pad=False, use_ttrm=False, text_dim=512):
         super().__init__()
         # local attention setting
         self.dim = dim
@@ -185,7 +195,8 @@ class BiLevelRoutingAttention(nn.Module):
                                   topk=self.topk,
                                   diff_routing=self.diff_routing,
                                   param_routing=self.param_routing,
-                                  use_ttrm=use_ttrm)
+                                  use_ttrm=use_ttrm,
+                                  text_dim=text_dim)
         if self.soft_routing: # soft routing, always diffrentiable (if no detach)
             mul_weight = 'soft'
         elif self.diff_routing: # hard differentiable routing

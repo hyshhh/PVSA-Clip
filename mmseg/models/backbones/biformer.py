@@ -32,7 +32,7 @@ class Block(nn.Module):
                  diff_routing=False, soft_routing=False, mlp_ratio=4,
                  mlp_dwconv=False, side_dwconv=5, before_attn_dwconv=3,
                  pre_norm=True, auto_pad=False,
-                 use_ttrm=False, cross_attn_module=None,
+                 use_ttrm=False, text_dim=512, cross_attn_module=None,
                  use_plain_attn=False):
         super().__init__()
         qk_dim = qk_dim or dim
@@ -57,7 +57,8 @@ class Block(nn.Module):
                 param_routing=param_routing, diff_routing=diff_routing,
                 soft_routing=soft_routing, side_dwconv=side_dwconv,
                 auto_pad=auto_pad,
-                use_ttrm=use_ttrm)
+                use_ttrm=use_ttrm,
+                text_dim=text_dim)
             self._attn_takes_prototypes = True
         elif topk == -1:
             self.attn = Attention(dim=dim)
@@ -153,6 +154,7 @@ class BiFormer(nn.Module):
                  # clip 消融配置会显式开启这些参数
                  use_ttrm=False, ttrm_stages=[],
                  cross_attn_stages=[],
+                 text_dim=512,
                  use_plain_attn_last_stage=False):
         super().__init__()
         self.embed_dim = embed_dim
@@ -216,9 +218,9 @@ class BiFormer(nn.Module):
                     side_dwconv=side_dwconv,
                     before_attn_dwconv=before_attn_dwconv,
                     pre_norm=pre_norm, auto_pad=auto_pad,
-                    use_ttrm=use_ttrm_stage,
+                    use_ttrm=use_ttrm_stage, text_dim=text_dim,
                     cross_attn_module=TextCrossAttention(
-                        visual_dim=embed_dim[i], text_dim=512,
+                        visual_dim=embed_dim[i], text_dim=text_dim,
                         num_heads=nheads[i]) if use_ca else None)
                   for j in range(depth[i])])
             self.stages.append(stage)

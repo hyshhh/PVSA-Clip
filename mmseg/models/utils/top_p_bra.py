@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
 
+from .backbone_text import split_backbone_text_inputs
 from .topp_flash_kernel import (can_run_topp_route_cuda,
                                 consume_topp_kernel_timing,
                                 is_topp_flash_available,
@@ -181,6 +182,7 @@ class TopkRouting(nn.Module):
                  attn_vis_config=None,
                  debug_route=False,
                  use_ttrm=False,
+                 text_dim=512,
                  soft_routing=False):
         super().__init__()
         self.route_flag = topk
@@ -200,7 +202,6 @@ class TopkRouting(nn.Module):
         # TTRM: Text-guided Top-P Routing Module
         self.use_ttrm = use_ttrm
         if use_ttrm:
-            text_dim = 512  # CLIP embedding dimension
             self.ttrm_text_proj = nn.Linear(text_dim, qk_dim)
             self.ttrm_text_v_proj = nn.Linear(text_dim, qk_dim)
             self.ttrm_out_proj = nn.Linear(qk_dim, qk_dim)
@@ -228,6 +229,7 @@ class TopkRouting(nn.Module):
 
     # top-p-v3_2025_12_25
     def forward(self, query: Tensor, key: Tensor, GA, category_prototypes=None):
+        route_text, _ = split_backbone_text_inputs(category_prototypes)
 
         if self.W == False or GA == None:
             if not self.diff_routing:
@@ -249,8 +251,8 @@ class TopkRouting(nn.Module):
             if has_frozen_kv:
                 tc_k = self._frozen_tc_k
                 tc_v = self._frozen_tc_v
-            elif self.use_ttrm and category_prototypes is not None:
-                tc = self.ttrm_norm(category_prototypes)
+            elif self.use_ttrm and route_text is not None:
+                tc = self.ttrm_norm(route_text)
                 tc_k = self.ttrm_text_proj(tc)
                 tc_v = self.ttrm_text_v_proj(tc)
                 # Auto-cache in eval mode (text prototypes are fixed)
@@ -458,9 +460,10 @@ class TopkRouting(nn.Module):
         After this call, forward() no longer needs text_prototypes for TTRM.
         Registered as buffers so they are saved/loaded with checkpoints.
         """
-        if not self.use_ttrm:
+        route_text, _ = split_backbone_text_inputs(text_prototypes)
+        if not self.use_ttrm or route_text is None:
             return
-        tc = self.ttrm_norm(text_prototypes)
+        tc = self.ttrm_norm(route_text)
         self.register_buffer('_frozen_tc_k', self.ttrm_text_proj(tc))
         self.register_buffer('_frozen_tc_v', self.ttrm_text_v_proj(tc))
 
@@ -532,6 +535,7 @@ class ToppAttention(nn.Module):
                  topp_flash_debug=False,
                  use_route_mask=False,
                  use_ttrm=False,
+                 text_dim=512,
                  soft_kv_weight=0.5,
                  route_pooling='avg'):
         super().__init__()
@@ -572,6 +576,7 @@ class ToppAttention(nn.Module):
                                   attn_vis_config=self.attn_vis_config,
                                   debug_route=debug_route,
                                   use_ttrm=use_ttrm,
+                                  text_dim=text_dim,
                                   soft_routing=soft_routing)
         if self.soft_routing:  # soft routing, always diffrentiable (if no detach)
             mul_weight = 'soft'

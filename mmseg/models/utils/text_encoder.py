@@ -172,35 +172,29 @@ class TextEncoder(nn.Module):
             prompts = prompts + noise
         return prompts
 
+    def _pool_category_prompts(self, prompts):
+        """对每个类别内的多条提示做注意力池化。"""
+        C, _, D = prompts.shape
+        q = self.attn_pool_query.expand(C, -1, -1)  # [C, 1, D]
+        attn = torch.bmm(q, prompts.transpose(-2, -1)) * (D ** -0.5)
+        attn = F.softmax(attn, dim=-1)
+        return torch.bmm(attn, prompts).squeeze(1)
+
+    def _encode_prompt_bank(self, apply_augmentation: bool):
+        prompts = self._project_prompt_embeddings(self.prompt_embeddings)
+        if apply_augmentation:
+            prompts = self._maybe_augment_prompts(prompts)
+        pooled = self._pool_category_prompts(prompts)
+        pooled = self._reprta_refine(pooled)
+        return F.normalize(pooled, dim=-1, p=2)
+
     def forward(self):
         """Forward pass to produce category prototypes.
 
         Returns:
             category_prototypes: [num_categories, embed_dim]
         """
-        prompts = self._project_prompt_embeddings(self.prompt_embeddings)
-        C, K, D = prompts.shape
-
-        prompts = self._maybe_augment_prompts(prompts)
-
-        # Attention pooling across prompts within each category
-        q = self.attn_pool_query.expand(C, -1, -1)  # [C, 1, D]
-        k = v = prompts                              # [C, K', D]
-
-        # Attention: [C, 1, K']
-        attn = torch.bmm(q, k.transpose(-2, -1)) * (D ** -0.5)
-        attn = F.softmax(attn, dim=-1)
-
-        # Weighted aggregation: [C, 1, D] -> [C, D]
-        pooled = torch.bmm(attn, v).squeeze(1)
-
-        # RepRTA refinement (FFN + residual), skipped after fuse() or when disabled
-        pooled = self._reprta_refine(pooled)
-
-        # L2 normalize
-        category_prototypes = F.normalize(pooled, dim=-1, p=2)
-
-        return category_prototypes
+        return self._encode_prompt_bank(apply_augmentation=True)
 
     def prompt_bank_tensor(self):
         """Return the raw frozen CLIP prompt embeddings for backbone injection.
@@ -211,6 +205,14 @@ class TextEncoder(nn.Module):
                 at runtime. backbone injects reshape(-1, D) = [C*K, D] of it.
         """
         return self._project_prompt_embeddings(self.prompt_embeddings)
+
+    def backbone_prototype_tensor(self):
+        """返回骨干注入使用的稳定类别原型。
+
+        与 ``forward`` 相比，这条路径显式关闭训练期提示采样与噪声扰动，
+        只保留提示池化 + RepRTA 精炼，因此适合做骨干侧的稳定文本注入。
+        """
+        return self._encode_prompt_bank(apply_augmentation=False)
 
     def adapt_with_visual_prompt(self, visual_prompt, delta_scale=0.1):
         """Use per-class visual prompts to lightly adapt text prototypes.
