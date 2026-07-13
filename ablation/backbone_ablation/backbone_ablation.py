@@ -493,6 +493,7 @@ def build_model_override_lines(settings, include_data_preprocessor=True):
         text_refiner = settings['text_refiner']
         model_lines.extend([
             '    backbone_text_encoder=dict(',
+            '        _delete_=True,',
             f"        embed_dim={backbone_text_encoder['embed_dim']!r},",
             f"        num_categories={backbone_text_encoder['num_categories']!r},",
             f"        prompts_per_category={backbone_text_encoder['prompts_per_category']!r},",
@@ -508,6 +509,7 @@ def build_model_override_lines(settings, include_data_preprocessor=True):
         else:
             model_lines.extend([
                 '    text_refiner=dict(',
+                '        _delete_=True,',
                 f"        in_dim={text_refiner['in_dim']!r},",
                 f"        hidden_mult={text_refiner['hidden_mult']!r},",
                 '    ),',
