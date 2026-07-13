@@ -445,35 +445,75 @@ def get_variant_runtime_settings(variant_name, prompt_dataset='kaka',
     return settings
 
 
-def build_cfg_options(variant_name, prompt_dataset='kaka',
-                      remap_backbone=None):
-    settings = get_variant_runtime_settings(
-        variant_name, prompt_dataset, remap_backbone)
-    cfg_list = [
-        f"head_clip_dim={settings['head_clip_dim']}" ,
-        f"clip_embed_dim={settings['head_clip_dim']}" ,
-        f"backbone_text_dim={settings['backbone_text_dim']}" ,
-        f"model.use_backbone_text_injection={settings['use_backbone_text_injection']!r}" ,
-        f"model.backbone_route_text_mode={settings['backbone_route_text_mode']!r}" ,
-        f"model.backbone_align_text_mode={settings['backbone_align_text_mode']!r}" ,
-        f"model.text_encoder.prompt_category_order={settings['prompt_order']!r}" ,
-        f"model.backbone.use_ttrm={settings['use_ttrm']!r}" ,
-        f"model.backbone.ttrm_stages={settings['ttrm_stages']!r}" ,
-        f"model.backbone.cross_attn_stages={settings['cross_attn_stages']!r}" ,
-        f"model.backbone.text_dim={settings['backbone_text_dim']}" ,
+def build_runtime_setting_lines(settings):
+    """将维度配置写入派生配置，避免在命令行中传递嵌套字典。"""
+    return [
+        f"head_clip_dim = {settings['head_clip_dim']!r}",
+        f"clip_embed_dim = {settings['head_clip_dim']!r}",
+        f"backbone_text_dim = {settings['backbone_text_dim']!r}",
     ]
 
-    backbone_text_encoder = settings['backbone_text_encoder']
-    text_refiner = settings['text_refiner']
-    if backbone_text_encoder is None:
-        cfg_list.append('model.backbone_text_encoder=None')
+
+def build_model_override_lines(settings, include_data_preprocessor=True):
+    """生成模型覆盖项。
+
+    mmengine 的 ``--cfg-options`` 无法稳定解析带逗号的嵌套字典。
+    因此所有消融配置直接写入每个变体独立的派生配置文件。
+    """
+    model_lines = ['model = dict(']
+    if include_data_preprocessor:
+        model_lines.append('    data_preprocessor=data_preprocessor,')
+    model_lines.extend([
+        '    test_cfg=dict(mode="whole"),',
+        f"    use_backbone_text_injection={settings['use_backbone_text_injection']!r},",
+        f"    backbone_route_text_mode={settings['backbone_route_text_mode']!r},",
+        f"    backbone_align_text_mode={settings['backbone_align_text_mode']!r},",
+        '    decode_head=dict(',
+        f"        embed_dim={settings['head_clip_dim']!r},",
+        '    ),',
+        '    text_encoder=dict(',
+        f"        embed_dim={settings['head_clip_dim']!r},",
+        f"        prompt_category_order={settings['prompt_order']!r},",
+        '    ),',
+        '    backbone=dict(',
+        f"        use_ttrm={settings['use_ttrm']!r},",
+        f"        ttrm_stages={settings['ttrm_stages']!r},",
+        f"        cross_attn_stages={settings['cross_attn_stages']!r},",
+        f"        text_dim={settings['backbone_text_dim']!r},",
+        '    ),',
+    ])
+
+    if settings['backbone_text_encoder'] is None:
+        model_lines.extend([
+            '    backbone_text_encoder=None,',
+            '    text_refiner=None,',
+        ])
     else:
-        cfg_list.append(f'model.backbone_text_encoder={backbone_text_encoder!r}')
-    if text_refiner is None:
-        cfg_list.append('model.text_refiner=None')
-    else:
-        cfg_list.append(f'model.text_refiner={text_refiner!r}')
-    return cfg_list
+        backbone_text_encoder = settings['backbone_text_encoder']
+        text_refiner = settings['text_refiner']
+        model_lines.extend([
+            '    backbone_text_encoder=dict(',
+            f"        embed_dim={backbone_text_encoder['embed_dim']!r},",
+            f"        num_categories={backbone_text_encoder['num_categories']!r},",
+            f"        prompts_per_category={backbone_text_encoder['prompts_per_category']!r},",
+            f"        prompt_bank_path={backbone_text_encoder['prompt_bank_path']!r},",
+            f"        prompt_category_order={backbone_text_encoder['prompt_category_order']!r},",
+            f"        use_reprta={backbone_text_encoder['use_reprta']!r},",
+            f"        reprta_ffn_type={backbone_text_encoder['reprta_ffn_type']!r},",
+            f"        reprta_zero_init={backbone_text_encoder['reprta_zero_init']!r},",
+            '    ),',
+        ])
+        if text_refiner is None:
+            model_lines.append('    text_refiner=None,')
+        else:
+            model_lines.extend([
+                '    text_refiner=dict(',
+                f"        in_dim={text_refiner['in_dim']!r},",
+                f"        hidden_mult={text_refiner['hidden_mult']!r},",
+                '    ),',
+            ])
+    model_lines.append(')')
+    return model_lines
 
 
 def resolve_dataset_config(repo_root: Path, candidates):
@@ -519,7 +559,8 @@ def relpath_for_config(path: Path, start: Path):
 
 
 def make_train_config(repo_root: Path, work_dir_root: Path,
-                      base_config: str, train_dataset: str):
+                      base_config: str, train_dataset: str,
+                      variant_name: str, settings: dict):
     """Return a config path whose dataset matches --train-dataset."""
     base_path = (repo_root / base_config).resolve()
     dataset_config, dataset_path = resolve_dataset_config(
@@ -528,16 +569,16 @@ def make_train_config(repo_root: Path, work_dir_root: Path,
         candidates = TRAIN_DATASETS[train_dataset]['dataset_candidates']
         raise FileNotFoundError(
             f'Missing dataset config for {train_dataset}: {candidates}')
-    if train_dataset == 'kaka':
-        return base_path
-
     train_config_root = (
         get_dataset_root(work_dir_root, train_dataset) / '_train_configs')
     train_config_root.mkdir(parents=True, exist_ok=True)
     train_config_path = train_config_root / (
-        f'{Path(base_config).stem}__{train_dataset}.py')
+        f'{Path(base_config).stem}__{train_dataset}__'
+        f'{get_variant_display_name(variant_name)}.py')
     base_rel = relpath_for_config(base_path, train_config_path.parent)
     dataset_abs = dataset_path.as_posix()
+    runtime_lines = build_runtime_setting_lines(settings)
+    model_lines = build_model_override_lines(settings)
 
     text = f'''# Auto-generated by ablation/backbone_ablation/backbone_ablation.py.
 _base_ = [
@@ -573,9 +614,8 @@ val_evaluator = dict(
     classwise=True)
 test_evaluator = val_evaluator
 
-model = dict(
-    data_preprocessor=data_preprocessor,
-    test_cfg=dict(mode='whole'))
+{chr(10).join(runtime_lines)}
+{chr(10).join(model_lines)}
 '''
     train_config_path.write_text(text, encoding='utf-8')
     return train_config_path
@@ -592,60 +632,8 @@ def write_eval_config(eval_config_path: Path, repo_root: Path,
     settings = get_variant_runtime_settings(
         variant_name, prompt_dataset, remap_backbone)
 
-    model_lines = [
-        'model = dict(',
-        '    data_preprocessor=data_preprocessor,',
-        '    test_cfg=dict(mode="whole"),',
-        f"    use_backbone_text_injection={settings['use_backbone_text_injection']!r}," ,
-        f"    backbone_route_text_mode={settings['backbone_route_text_mode']!r}," ,
-        f"    backbone_align_text_mode={settings['backbone_align_text_mode']!r}," ,
-        '    text_encoder=dict(',
-        f"        prompt_category_order={settings['prompt_order']!r}," ,
-        '    ),',
-        '    backbone=dict(',
-        f"        use_ttrm={settings['use_ttrm']!r}," ,
-        f"        ttrm_stages={settings['ttrm_stages']!r}," ,
-        f"        cross_attn_stages={settings['cross_attn_stages']!r}," ,
-        '        text_dim=backbone_text_dim,',
-        '    ),',
-    ]
-
-    if settings['backbone_text_encoder'] is None:
-        model_lines.extend([
-            '    backbone_text_encoder=None,',
-            '    text_refiner=None,',
-        ])
-    else:
-        backbone_text_encoder = settings['backbone_text_encoder']
-        text_refiner = settings['text_refiner']
-        model_lines.extend([
-            '    backbone_text_encoder=dict(',
-            '        embed_dim=backbone_text_dim,',
-            f"        num_categories={backbone_text_encoder['num_categories']!r}," ,
-            f"        prompts_per_category={backbone_text_encoder['prompts_per_category']!r}," ,
-            f"        prompt_bank_path={backbone_text_encoder['prompt_bank_path']!r}," ,
-            f"        prompt_category_order={backbone_text_encoder['prompt_category_order']!r}," ,
-            f"        use_reprta={backbone_text_encoder['use_reprta']!r}," ,
-            f"        reprta_ffn_type={backbone_text_encoder['reprta_ffn_type']!r}," ,
-            f"        reprta_zero_init={backbone_text_encoder['reprta_zero_init']!r}," ,
-            '    ),',
-        ])
-        if text_refiner is None:
-            model_lines.append('    text_refiner=None,')
-        else:
-            model_lines.extend([
-                '    text_refiner=dict(',
-                '        in_dim=backbone_text_dim,',
-                f"        hidden_mult={text_refiner['hidden_mult']!r}," ,
-                '    ),',
-            ])
-    model_lines.append(')')
-
-    extra_lines = [
-        f"head_clip_dim = {settings['head_clip_dim']!r}" ,
-        f"clip_embed_dim = {settings['head_clip_dim']!r}" ,
-        f"backbone_text_dim = {settings['backbone_text_dim']!r}" ,
-    ]
+    model_lines = build_model_override_lines(settings)
+    extra_lines = build_runtime_setting_lines(settings)
 
     split_lines = []
     if split == 'val':
@@ -966,10 +954,11 @@ def run_training_for_dataset(args, repo_root: Path, work_dir_root: Path,
         variant_spec = get_effective_variant_spec(
             variant_name, args.remap_backbone)
         base_config = variant_spec['base_config']
-        config_path = make_train_config(
-            repo_root, work_dir_root, base_config, train_dataset)
-        cfg_list = build_cfg_options(
+        settings = get_variant_runtime_settings(
             variant_name, prompt_dataset, args.remap_backbone)
+        config_path = make_train_config(
+            repo_root, work_dir_root, base_config, train_dataset,
+            variant_name, settings)
 
         work_dir = get_work_dir(work_dir_root, variant_name, train_dataset)
         best_existing = parse_best_miou(work_dir)
@@ -998,9 +987,8 @@ def run_training_for_dataset(args, repo_root: Path, work_dir_root: Path,
             '--work-dir',
             str(work_dir),
         ]
-        all_cfg_options = [*cfg_list, *args.extra_cfg_options]
-        if all_cfg_options:
-            command.extend(['--cfg-options', *all_cfg_options])
+        if args.extra_cfg_options:
+            command.extend(['--cfg-options', *args.extra_cfg_options])
 
         print(' '.join(command))
         if args.dry_run:
